@@ -74,3 +74,6 @@ export { EngineRegistry, DEFAULT_TUNING, tuningFromEnvironment } from './registr
 export type { ProviderRuntime, RegistryOptions, RegistryTuning } from './registry.ts'
 export { ModelRouter, shouldFallBack } from './router.ts'
 export type { AttemptInfo, CallOptions, PlannedRoute, RouteRequest, RoutePlan, RouteSource, RouterOptions } from './router.ts'
+export { attributeUsage, roleModel } from './attribution.ts'
+export type { ModelAttribution, RoleModel } from './attribution.ts'
+export type { ModelPin } from './harness/runtime.ts'

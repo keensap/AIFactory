@@ -63,3 +63,32 @@ test('the global target round-trips through settings', { skip }, async () => {
     await store.close()
   }
 })
+
+test('rediscovery keeps operator-set prices, drops vanished models and adds new ones unpriced', { skip }, async () => {
+  const catalog = new PostgresModelCatalog(url!)
+  const entry = (name: string, window = 1000, price: Record<string, number> = {}) => ({
+    model: name, displayName: null, contextWindow: window, maxOutput: null, capabilities: defaultCapabilities(), price,
+  })
+  try {
+    await catalog.migrate()
+    await catalog.replaceModels('llamacpp', [entry('keep'), entry('vanish')])
+    await catalog.setPrice('llamacpp', 'keep', { input: 1, output: 2 })
+    await catalog.setPrice('llamacpp', 'vanish', { input: 9 })
+
+    const after = await catalog.replaceModels('llamacpp', [entry('keep', 4096), entry('fresh')])
+    const by = (name: string) => after.find((model) => model.model === name)
+    assert.deepEqual(by('keep')?.price, { input: 1, output: 2 }, 'the price survives a refresh')
+    assert.equal(by('keep')?.contextWindow, 4096, 'while the discovered facts are updated')
+    assert.deepEqual(by('fresh')?.price, {}, 'a new model starts unpriced')
+    assert.equal(by('vanish'), undefined, 'a model that disappeared is removed')
+
+    // A price supplied by discovery itself wins over the stored one.
+    const supplied = await catalog.replaceModels('llamacpp', [entry('keep', 4096, { input: 5 })])
+    assert.deepEqual(supplied.find((model) => model.model === 'keep')?.price, { input: 5 })
+
+    // An empty discovery result clears the provider's catalogue.
+    assert.deepEqual(await catalog.replaceModels('llamacpp', []), [])
+  } finally {
+    await catalog.close()
+  }
+})

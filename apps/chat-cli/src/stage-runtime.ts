@@ -11,6 +11,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { access, stat } from 'node:fs/promises'
 import type { DshHarness } from './harness.ts'
 import { StageEventSink } from './stage-event-sink.ts'
+import { attributeUsage, roleModel, type ModelPin } from './models/index.ts'
 import { addLogContext, noopLogger, runWithLogContext, type Logger } from './logging/index.ts'
 import { noopProvider, type TraceRecorder, type TraceSpan } from './observability/index.ts'
 import type { Project, ProjectService } from './projects.ts'
@@ -50,6 +51,13 @@ export interface StageRuntimeDeps {
   indexDocument?: (project: Project, document: ProjectDocument) => Promise<unknown>
   logger?: Logger
   traces?: TraceRecorder
+  /**
+   * Freeze the model target for one run. Every role of the run uses the pin, so
+   * a settings change mid-run affects later runs only, and the pin supplies the
+   * provider/model/price recorded with each role's usage. Omit to use
+   * `harnessFactory` unchanged (no attribution).
+   */
+  pinModel?: () => ModelPin | undefined
 }
 
 export type StageRole = 'analyzer' | 'author' | 'reviewer'
@@ -111,8 +119,12 @@ export class PlanningStageRuntime {
   private readonly log: Logger
   private readonly traces: TraceRecorder
   private readonly activeRuns = new Set<string>()
+  private readonly pinModel?: () => ModelPin | undefined
+  /** Model pins of runs currently executing, by run id. */
+  private readonly pins = new Map<string, ModelPin>()
 
   constructor(deps: StageRuntimeDeps) {
+    if (deps.pinModel !== undefined) this.pinModel = deps.pinModel
     this.projects = deps.projects
     this.workspace = deps.workspace
     this.harnessFactory = deps.harnessFactory
@@ -224,6 +236,16 @@ export class PlanningStageRuntime {
     try {
       const project = await this.projects.get(run.projectId)
       await assertProjectRoot(project)
+      const pin = this.pinModel?.()
+      if (pin !== undefined) {
+        this.pins.set(run.id, pin)
+        this.log.info({
+          event: 'stage.run.model_pinned',
+          provider: pin.attribution?.provider ?? null,
+          model: pin.attribution?.model ?? null,
+          source: pin.attribution?.source ?? 'harness-default',
+        })
+      }
       runSpan = this.traces.startRun({
         projectId: project.id,
         projectName: project.name,
@@ -353,6 +375,8 @@ export class PlanningStageRuntime {
       }).catch(() => {})
       throw error
     } finally {
+      this.pins.get(run.id)?.release()
+      this.pins.delete(run.id)
       runSpan?.end()
       clearInterval(heartbeat)
       await this.workspace.releaseStageRun(run.id, this.workerId).catch((error: unknown) => {
@@ -421,7 +445,8 @@ export class PlanningStageRuntime {
       role,
       logger: this.log.child({ component: 'stage-event-sink' }),
     })
-    await sink.append('role_start', { role, timeoutMs: this.roleTimeoutMs })
+    const pin = this.pins.get(runId)
+    await sink.append('role_start', { role, timeoutMs: this.roleTimeoutMs, model: roleModel(pin?.attribution) })
     this.log.info({ event: 'stage.role.started', role, timeoutMs: this.roleTimeoutMs })
     try {
       if (this.runPrompt !== undefined) {
@@ -430,11 +455,15 @@ export class PlanningStageRuntime {
         this.traces.completeRole(roleSpan, text)
         return text
       }
-      const harness = this.harnessFactory(cwd, this.roleTimeoutMs)
+      const harness = pin !== undefined
+        ? pin.harness(cwd, this.roleTimeoutMs)
+        : this.harnessFactory(cwd, this.roleTimeoutMs)
       const result = await harness.run(prompt, {
         onEvent: (event) => {
           const phase = 'phase' in event && typeof event.phase === 'string' ? event.phase : null
-          void sink.append(event.type, event, phase)
+          // Usage events are stamped with the pinned model and the cost at the
+          // price in force when the run started.
+          void sink.append(event.type, attributeUsage(event, pin?.attribution ?? null), phase)
           this.traces.recordHarnessEvent(roleSpan, event)
         },
       })

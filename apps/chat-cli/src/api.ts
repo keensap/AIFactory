@@ -380,6 +380,8 @@ async function main(): Promise<void> {
         workspace: workspaceStore,
         harnessFactory,
         roleTimeoutMs: stageRoleTimeoutMs,
+        // Late-bound: the model runtime is created after the stage runtime.
+        pinModel: () => modelRuntime?.pin(),
         ...(semanticIndex !== undefined
           ? { indexDocument: (project: Project, document: ProjectDocument) => semanticIndex!.indexDocument(project, document) }
           : {}),

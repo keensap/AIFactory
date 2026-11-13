@@ -16,6 +16,8 @@ import { join } from 'node:path'
 import { DshHarness } from '../../harness.ts'
 import { noopLogger, type Logger } from '../../logging/index.ts'
 import { buildModelPatch, keysToScrub, type ModelPatch } from './patch.ts'
+import type { ModelAttribution } from '../attribution.ts'
+import type { ModelPrice, ModelRecord } from '../catalog/types.ts'
 import type { ModelService } from '../service.ts'
 import type { ResolvedTarget } from '../settings.ts'
 
@@ -48,6 +50,29 @@ export interface ModelRuntimeStatus {
 
 const KEEP_PATCH_FILES = 5
 
+/**
+ * A frozen view of the model target for one stage run.
+ *
+ * A run takes a pin when it starts and builds every role's harness from it, so
+ * changing the target (or its price) mid-run affects later runs only. The pin
+ * keeps its patch file alive until released, even if the target is changed or
+ * cleared meanwhile.
+ */
+export interface ModelPin {
+  /** Null when no target was configured and the harness profile default is used. */
+  readonly attribution: ModelAttribution | null
+  harness(cwd?: string, timeoutMs?: number): DshHarness
+  /** Idempotent. */
+  release(): void
+}
+
+function priceFor(models: readonly ModelRecord[], provider: string, model: string): ModelPrice | null {
+  const price = models.find((entry) => entry.provider === provider && entry.model === model)?.price
+  if (price === undefined) return null
+  const priced = [price.input, price.output, price.cacheRead, price.cacheWrite].some((value) => typeof value === 'number')
+  return priced ? price : null
+}
+
 export class ModelRuntime {
   private readonly service: ModelService
   private readonly command: string
@@ -66,6 +91,9 @@ export class ModelRuntime {
   private lastError: string | null = null
   private resolved: ResolvedTarget | null = null
   private patch: ModelPatch | null = null
+  private attribution: ModelAttribution | null = null
+  /** Patch files held by in-flight runs; never pruned while leased. */
+  private readonly leases = new Map<string, number>()
 
   constructor(options: ModelRuntimeOptions) {
     this.service = options.service
@@ -101,6 +129,7 @@ export class ModelRuntime {
       this.warnings = [...resolved.warnings]
       if (resolved.target === null) {
         await this.removePatch()
+        this.attribution = null
         this.lastError = null
         return this.status()
       }
@@ -110,6 +139,12 @@ export class ModelRuntime {
       this.patch = patch
       this.requiredEnv = patch.requiredEnv
       this.patchPath = path
+      this.attribution = {
+        provider: patch.provider,
+        model: patch.model,
+        source: resolved.source,
+        price: priceFor(models, patch.provider, patch.model),
+      }
       this.lastError = null
       if (this.validate) {
         const problem = await this.validatePatch(path)
@@ -134,9 +169,7 @@ export class ModelRuntime {
     }
   }
 
-  /** Harness for one run, carrying the current patch and a minimised environment. */
-  harness(cwd?: string, timeoutMs?: number): DshHarness {
-    const scrub = keysToScrub(this.env, this.requiredEnv)
+  private buildHarness(patchPath: string | null, scrub: string[], cwd?: string, timeoutMs?: number): DshHarness {
     return new DshHarness({
       command: this.command,
       ...(this.commandArgs.length > 0 ? { commandArgs: this.commandArgs } : {}),
@@ -144,9 +177,41 @@ export class ModelRuntime {
       ...(cwd !== undefined ? { cwd } : {}),
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(this.permissionMode !== undefined ? { permissionMode: this.permissionMode } : {}),
-      ...(this.patchPath !== null ? { patches: [this.patchPath] } : {}),
+      ...(patchPath !== null ? { patches: [patchPath] } : {}),
       ...(scrub.length > 0 ? { envDelete: scrub } : {}),
     })
+  }
+
+  /** Harness carrying the *current* patch (chat, briefings: single short calls). */
+  harness(cwd?: string, timeoutMs?: number): DshHarness {
+    return this.buildHarness(this.patchPath, keysToScrub(this.env, this.requiredEnv), cwd, timeoutMs)
+  }
+
+  /** Freeze the current target for one stage run. */
+  pin(): ModelPin {
+    const patchPath = this.patchPath
+    const attribution = this.attribution === null ? null : { ...this.attribution }
+    const scrub = keysToScrub(this.env, this.requiredEnv)
+    if (patchPath !== null) this.leases.set(patchPath, (this.leases.get(patchPath) ?? 0) + 1)
+    let released = false
+    return {
+      attribution,
+      harness: (cwd, timeoutMs) => this.buildHarness(patchPath, scrub, cwd, timeoutMs),
+      release: () => {
+        if (released) return
+        released = true
+        if (patchPath === null) return
+        const remaining = (this.leases.get(patchPath) ?? 1) - 1
+        if (remaining <= 0) this.leases.delete(patchPath)
+        else this.leases.set(patchPath, remaining)
+        void this.prune().catch(() => {})
+      },
+    }
+  }
+
+  /** Number of patch files currently held by running stage runs (diagnostics). */
+  leasedPatches(): number {
+    return this.leases.size
   }
 
   /** The patch currently applied (tests and diagnostics). */
@@ -176,16 +241,19 @@ export class ModelRuntime {
     this.patchPath = null
     this.patch = null
     this.requiredEnv = []
-    if (path !== null) await unlink(path).catch(() => {})
+    // A running stage run may still need this file; prune() removes it after release.
+    if (path !== null && !this.leases.has(path)) await unlink(path).catch(() => {})
   }
 
-  /** Keep the directory small; oldest patch files are removed. */
+  /** Keep the directory small; oldest patch files are removed, leased ones never. */
   private async prune(): Promise<void> {
     const names = (await readdir(this.patchDir).catch(() => [] as string[]))
       .filter((name) => name.startsWith('model-target-') && name.endsWith('.json'))
       .sort()
     for (const name of names.slice(0, Math.max(0, names.length - KEEP_PATCH_FILES))) {
-      await unlink(join(this.patchDir, name)).catch(() => {})
+      const path = join(this.patchDir, name)
+      if (this.leases.has(path) || path === this.patchPath) continue
+      await unlink(path).catch(() => {})
     }
   }
 

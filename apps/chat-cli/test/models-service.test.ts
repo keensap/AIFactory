@@ -182,3 +182,25 @@ test('AIFACTORY_<ID>_BASE_URL reaches views and calls', async () => {
   await service.test({})
   assert.equal(calls[0]?.url, 'http://10.1.2.3:9000/v1/chat/completions')
 })
+
+test('discovery through the service keeps prices set earlier', async () => {
+  const catalog = new MemoryCatalog(
+    [provider('llamacpp', { kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:8080/v1', local: true })],
+    [model('llamacpp', 'qwen3-8b', 32_768, { input: 0, output: 0 })],
+  )
+  const { fetch } = recordingFetch(() => jsonResponse({ data: [{ id: 'qwen3-8b', context_length: 65_536 }, { id: 'llama-3.1-8b' }] }))
+  const service = new ModelService({ catalog, store: new MemorySettings(null), env: {}, fetch })
+  const result = await service.discover('llamacpp')
+  const qwen = result.models.find((entry) => entry.model === 'qwen3-8b')!
+  assert.deepEqual(qwen.price, { input: 0, output: 0 }, 'the free price survives rediscovery')
+  assert.equal(qwen.contextWindow, 65_536)
+  assert.deepEqual(result.models.find((entry) => entry.model === 'llama-3.1-8b')?.price, {})
+})
+
+test('discovery and price changes refresh the harness runtime', async () => {
+  const { service } = build()
+  let refreshes = 0
+  service.setTargetChangeHandler(() => { refreshes += 1 })
+  await service.setPrice('openai', 'gpt-4o', { input: 1 })
+  assert.equal(refreshes, 1, 'new runs must pin the new price')
+}) 

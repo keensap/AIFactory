@@ -240,6 +240,7 @@ async function route(
         modelHealth: 'POST /api/models/providers/:id/health',
         modelTarget: 'GET/PATCH/DELETE /api/settings/models',
         modelTest: 'POST /api/models/test',
+        modelUsage: 'GET /api/models/usage?days=&from=&to=',
         modelPrice: 'PUT /api/models/price',
         modelRuntime: 'GET /api/admin/models',
       },
@@ -259,6 +260,13 @@ async function route(
       harness: options.harnessInfo ?? null,
       database: options.projects === undefined ? 'disabled' : 'postgres',
     })
+    return
+  }
+
+  // Cross-project spend report: admin only, and independent of the model catalogue.
+  if (resource === 'models' && rest.length === 1 && rest[0] === 'usage' && request.method === 'GET') {
+    requireAdmin(request, options)
+    sendJson(response, 200, { usage: await requireWorkspace(options).modelUsage(statsRangeFromQuery(url.searchParams)) })
     return
   }
 
@@ -829,20 +837,10 @@ async function handleProjects(
     await projects.get(id)
     const workspace = requireWorkspace(options)
     const q = url.searchParams
-    const daysRaw = q.get('days')
-    let days: number | undefined
-    if (daysRaw !== null) {
-      days = Number.parseInt(daysRaw, 10)
-      if (!Number.isSafeInteger(days) || days < 1 || days > 365) {
-        throw new HttpError(400, 'days must be an integer between 1 and 365', 'INVALID_DAYS')
-      }
-    }
     sendJson(response, 200, {
       stats: await workspace.projectStats({
         projectId: id,
-        ...(q.get('from') !== null ? { from: q.get('from')! } : {}),
-        ...(q.get('to') !== null ? { to: q.get('to')! } : {}),
-        ...(days !== undefined ? { days } : {}),
+        ...statsRangeFromQuery(q),
         ...(q.get('stage') !== null ? { stage: q.get('stage')! } : {}),
         ...(q.get('role') !== null ? { role: q.get('role')! } : {}),
       }),
@@ -1471,6 +1469,24 @@ class HttpError extends Error {
     this.name = 'HttpError'
     this.status = status
     this.code = code
+  }
+}
+
+/** `days`, `from` and `to` query parameters shared by the stats endpoints. */
+function statsRangeFromQuery(q: URLSearchParams): { from?: string; to?: string; days?: number } {
+  const daysRaw = q.get('days')
+  let days: number | undefined
+  if (daysRaw !== null) {
+    // Digits only: parseInt would quietly accept "1.5" as 1 and "7abc" as 7.
+    days = /^[0-9]{1,6}$/.test(daysRaw) ? Number.parseInt(daysRaw, 10) : Number.NaN
+    if (!Number.isSafeInteger(days) || days < 1 || days > 365) {
+      throw new HttpError(400, 'days must be an integer between 1 and 365', 'INVALID_DAYS')
+    }
+  }
+  return {
+    ...(q.get('from') !== null ? { from: q.get('from')! } : {}),
+    ...(q.get('to') !== null ? { to: q.get('to')! } : {}),
+    ...(days !== undefined ? { days } : {}),
   }
 }
 

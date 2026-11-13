@@ -1,126 +1,20 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import { ProjectService } from '../src/projects.ts'
 import { SettingsService } from '../src/settings.ts'
+import { DshHarness } from '../src/harness.ts'
+import type { ModelPin } from '../src/models/index.ts'
 import { PlanningStageRuntime, buildAnalyzerPrompt, buildContextPacket, cleanMarkdown, parseStageReview } from '../src/stage-runtime.ts'
 import type { ProjectWorkspaceSnapshot, ProjectDocument, StageReview, StageRun, StageRunDetail, StageRunEvent, StageRunEventInput } from '../src/workspace.ts'
 import type { PostgresProjectWorkspace } from '../src/workspace.ts'
+import { fakeWorkspace } from './support/fake-stage-workspace.ts'
 import { MemoryProjectStore } from './support/memory-project-store.ts'
 import { MemorySettingsStore } from './support/memory-settings-store.ts'
-
-function fakeWorkspace(): PostgresProjectWorkspace {
-  const runs = new Map<string, StageRun>()
-  const reviews: StageReview[] = []
-  const documents: ProjectDocument[] = []
-  const checklistUpdates: Array<{ key: string; status: unknown; evidence: string | null | undefined }> = []
-  const events: StageRunEvent[] = []
-
-  const snapshot = (): ProjectWorkspaceSnapshot => ({
-    currentStage: 'planning',
-    stages: [{ stage: 'planning', status: 'in_progress', startedAt: null, completedAt: null, notes: null }],
-    documents: [...documents],
-    checklist: [
-      { id: 'c1', stage: 'planning', key: 'business_idea', label: 'Business idea', required: true, status: 'open', evidenceDocumentId: null, completedAt: null },
-      { id: 'c2', stage: 'planning', key: 'stakeholder_goals', label: 'Stakeholder goals', required: true, status: 'open', evidenceDocumentId: null, completedAt: null },
-      { id: 'c3', stage: 'planning', key: 'telos_report', label: 'TELOS report', required: true, status: 'open', evidenceDocumentId: null, completedAt: null },
-      { id: 'c4', stage: 'planning', key: 'feasibility_decision', label: 'Decision', required: true, status: 'open', evidenceDocumentId: null, completedAt: null },
-    ],
-    nextActions: [],
-    progress: { completedStages: 0, totalStages: 8, completedRequiredItems: 0, totalRequiredItems: 4 },
-  })
-
-  const detail = (run: StageRun): StageRunDetail => ({
-    ...run,
-    reviews: reviews.filter((review) => review.stageRunId === run.id),
-    documents: documents.filter((document) => (document as ProjectDocument & { stageRunId?: string }).stageRunId === run.id),
-  })
-
-  const fake = {
-    async getSnapshot() { return snapshot() },
-    async getPriorStageSummaries() { return [] },
-    async appendStageRunEvent(input: StageRunEventInput) {
-      const event: StageRunEvent = {
-        id: String(events.length + 1),
-        projectId: input.projectId,
-        stageRunId: input.stageRunId,
-        role: input.role ?? null,
-        agentId: input.agentId ?? null,
-        type: input.type,
-        phase: input.phase ?? null,
-        level: input.level ?? 'info',
-        payload: input.payload,
-        createdAt: new Date().toISOString(),
-      }
-      events.push(event)
-      return event
-    },
-    async createStageRun(input: { projectId: string; stage: StageRun['stage']; inputText?: string | null; context: unknown; contextHash: string }) {
-      const now = new Date().toISOString()
-      const run: StageRun = {
-        id: randomUUID(), projectId: input.projectId, stage: input.stage, attempt: 1,
-        sessionId: null, status: 'pending', contextHash: input.contextHash,
-        context: input.context, inputText: input.inputText ?? null,
-        analysisMarkdown: null, draftMarkdown: null, summaryMarkdown: null,
-        startedAt: null, completedAt: null, lockedBy: null, leaseExpiresAt: null,
-        executionAttempts: 0, createdAt: now, updatedAt: now,
-      }
-      runs.set(run.id, run)
-      return run
-    },
-    async getStageRunDetail(runId: string) {
-      const run = runs.get(runId)
-      return run === undefined ? undefined : detail(run)
-    },
-    async getStageRun(runId: string) { return runs.get(runId) },
-    async claimStageRun(runId: string, workerId: string) {
-      const run = runs.get(runId)
-      if (run === undefined) return undefined
-      if (run.lockedBy !== null) return undefined
-      const next = { ...run, lockedBy: workerId, leaseExpiresAt: new Date(Date.now() + 120_000).toISOString(), executionAttempts: run.executionAttempts + 1 }
-      runs.set(runId, next)
-      return next
-    },
-    async heartbeatStageRun() { return true },
-    async releaseStageRun(runId: string) {
-      const run = runs.get(runId)
-      if (run !== undefined) runs.set(runId, { ...run, lockedBy: null, leaseExpiresAt: null })
-    },
-    async updateStageRun(runId: string, patch: Partial<StageRun>) {
-      const run = runs.get(runId)!
-      const next = { ...run, ...patch, updatedAt: new Date().toISOString() }
-      runs.set(runId, next)
-      return next
-    },
-    async addStageReview(input: { stageRunId: string; reviewerRole: string; decision: StageReview['decision']; findings: unknown[] }) {
-      const review: StageReview = { id: randomUUID(), ...input, createdAt: new Date().toISOString() }
-      reviews.push(review)
-      return review
-    },
-    async addDocument(input: { kind: string; title: string; stageRunId?: string | null }) {
-      const doc: ProjectDocument & { stageRunId?: string | null } = {
-        id: randomUUID(), projectId: 'p', stage: 'planning', kind: input.kind, title: input.title,
-        storagePath: '.aifactory/documents/planning/telos.md', mimeType: 'text/markdown',
-        sizeBytes: 10, sha256: 'abc', status: 'uploaded', version: 1,
-        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-        stageRunId: input.stageRunId ?? null,
-      }
-      documents.push(doc)
-      return doc
-    },
-    async updateDocumentStatus() { return documents[0]! },
-    async updateChecklistItem(_projectId: string, _stage: string, key: string, status: unknown, evidence?: string | null) {
-      checklistUpdates.push({ key, status, evidence })
-      return snapshot().checklist[0]!
-    },
-    checklistUpdates,
-    events,
-  }
-  return fake as unknown as PostgresProjectWorkspace
-}
 
 test('builds a planning context packet with prior outcomes and input', async () => {
   const root = mkdtempSync(join(tmpdir(), 'aifactory-stage-'))
@@ -182,6 +76,156 @@ test('runs analyzer, author and reviewer, then waits for a human decision', asyn
     const decided = await runtime.decide(started.id, { decision: 'go', note: 'Approved by sponsor' })
     assert.equal(decided.status, 'completed')
     assert.match(decided.summaryMarkdown ?? '', /Decision: \*\*go\*\*/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Model attribution and per-run pinning
+// ---------------------------------------------------------------------------
+
+const USAGE_SCRIPT = fileURLToPath(new URL('./support/usage-dsh.mjs', import.meta.url))
+
+function scriptHarness(cwd?: string, env: Record<string, string> = {}): DshHarness {
+  return new DshHarness({
+    command: process.execPath,
+    commandArgs: [USAGE_SCRIPT],
+    profile: 'headless',
+    ...(cwd !== undefined ? { cwd } : {}),
+    timeoutMs: 20_000,
+    env,
+  })
+}
+
+interface FakePin extends ModelPin { released: number }
+
+function fakePin(attribution: ModelPin['attribution'], env: Record<string, string> = {}): FakePin {
+  const pin: FakePin = {
+    attribution,
+    released: 0,
+    harness: (cwd) => scriptHarness(cwd, env),
+    release() { pin.released += 1 },
+  }
+  return pin
+}
+
+async function runWith(options: { pin?: ModelPin | undefined; harnessEnv?: Record<string, string> }) {
+  const root = mkdtempSync(join(tmpdir(), 'aifactory-attr-'))
+  const projects = new ProjectService(new MemoryProjectStore(), new SettingsService(new MemorySettingsStore()))
+  const project = await projects.create({ name: 'Portal', rootPath: root, organization: null, ownerEmail: null, status: 'active' })
+  const workspace = fakeWorkspace()
+  const runtime = new PlanningStageRuntime({
+    projects,
+    workspace,
+    harnessFactory: (cwd) => scriptHarness(cwd, options.harnessEnv),
+    ...(options.pin !== undefined ? { pinModel: () => options.pin } : {}),
+  })
+  const started = await runtime.start({ projectId: project.id, stage: 'planning', brief: 'Build a portal' })
+  return { runtime, workspace, started, root }
+}
+
+const events = (workspace: PostgresProjectWorkspace): StageRunEvent[] => (workspace as unknown as { events: StageRunEvent[] }).events
+
+test('role_start records the pinned model and usage events carry model and cost', async () => {
+  const pin = fakePin({ provider: 'anthropic', model: 'claude-sonnet-4-5', source: 'settings', price: { input: 3, output: 15 } })
+  const { runtime, workspace, started, root } = await runWith({ pin })
+  try {
+    await runtime.execute(started.id)
+    const starts = events(workspace).filter((event) => event.type === 'role_start')
+    assert.equal(starts.length, 3)
+    for (const event of starts) {
+      assert.deepEqual((event.payload as { model: unknown }).model, { provider: 'anthropic', model: 'claude-sonnet-4-5', source: 'settings' })
+    }
+    const usage = events(workspace).filter((event) => event.type === 'status' && (event.payload as { usage?: unknown }).usage !== undefined)
+    assert.equal(usage.length, 3, 'one step_end per role')
+    for (const event of usage) {
+      const payload = event.payload as { model: unknown; costUsd: number; usage: { inputTokens: number } }
+      assert.deepEqual(payload.model, { provider: 'anthropic', model: 'claude-sonnet-4-5' })
+      // 1000 * 3 + 500 * 15 = 10500 per million
+      assert.equal(payload.costUsd, 0.0105)
+      assert.equal(payload.usage.inputTokens, 1000, 'the original usage is preserved')
+    }
+    const other = events(workspace).filter((event) => event.type === 'text')
+    assert.ok(other.every((event) => !('model' in (event.payload as object))), 'only usage events are stamped')
+    assert.equal(pin.released, 1, 'the pin is released when the run ends')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a model without a price is attributed but has no cost (unknown, not free)', async () => {
+  const pin = fakePin({ provider: 'llamacpp', model: 'qwen3-8b', source: 'environment', price: null })
+  const { runtime, workspace, started, root } = await runWith({ pin })
+  try {
+    await runtime.execute(started.id)
+    const usage = events(workspace).filter((event) => event.type === 'status' && (event.payload as { usage?: unknown }).usage !== undefined)
+    for (const event of usage) {
+      const payload = event.payload as Record<string, unknown>
+      assert.deepEqual(payload.model, { provider: 'llamacpp', model: 'qwen3-8b' })
+      assert.equal('costUsd' in payload, false)
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a free local model (price 0) records a cost of 0', async () => {
+  const pin = fakePin({ provider: 'llamacpp', model: 'qwen3-8b', source: 'settings', price: { input: 0, output: 0 } })
+  const { runtime, workspace, started, root } = await runWith({ pin })
+  try {
+    await runtime.execute(started.id)
+    const usage = events(workspace).filter((event) => event.type === 'status' && (event.payload as { usage?: unknown }).usage !== undefined)
+    assert.ok(usage.every((event) => (event.payload as { costUsd: number }).costUsd === 0))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('without a pin the harness default runs and events stay unattributed', async () => {
+  const { runtime, workspace, started, root } = await runWith({})
+  try {
+    await runtime.execute(started.id)
+    const starts = events(workspace).filter((event) => event.type === 'role_start')
+    assert.ok(starts.every((event) => (event.payload as { model: unknown }).model === null))
+    const usage = events(workspace).filter((event) => event.type === 'status' && (event.payload as { usage?: unknown }).usage !== undefined)
+    assert.equal(usage.length, 3)
+    assert.ok(usage.every((event) => !('model' in (event.payload as object)) && !('costUsd' in (event.payload as object))))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('an unconfigured pin (null attribution) is recorded as the harness default', async () => {
+  const pin = fakePin(null)
+  const { runtime, workspace, started, root } = await runWith({ pin })
+  try {
+    await runtime.execute(started.id)
+    assert.ok(events(workspace).filter((event) => event.type === 'role_start').every((event) => (event.payload as { model: unknown }).model === null))
+    assert.equal(pin.released, 1)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('the pin is released even when a role fails', async () => {
+  const pin = fakePin({ provider: 'openai', model: 'gpt-4o', source: 'settings', price: { input: 1, output: 1 } }, { FAIL_ROLE: 'author' })
+  const { runtime, started, root } = await runWith({ pin })
+  try {
+    await assert.rejects(() => runtime.execute(started.id), /author failed/)
+    assert.equal(pin.released, 1)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('every role of a run uses the pinned harness, not the factory one', async () => {
+  const pin = fakePin({ provider: 'openai', model: 'gpt-4o', source: 'settings', price: null })
+  const { runtime, started, root } = await runWith({ pin, harnessEnv: { FAIL_ROLE: 'analyzer' } })
+  try {
+    // harnessFactory would fail the analyzer; the pin's harness does not.
+    const detail = await runtime.execute(started.id)
+    assert.equal(detail.status, 'awaiting_human')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

@@ -274,6 +274,8 @@ export class ModelService {
       ...(apiKey !== undefined ? { apiKey } : {}),
     })
     const models = await this.catalog.replaceModels(provider.id, discovered)
+    // The harness patch embeds context windows from the catalogue.
+    await this.notifyTargetChange()
     return { provider: provider.id, discovered: discovered.length, models }
   }
 
@@ -318,6 +320,8 @@ export class ModelService {
     if (updated === undefined) {
       throw new ModelSettingsError(404, 'MODEL_NOT_FOUND', `model "${model}" is not in the ${providerId} catalogue; run discovery first`)
     }
+    // New runs pin the price in force when they start.
+    await this.notifyTargetChange()
     return updated
   }
 

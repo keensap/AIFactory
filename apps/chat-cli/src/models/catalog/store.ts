@@ -120,6 +120,13 @@ export class PostgresModelCatalog implements ModelCatalog {
     return result.rows.map(mapModel)
   }
 
+  /**
+   * Sync a provider's catalogue with a discovery result.
+   *
+   * Models that are still present are updated in place and **keep their price**
+   * (discovery never reports one, and an operator-set price must survive a
+   * refresh); models that disappeared are removed; new ones are added unpriced.
+   */
   async replaceModels(
     provider: string,
     models: Array<Omit<ModelRecord, 'provider' | 'discoveredAt'>>,
@@ -127,12 +134,22 @@ export class PostgresModelCatalog implements ModelCatalog {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
-      await client.query('DELETE FROM model_catalog WHERE provider = $1', [provider])
+      await client.query(
+        'DELETE FROM model_catalog WHERE provider = $1 AND model <> ALL($2::text[])',
+        [provider, models.map((entry) => entry.model)],
+      )
       for (const model of models) {
         await client.query(
           `INSERT INTO model_catalog
              (provider, model, display_name, context_window, max_output, capabilities, price, discovered_at)
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, now())`,
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, now())
+           ON CONFLICT (provider, model) DO UPDATE SET
+             display_name = EXCLUDED.display_name,
+             context_window = EXCLUDED.context_window,
+             max_output = EXCLUDED.max_output,
+             capabilities = EXCLUDED.capabilities,
+             discovered_at = now(),
+             price = CASE WHEN EXCLUDED.price = '{}'::jsonb THEN model_catalog.price ELSE EXCLUDED.price END`,
           [
             provider,
             model.model,

@@ -674,7 +674,7 @@ One provider/model is active for the whole Factory. Every project and every stag
 |---|---|---|
 | `GET` | `/api/models/providers` | Configured providers, credential presence, model counts |
 | `GET` | `/api/models?provider=` | Static catalogue |
-| `POST` | `/api/models/providers/:id/discover` | Fetch the provider's models and replace its catalogue (admin) |
+| `POST` | `/api/models/providers/:id/discover` | Sync the provider's catalogue: models still listed keep their prices, vanished ones are removed (admin) |
 | `POST` | `/api/models/providers/:id/health` | Bounded reachability probe (admin) |
 | `GET` | `/api/settings/models` | Current target, its source and warnings |
 | `PATCH` | `/api/settings/models` | Validate and persist a target |
@@ -768,6 +768,50 @@ curl -X POST http://127.0.0.1:8787/api/models/test \
 Limits: `prompt` ≤ 2000 characters (default `Reply with the single word: ok`), `maxTokens` 1–256 (default 32), `timeoutMs` 1000–300000 (default 60000). `text` is truncated to 500 characters. `costUsd` is `null` when the model has no price (a free local model with price 0 reports `0`).
 
 `PUT /api/models/price` takes `{ "provider", "model", "input"?, "output"?, "cacheRead"?, "cacheWrite"? }` (numbers 0–100000). The model must already be in the catalogue (run discovery first). Cost is computed when a call is made and is not recomputed when prices change later.
+
+**Which model produced the tokens.** The harness reports usage without naming the model, so the stage runtime records it itself. When a stage run starts it takes a **pin** of the current target (provider, model, source and the price in force). Every role of that run uses the pin, so changing or clearing the target mid-run affects *later runs only*. Each role's `role_start` event carries `payload.model` (`{provider, model, source}`, or `null` when the harness default is used), and each usage `status` event is stamped with `payload.model` and `payload.costUsd`. Cost is therefore fixed at record time and never changes when prices change later. Events written before this existed have neither field and are reported as **unattributed**.
+
+**Cost semantics.** `costUsd: null` means *unknown* (the model has no price); `costUsd: 0` means *priced and free* (a local model with price 0). Cost objects state their coverage:
+
+```json
+{ "usd": 0.0225, "pricedTokens": 4500, "unpricedTokens": 0 }
+```
+
+`unpricedTokens > 0` means the figure is partial. `usd: null` means nothing in scope was priced.
+
+### Usage and cost in project stats
+
+`GET /api/projects/:id/stats` additionally returns `cost` and `byModel`, plus `costUsd` on every `byRole`, `byStage`, `daily` and `recentRuns` entry (`recentRuns[].models` lists the model(s) used):
+
+```json
+{ "stats": {
+    "cost": { "usd": 0.0225, "pricedTokens": 4500, "unpricedTokens": 0 },
+    "byModel": [
+      { "provider": "openai", "model": "gpt-4o", "tokens": { "input": 3000, "output": 1500, "total": 4500, "cacheRead": 0, "cacheWrite": 0 },
+        "calls": 3, "pricedCalls": 3, "costUsd": 0.0225, "unpricedTokens": 0, "runs": 1 },
+      { "provider": null, "model": null, "tokens": { "total": 63415 }, "calls": 3, "pricedCalls": 0, "costUsd": null, "unpricedTokens": 63415, "runs": 1 }
+    ] } }
+```
+
+An entry with `provider: null, model: null` is **unattributed** usage (recorded before attribution existed); it is never guessed. `calls` is the number of usage events.
+
+### Factory-wide usage report
+
+`GET /api/models/usage?days=30` (or `from=` / `to=`) — **admin only**, because it spans every project. `days` must be digits only, 1–365 (`1.5` and `7abc` are rejected). It reads stored events, so it works without the model catalogue and returns `503 WORKSPACE_NOT_CONFIGURED` only when there is no database.
+
+```json
+{ "usage": {
+    "from": "2026-10-14T00:00:00.000Z", "to": "2026-11-13T00:00:00.000Z",
+    "tokens": { "input": 4000, "output": 5000, "total": 9000, "cacheRead": 0, "cacheWrite": 0 },
+    "cost": { "usd": 0.0225, "pricedTokens": 9000, "unpricedTokens": 0 },
+    "byModel": [ { "provider": "openai", "model": "gpt-4o", "tokens": { "total": 4500 }, "calls": 3, "runs": 1, "pricedCalls": 3, "costUsd": 0.0225, "unpricedTokens": 0 } ],
+    "byProject": [ { "projectId": "…", "name": "Portal", "tokens": { "total": 4500 }, "calls": 3, "runs": 1, "costUsd": 0.0225, "unpricedTokens": 0 } ],
+    "daily": [ { "date": "2026-11-13", "tokens": { "total": 9000 }, "calls": 6, "costUsd": 0.0225, "unpricedTokens": 0 } ] } }
+```
+
+`byProject` is capped at 200 rows (largest first) and `name` is `null` for a deleted project. Days are UTC.
+
+**Direct-path calls are not in these numbers.** Only harness runs (stage roles) are recorded in the event log. Calls through the direct router (`POST /api/models/test`) are logged (`models.call`) but not stored as usage, because no production code path uses the router yet.
 
 **Token convention.** `inputTokens` excludes cached tokens, which are reported separately; `totalTokens = input + output + cacheRead + cacheWrite`.
 

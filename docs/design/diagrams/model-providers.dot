@@ -18,9 +18,17 @@ digraph providers {
   }
 
   subgraph cluster_harness {
-    label="Phase 2 — harness path (agent work, tools)"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
-    runtime [label="ModelRuntime\npatch · key scrubbing", fillcolor="#dcfce7", color="#16a34a"];
-    dsh [label="dsh --patch\nowns its agent loop & retries", fillcolor="#dcfce7", color="#16a34a"];
+    label="harness path — agent work, tools (Phase 2 + 4)"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
+    runtime [label="ModelRuntime\npatch files · key scrubbing\nrefresh on target / price / discovery", fillcolor="#dcfce7", color="#16a34a"];
+    pin [label="Run pin (per stage run)\nfrozen patch + provider/model\n+ price · patch leased until release", fillcolor="#bbf7d0", color="#15803d"];
+    dsh [label="dsh --patch (one per role)\nowns its agent loop & retries", fillcolor="#dcfce7", color="#16a34a"];
+  }
+
+  subgraph cluster_record {
+    label="durable record (Phase 4)"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,filled"; fillcolor="#fffbeb";
+    events [label="stage_run_events\nrole_start.model\nusage: model + costUsd\n(price at run start)", fillcolor="#fef3c7", color="#d97706"];
+    stats [label="GET /api/projects/:id/stats\ncost · byModel · per role/stage/day/run", fillcolor="#fef3c7", color="#d97706"];
+    report [label="GET /api/models/usage (admin)\nby model · project · day", fillcolor="#fef3c7", color="#d97706"];
   }
 
   subgraph cluster_direct {
@@ -39,12 +47,15 @@ digraph providers {
   }
 
   logs [label="Logs (metadata only)\nmodels.call · call_failed\ncall_skipped · retry", fillcolor="#f1f5f9", color="#64748b"];
-  stats [label="Phase 4\nstats by model · cost", fillcolor="#f8fafc", color="#94a3b8", style="rounded,dashed,filled"];
 
-  stage -> runtime; chat -> runtime;
-  runtime -> dsh;
+  stage -> pin [label="takes at run start"]; chat -> runtime [label="current patch"];
+  runtime -> pin [label="freeze"];
+  pin -> dsh;
   dsh -> cloud; dsh -> local;
   target -> runtime; registry -> runtime;
+  dsh -> events [label="usage per step", style=dashed];
+  pin -> events [label="stamps model + cost", style=dashed];
+  events -> stats; events -> report;
 
   test -> router;
   chat -> router [style=dashed, label="not wired yet"];
@@ -54,5 +65,5 @@ digraph providers {
   oai -> shared [style=dotted, arrowhead=none]; ant -> shared [style=dotted, arrowhead=none];
   oai -> cloud; oai -> local; ant -> cloud;
   router -> logs [style=dashed];
-  router -> stats [style=dashed, label="onAttempt"];
+  router -> events [style=dotted, label="not stored yet", fontcolor="#94a3b8", color="#94a3b8"];
 }

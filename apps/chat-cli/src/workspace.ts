@@ -12,7 +12,19 @@ import { basename, join, relative, resolve } from 'node:path'
 import { Pool } from 'pg'
 import type { Project } from './projects.ts'
 import { STAGE_DOCUMENT_REQUIREMENTS } from './telos.ts'
-import { buildProjectStats, type ProjectStats, type StatsRoleRow, type StatsRunRow, type StatsTokenRow } from './stats.ts'
+import {
+  buildFactoryUsage,
+  buildProjectStats,
+  type DayAggRow,
+  type FactoryUsage,
+  type ModelAggRow,
+  type ProjectAggRow,
+  type ProjectStats,
+  type StatsRoleRow,
+  type StatsRunRow,
+  type StatsTokenRow,
+  type UsageAggRow,
+} from './stats.ts'
 import {
   DOCUMENT_CHECKLIST_MAP,
   SDLC_STAGES,
@@ -1237,6 +1249,101 @@ ${message}`
     }
   }
 
+  /** Validate and resolve a stats time range (shared by project and factory reports). */
+  private resolveRange(input: { from?: string; to?: string; days?: number }): { from: Date; to: Date } {
+    const to = input.to === undefined ? new Date() : new Date(input.to)
+    if (Number.isNaN(to.getTime())) throw new WorkspaceError(400, 'INVALID_TIME', 'to must be an ISO-8601 timestamp')
+    if (input.days !== undefined && (!Number.isSafeInteger(input.days) || input.days < 1 || input.days > 365)) {
+      throw new WorkspaceError(400, 'INVALID_DAYS', 'days must be an integer between 1 and 365')
+    }
+    const from = input.from === undefined
+      ? new Date(to.getTime() - (input.days ?? 30) * 24 * 60 * 60 * 1000)
+      : new Date(input.from)
+    if (Number.isNaN(from.getTime())) throw new WorkspaceError(400, 'INVALID_TIME', 'from must be an ISO-8601 timestamp')
+    if (from.getTime() >= to.getTime()) throw new WorkspaceError(400, 'INVALID_TIME', 'from must be before to')
+    return { from, to }
+  }
+
+  /**
+   * Usage and cost across every project, from the durable event log. Cost is the
+   * value recorded with each event when it was written, so it never changes when
+   * prices change later.
+   */
+  async modelUsage(input: { from?: string; to?: string; days?: number } = {}): Promise<FactoryUsage> {
+    const { from, to } = this.resolveRange(input)
+    const fromIso = from.toISOString()
+    const toIsoString = to.toISOString()
+
+    // One CTE normalises each usage event; the three reports group it differently.
+    const base = `
+      WITH u AS (
+        SELECT e.stage_run_id, e.project_id, e.created_at,
+               e.payload->'model'->>'provider' AS provider,
+               e.payload->'model'->>'model' AS model,
+               COALESCE((e.payload->'usage'->>'inputTokens')::numeric, 0) AS input,
+               COALESCE((e.payload->'usage'->>'outputTokens')::numeric, 0) AS output,
+               COALESCE((e.payload->'usage'->>'cacheReadTokens')::numeric, 0) AS cache_read,
+               COALESCE((e.payload->'usage'->>'cacheWriteTokens')::numeric, 0) AS cache_write,
+               COALESCE((e.payload->'usage'->>'totalTokens')::numeric, 0) AS total_raw,
+               CASE WHEN jsonb_typeof(e.payload->'costUsd') = 'number'
+                    THEN (e.payload->>'costUsd')::numeric END AS cost
+        FROM stage_run_events e
+        WHERE e.type = 'status' AND e.payload ? 'usage'
+          AND e.created_at >= $1::timestamptz AND e.created_at < $2::timestamptz
+      ), n AS (
+        SELECT u.*,
+               CASE WHEN total_raw > 0 THEN total_raw ELSE input + output + cache_read + cache_write END AS total
+        FROM u
+      )`
+    const measures = `
+      COUNT(*)::int AS calls,
+      COUNT(DISTINCT stage_run_id)::int AS runs,
+      COALESCE(SUM(input), 0)::bigint AS input,
+      COALESCE(SUM(output), 0)::bigint AS output,
+      COALESCE(SUM(total), 0)::bigint AS total,
+      COALESCE(SUM(cache_read), 0)::bigint AS "cacheRead",
+      COALESCE(SUM(cache_write), 0)::bigint AS "cacheWrite",
+      (COUNT(*) FILTER (WHERE cost IS NOT NULL))::int AS "pricedCalls",
+      SUM(cost)::float8 AS "costUsd",
+      COALESCE(SUM(total) FILTER (WHERE cost IS NULL), 0)::bigint AS "unpricedTokens"`
+
+    type RawAgg = Record<string, string | number | null>
+    const [models, projects, days] = await Promise.all([
+      this.pool.query<RawAgg>(`${base} SELECT provider, model, ${measures} FROM n GROUP BY provider, model`, [fromIso, toIsoString]),
+      this.pool.query<RawAgg>(`${base} SELECT project_id::text AS "projectId", ${measures} FROM n GROUP BY project_id ORDER BY SUM(total) DESC LIMIT 200`, [fromIso, toIsoString]),
+      this.pool.query<RawAgg>(`${base} SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS date, ${measures} FROM n GROUP BY 1`, [fromIso, toIsoString]),
+    ])
+    const measure = (row: RawAgg): UsageAggRow => ({
+      input: Number(row.input),
+      output: Number(row.output),
+      total: Number(row.total),
+      cacheRead: Number(row.cacheRead),
+      cacheWrite: Number(row.cacheWrite),
+      calls: Number(row.calls),
+      runs: Number(row.runs),
+      pricedCalls: Number(row.pricedCalls),
+      costUsd: row.costUsd === null || row.costUsd === undefined ? null : Number(row.costUsd),
+      unpricedTokens: Number(row.unpricedTokens),
+    })
+    const projectIds = projects.rows.map((row) => String(row.projectId))
+    const names = new Map<string, string>()
+    if (projectIds.length > 0) {
+      const named = await this.pool.query<{ id: string; name: string }>(
+        'SELECT id::text AS id, name FROM projects WHERE id = ANY($1::uuid[])',
+        [projectIds],
+      )
+      for (const row of named.rows) names.set(row.id, row.name)
+    }
+    return buildFactoryUsage({
+      from: fromIso,
+      to: toIsoString,
+      byModel: models.rows.map((row): ModelAggRow => ({ provider: (row.provider as string | null) ?? null, model: (row.model as string | null) ?? null, ...measure(row) })),
+      byProject: projects.rows.map((row): ProjectAggRow => ({ projectId: String(row.projectId), ...measure(row) })),
+      daily: days.rows.map((row): DayAggRow => ({ date: String(row.date), ...measure(row) })),
+      projectNames: names,
+    })
+  }
+
   /**
    * Token and duration statistics for a project, derived from the durable
    * harness event log. Independent of Phoenix availability/retention.
@@ -1249,16 +1356,7 @@ ${message}`
     stage?: string
     role?: string
   }): Promise<ProjectStats> {
-    const to = input.to === undefined ? new Date() : new Date(input.to)
-    if (Number.isNaN(to.getTime())) throw new WorkspaceError(400, 'INVALID_TIME', 'to must be an ISO-8601 timestamp')
-    if (input.days !== undefined && (!Number.isSafeInteger(input.days) || input.days < 1 || input.days > 365)) {
-      throw new WorkspaceError(400, 'INVALID_DAYS', 'days must be an integer between 1 and 365')
-    }
-    const from = input.from === undefined
-      ? new Date(to.getTime() - (input.days ?? 30) * 24 * 60 * 60 * 1000)
-      : new Date(input.from)
-    if (Number.isNaN(from.getTime())) throw new WorkspaceError(400, 'INVALID_TIME', 'from must be an ISO-8601 timestamp')
-    if (from.getTime() >= to.getTime()) throw new WorkspaceError(400, 'INVALID_TIME', 'from must be before to')
+    const { from, to } = this.resolveRange(input)
     if (input.stage !== undefined && !isProjectStage(input.stage)) {
       throw new WorkspaceError(400, 'INVALID_STAGE', `unknown stage: ${input.stage}`)
     }
@@ -1294,18 +1392,30 @@ ${message}`
       stageRunId: string
       stage: string
       role: string
+      provider: string | null
+      model: string | null
+      priced: boolean
+      calls: number
       input: string
       output: string
       total: string
       cacheRead: string
       cacheWrite: string
+      costUsd: number | null
     }>(
+      // Grouped by model and by whether the event was priced, so a partly
+      // priced run reports its cost *and* how much usage the cost leaves out.
       `SELECT e.stage_run_id::text AS "stageRunId", r.stage, e.role,
+              e.payload->'model'->>'provider' AS provider,
+              e.payload->'model'->>'model' AS model,
+              COALESCE(jsonb_typeof(e.payload->'costUsd') = 'number', false) AS priced,
+              COUNT(*)::int AS calls,
               COALESCE(SUM((e.payload->'usage'->>'inputTokens')::numeric), 0)::bigint AS input,
               COALESCE(SUM((e.payload->'usage'->>'outputTokens')::numeric), 0)::bigint AS output,
               COALESCE(SUM((e.payload->'usage'->>'totalTokens')::numeric), 0)::bigint AS total,
               COALESCE(SUM((e.payload->'usage'->>'cacheReadTokens')::numeric), 0)::bigint AS "cacheRead",
-              COALESCE(SUM((e.payload->'usage'->>'cacheWriteTokens')::numeric), 0)::bigint AS "cacheWrite"
+              COALESCE(SUM((e.payload->'usage'->>'cacheWriteTokens')::numeric), 0)::bigint AS "cacheWrite",
+              SUM((e.payload->>'costUsd')::numeric) FILTER (WHERE jsonb_typeof(e.payload->'costUsd') = 'number')::float8 AS "costUsd"
        FROM stage_run_events e
        JOIN project_stage_runs r ON r.id = e.stage_run_id
        WHERE e.project_id = $1
@@ -1313,7 +1423,7 @@ ${message}`
          AND e.created_at >= $2::timestamptz AND e.created_at < $3::timestamptz
          AND ($4::text IS NULL OR r.stage = $4)
          AND ($5::text IS NULL OR e.role = $5)
-       GROUP BY e.stage_run_id, r.stage, e.role`,
+       GROUP BY e.stage_run_id, r.stage, e.role, 4, 5, 6`,
       [input.projectId, fromIso, toIsoString, stage, role],
     )
     const rolesResult = await this.pool.query<{
@@ -1358,6 +1468,11 @@ ${message}`
       total: Number(row.total),
       cacheRead: Number(row.cacheRead),
       cacheWrite: Number(row.cacheWrite),
+      provider: row.provider,
+      model: row.model,
+      priced: row.priced,
+      calls: row.calls,
+      costUsd: row.costUsd === null ? 0 : Number(row.costUsd),
     }))
     const roles: StatsRoleRow[] = rolesResult.rows.map((row) => ({
       stageRunId: row.stageRunId,

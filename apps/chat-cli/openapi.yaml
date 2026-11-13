@@ -1040,6 +1040,39 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/models/usage:
+    get:
+      tags: [models]
+      summary: Factory-wide token usage and cost
+      description: Admin only (it spans every project). Reads stored harness usage events; independent of the model catalogue. Cost is the value recorded when each event was written. Days are UTC.
+      parameters:
+        - {name: days, in: query, schema: {type: integer, minimum: 1, maximum: 365, default: 30}, description: Digits only}
+        - {name: from, in: query, schema: {type: string, format: date-time}}
+        - {name: to, in: query, schema: {type: string, format: date-time}}
+      responses:
+        '200':
+          description: Usage report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  usage: {$ref: '#/components/schemas/FactoryUsage'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: WORKSPACE_NOT_CONFIGURED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/models/test:
     post:
       tags: [models]
@@ -2060,6 +2093,58 @@ components:
         providers:
           type: array
           items: {$ref: '#/components/schemas/ModelProvider'}
+    CostSummary:
+      type: object
+      description: usd is null when nothing was priced; unpricedTokens > 0 means the figure is partial.
+      properties:
+        usd: {type: [number, 'null']}
+        pricedTokens: {type: integer}
+        unpricedTokens: {type: integer}
+    ModelUsageRow:
+      type: object
+      description: provider and model are both null for usage recorded before model attribution existed (unattributed).
+      properties:
+        provider: {type: [string, 'null']}
+        model: {type: [string, 'null']}
+        tokens: {$ref: '#/components/schemas/TokenTotals'}
+        calls: {type: integer, description: Number of usage events}
+        pricedCalls: {type: integer}
+        costUsd: {type: [number, 'null'], description: null = unknown (no price); 0 = priced and free}
+        unpricedTokens: {type: integer}
+        runs: {type: integer}
+    FactoryUsage:
+      type: object
+      properties:
+        from: {type: string, format: date-time}
+        to: {type: string, format: date-time}
+        tokens: {$ref: '#/components/schemas/TokenTotals'}
+        cost: {$ref: '#/components/schemas/CostSummary'}
+        byModel:
+          type: array
+          items: {$ref: '#/components/schemas/ModelUsageRow'}
+        byProject:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            properties:
+              projectId: {type: string}
+              name: {type: [string, 'null']}
+              tokens: {$ref: '#/components/schemas/TokenTotals'}
+              calls: {type: integer}
+              runs: {type: integer}
+              costUsd: {type: [number, 'null']}
+              unpricedTokens: {type: integer}
+        daily:
+          type: array
+          items:
+            type: object
+            properties:
+              date: {type: string, format: date}
+              tokens: {$ref: '#/components/schemas/TokenTotals'}
+              calls: {type: integer}
+              costUsd: {type: [number, 'null']}
+              unpricedTokens: {type: integer}
     ProviderBreaker:
       type: object
       properties:
@@ -2148,7 +2233,7 @@ components:
             deadlineMs: {type: integer}
     ProjectStats:
       type: object
-      required: [projectId, from, to, runs, tokens, runDurationMs, activeDurationMs, byRole, byStage, daily, recentRuns]
+      required: [projectId, from, to, runs, tokens, cost, byModel, runDurationMs, activeDurationMs, byRole, byStage, daily, recentRuns]
       properties:
         projectId: {type: string, format: uuid}
         from: {type: string, format: date-time}
@@ -2164,6 +2249,11 @@ components:
               type: object
               additionalProperties: {type: integer}
         tokens: {$ref: '#/components/schemas/TokenTotals'}
+        cost: {$ref: '#/components/schemas/CostSummary'}
+        byModel:
+          type: array
+          description: Usage per provider/model, largest first. provider/model null = unattributed (recorded before model tracking).
+          items: {$ref: '#/components/schemas/ModelUsageRow'}
         runDurationMs:
           allOf:
             - $ref: '#/components/schemas/DurationStats'
@@ -2181,6 +2271,7 @@ components:
               runs: {type: integer}
               attempts: {type: integer}
               tokens: {$ref: '#/components/schemas/TokenTotals'}
+              costUsd: {type: [number, 'null'], description: null = no priced usage in scope}
               durationMs: {$ref: '#/components/schemas/DurationStats'}
         byStage:
           type: array
@@ -2190,6 +2281,7 @@ components:
               stage: {$ref: '#/components/schemas/ProjectStage'}
               runs: {type: integer}
               tokens: {$ref: '#/components/schemas/TokenTotals'}
+              costUsd: {type: [number, 'null'], description: null = no priced usage in scope}
               activeDurationMs: {$ref: '#/components/schemas/DurationStats'}
         daily:
           type: array
@@ -2199,6 +2291,7 @@ components:
               date: {type: string, format: date}
               runs: {type: integer}
               tokens: {$ref: '#/components/schemas/TokenTotals'}
+              costUsd: {type: [number, 'null'], description: null = no priced usage in scope}
               activeDurationMs: {type: integer}
         recentRuns:
           type: array
@@ -2215,6 +2308,15 @@ components:
               durationMs: {type: [integer, 'null']}
               activeDurationMs: {type: integer}
               tokens: {$ref: '#/components/schemas/TokenTotals'}
+              costUsd: {type: [number, 'null'], description: null = no priced usage in scope}
+              models:
+                type: array
+                description: Model(s) the run used; normally one. Empty when no usage was recorded.
+                items:
+                  type: object
+                  properties:
+                    provider: {type: [string, 'null']}
+                    model: {type: [string, 'null']}
               roles:
                 type: array
                 items: {type: string}

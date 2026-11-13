@@ -33,7 +33,16 @@ export class MemoryCatalog implements ModelCatalog {
   async listModels(providerId?: string): Promise<ModelRecord[]> {
     return providerId === undefined ? this.models : this.models.filter((entry) => entry.provider === providerId)
   }
-  async replaceModels(): Promise<ModelRecord[]> { return this.models }
+  async replaceModels(providerId: string, incoming: Array<Omit<ModelRecord, 'provider' | 'discoveredAt'>>): Promise<ModelRecord[]> {
+    const existing = new Map(this.models.filter((entry) => entry.provider === providerId).map((entry) => [entry.model, entry]))
+    const kept = this.models.filter((entry) => entry.provider !== providerId)
+    for (const model of incoming) {
+      const priced = Object.keys(model.price).length > 0
+      kept.push({ ...model, provider: providerId, price: priced ? model.price : existing.get(model.model)?.price ?? {}, discoveredAt: new Date().toISOString() })
+    }
+    this.models = kept
+    return this.models.filter((entry) => entry.provider === providerId)
+  }
   async setPrice(providerId: string, name: string, price: ModelPrice): Promise<ModelRecord | undefined> {
     const entry = this.models.find((candidate) => candidate.provider === providerId && candidate.model === name)
     if (entry === undefined) return undefined

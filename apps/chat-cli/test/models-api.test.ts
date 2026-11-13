@@ -256,3 +256,71 @@ test('POST /api/admin/models/providers/:id/reset closes a provider breaker (admi
     assert.deepEqual(fake.state.resets, ['openai'])
   })
 })
+
+// ---- GET /api/models/usage (factory-wide cost report) -----------------
+
+async function withUsageApi(
+  options: { apiToken?: string; withWorkspace?: boolean },
+  run: (base: string, calls: Array<Record<string, unknown>>) => Promise<void>,
+): Promise<void> {
+  const dataDir = mkdtempSync(join(tmpdir(), 'aifactory-usage-api-'))
+  const calls: Array<Record<string, unknown>> = []
+  const workspace = {
+    async modelUsage(range: Record<string, unknown>) {
+      calls.push(range)
+      return { from: 'f', to: 't', tokens: { input: 1, output: 2, total: 3, cacheRead: 0, cacheWrite: 0 }, cost: { usd: 0.5, pricedTokens: 3, unpricedTokens: 0 }, byModel: [], byProject: [], daily: [] }
+    },
+  }
+  const server = createChatServer({
+    harnessFactory: () => new DshHarness({ command: process.execPath, commandArgs: ['-e', ''] }),
+    store: new SessionStore({ dataDir }),
+    version: 'test',
+    ...(options.withWorkspace === false ? {} : { workspace: workspace as never }),
+    ...(options.apiToken !== undefined ? { apiToken: options.apiToken } : {}),
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  try {
+    await run(`http://127.0.0.1:${serverPort(server)}`, calls)
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+}
+
+test('GET /api/models/usage returns the factory report and passes the range through', async () => {
+  await withUsageApi({}, async (base, calls) => {
+    const response = await fetch(`${base}/api/models/usage?days=7`)
+    assert.equal(response.status, 200)
+    const body = await response.json() as { usage: { cost: { usd: number } } }
+    assert.equal(body.usage.cost.usd, 0.5)
+    await fetch(`${base}/api/models/usage?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z`)
+    await fetch(`${base}/api/models/usage`)
+    assert.deepEqual(calls, [{ days: 7 }, { from: '2026-01-01T00:00:00Z', to: '2026-01-02T00:00:00Z' }, {}])
+  })
+})
+
+test('the factory usage report is admin only because it spans every project', async () => {
+  await withUsageApi({ apiToken: 'tok' }, async (base, calls) => {
+    assert.equal((await fetch(`${base}/api/models/usage`)).status, 401)
+    assert.equal((await fetch(`${base}/api/models/usage`, { headers: { Authorization: 'Bearer wrong' } })).status, 401)
+    assert.equal((await fetch(`${base}/api/models/usage`, { headers: { Authorization: 'Bearer tok' } })).status, 200)
+    assert.equal(calls.length, 1, 'rejected requests never reach the database')
+  })
+})
+
+test('the factory usage report validates days and needs the workspace, not the model catalogue', async () => {
+  await withUsageApi({}, async (base, calls) => {
+    for (const days of ['0', '366', 'x', '1.5']) {
+      const response = await fetch(`${base}/api/models/usage?days=${days}`)
+      assert.equal(response.status, 400, `days=${days}`)
+      assert.equal(((await response.json()) as { error: { code: string } }).error.code, 'INVALID_DAYS')
+    }
+    assert.equal(calls.length, 0)
+  })
+  // No model service is configured in this server, yet the report works: it only reads stored events.
+  await withUsageApi({ withWorkspace: false }, async (base) => {
+    const response = await fetch(`${base}/api/models/usage`)
+    assert.equal(response.status, 503)
+    assert.equal(((await response.json()) as { error: { code: string } }).error.code, 'WORKSPACE_NOT_CONFIGURED')
+  })
+})
