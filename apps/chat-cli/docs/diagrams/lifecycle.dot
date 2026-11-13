@@ -1,0 +1,35 @@
+digraph lifecycle {
+  graph [rankdir=TB, bgcolor="white", fontname="Helvetica", fontsize=10,
+         pad=0.3, nodesep=0.4, ranksep=0.55];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9.5,
+         color="#94a3b8", fillcolor="#f8fafc", penwidth=1.0, margin="0.14,0.08"];
+  edge  [fontname="Helvetica", fontsize=8, color="#475569", arrowsize=0.6];
+
+  start     [shape=circle, label="", width=0.22, fillcolor="#334155", color="#334155"];
+  idle      [label="Idle\nwaiting for input", fillcolor="#e0f2fe", color="#0284c7"];
+  spawning  [label="Spawning\nchild process", fillcolor="#fef3c7", color="#d97706"];
+  streaming [label="Streaming\nNDJSON events", fillcolor="#fef3c7", color="#d97706"];
+
+  completed [label="Completed\nsessionId saved", fillcolor="#dcfce7", color="#16a34a"];
+  failed    [label="Failed\nHarnessError", fillcolor="#fee2e2", color="#dc2626"];
+  timedout  [label="Timed out\nSIGTERM → SIGKILL", fillcolor="#ffedd5", color="#ea580c"];
+  cancelled [label="Cancelled\nSIGINT / cancel()", fillcolor="#f1f5f9", color="#64748b"];
+
+  note [shape=note, label="Every terminal state prints a message (or the answer)\nand returns to Idle for the next prompt.\n/new clears the session; /exit leaves.", fillcolor="#f8fafc", color="#94a3b8"];
+
+  start -> idle;
+  idle -> spawning [label="submit"];
+  spawning -> streaming [label="spawn ok"];
+  spawning -> failed [label="ENOENT / EACCES"];
+  streaming -> streaming;
+  streaming -> completed [label="final + exit 0\n+ reason completed"];
+  streaming -> failed [label="error event /\nexit ≠ 0 /\nreason error /\nno session id"];
+  streaming -> timedout [label="timeout"];
+  streaming -> cancelled [label="SIGINT / cancel()"];
+  completed -> note [style=dashed, arrowhead=none];
+  failed -> note [style=dashed, arrowhead=none];
+  timedout -> note [style=dashed, arrowhead=none];
+  cancelled -> note [style=dashed, arrowhead=none];
+
+  { rank=same; completed; failed; timedout; cancelled; }
+}

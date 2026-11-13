@@ -1,0 +1,56 @@
+digraph components {
+  graph [rankdir=LR, bgcolor="white", fontname="Helvetica", fontsize=10,
+         pad=0.25, nodesep=0.3, ranksep=0.45, compound=true];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9,
+         color="#94a3b8", fillcolor="#f8fafc", penwidth=1.0, margin="0.1,0.06"];
+  edge  [fontname="Helvetica", fontsize=8, color="#475569", arrowsize=0.6];
+
+  subgraph cluster_entry {
+    label="entry + configuration"; fontsize=9; fontcolor="#334155";
+    color="#cbd5e1"; style="rounded,dashed";
+    main     [label="main()", fillcolor="#dbeafe", color="#2563eb"];
+    args     [label="parseArgs()\nflags", fillcolor="#eff6ff", color="#93c5fd"];
+    env      [label="findLaunchOnlyDotEnvKeys()\nloadDotEnv()", fillcolor="#eff6ff", color="#93c5fd"];
+    config   [label="readConfig()\nprecedence", fillcolor="#eff6ff", color="#93c5fd"];
+  }
+
+  subgraph cluster_chat {
+    label="chat loop"; fontsize=9; fontcolor="#334155";
+    color="#cbd5e1"; style="rounded,dashed";
+    runChat  [label="runChat()\nreadline loop", fillcolor="#dbeafe", color="#2563eb"];
+    command  [label="handleCommand()\n/new /session", fillcolor="#eff6ff", color="#93c5fd"];
+    runTurn  [label="runTurn()\nrender + spinner", fillcolor="#eff6ff", color="#93c5fd"];
+  }
+
+  subgraph cluster_transport {
+    label="harness transport"; fontsize=9; fontcolor="#334155";
+    color="#cbd5e1"; style="rounded,dashed";
+    harness  [label="DshHarness.run()", fillcolor="#fef3c7", color="#d97706"];
+    spawn    [label="spawn()\nstdin prompt", fillcolor="#fffbeb", color="#fbbf24"];
+    parser   [label="parseHarnessEvent()\nconsume()", fillcolor="#fffbeb", color="#fbbf24"];
+    errors   [label="reasonFailure()\nHarnessError", fillcolor="#fffbeb", color="#fbbf24"];
+  }
+
+  subgraph cluster_doctor {
+    label="operator tools"; fontsize=9; fontcolor="#334155";
+    color="#cbd5e1"; style="rounded,dashed";
+    doctor   [label="runDoctor()", fillcolor="#dcfce7", color="#16a34a"];
+    probe    [label="probe()\n--version", fillcolor="#f0fdf4", color="#86efac"];
+  }
+
+  subgraph cluster_test {
+    label="tests"; fontsize=9; fontcolor="#64748b";
+    color="#e2e8f0"; style="rounded,dashed";
+    tests    [label="harness.test.ts", fillcolor="#ffffff", color="#94a3b8"];
+    fake     [label="fake-dsh.mjs", style="rounded,dashed", fillcolor="#ffffff", color="#94a3b8"];
+  }
+
+  main -> args; main -> env; main -> config;
+  main -> runChat; main -> doctor;
+  runChat -> command; runChat -> runTurn;
+  runTurn -> harness;
+  harness -> spawn; harness -> parser; harness -> errors;
+  doctor -> probe;
+  tests -> harness [style=dashed]; tests -> fake [style=dashed];
+  fake -> spawn [style=dashed, label="replaces dsh"];
+}

@@ -1,0 +1,38 @@
+digraph stage_events_architecture {
+  graph [rankdir=TB, bgcolor="white", fontname="Helvetica", fontsize=10,
+         pad=0.25, nodesep=0.35, ranksep=0.4, compound=true];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9,
+         color="#94a3b8", fillcolor="#f8fafc", penwidth=1.0, margin="0.12,0.07"];
+  edge  [fontname="Helvetica", fontsize=8, color="#475569", arrowsize=0.6];
+
+  ui [label="UI Activity drawer\nthinking · tools · errors", fillcolor="#e0f2fe", color="#0284c7"];
+
+  subgraph cluster_api {
+    label="API process"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
+    api [label="HTTP API\n/events + /events/stream", fillcolor="#dbeafe", color="#2563eb"];
+    ctrl [label="Stage controller\nreview · document · decision events", fillcolor="#dbeafe", color="#2563eb"];
+  }
+
+  db [label="PostgreSQL\nstage_run_events\nid · project_id · run_id · role · type · payload", shape=cylinder, fillcolor="#dcfce7", color="#16a34a"];
+
+  subgraph cluster_runtime {
+    label="stage runtime — one project + one stage run"; fontsize=9; fontcolor="#334155";
+    color="#fde68a"; style="rounded,dashed";
+    sink [label="StageEventSink\nordered, best-effort queue", fillcolor="#fef3c7", color="#d97706"];
+    harness [label="DshHarness.run\nonEvent callback", fillcolor="#fef3c7", color="#d97706"];
+    dsh [label="DSH role process\nNDJSON: status · thinking\ntext · tool_call · tool_result", fillcolor="#fef3c7", color="#d97706"];
+  }
+
+  note [shape=note, label="Every write carries project_id + stage_run_id.\nThe SSE query filters by one run, so concurrent\nprojects do not share a stream.", fillcolor="#f1f5f9", color="#64748b"];
+
+  ui -> api [label="fetch SSE"];
+  api -> db [label="replay + tail\nafter / Last-Event-ID", dir=both];
+  ctrl -> db [label="review · document · decision"];
+  ctrl -> sink [label="synthetic role events", style=dashed];
+  dsh -> harness [label="committed events"];
+  harness -> sink [label="onEvent"];
+  sink -> db [label="append (serialized)"];
+  db -> api [label="poll 500 ms"];
+  api -> ui [label="id / event: stage / data", style=dashed];
+  db -> note [style=invis];
+}

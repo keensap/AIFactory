@@ -1,0 +1,44 @@
+digraph providers {
+  graph [rankdir=LR, bgcolor="white", fontname="Helvetica", fontsize=10, pad=0.25, nodesep=0.4, ranksep=0.5, compound=true];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9, color="#94a3b8", fillcolor="#f8fafc", margin="0.12,0.07"];
+  edge  [fontname="Helvetica", fontsize=8, color="#475569", arrowsize=0.6];
+
+  subgraph cluster_callers {
+    label="callers — stage roles, chat, tasks"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
+    stage [label="Stage runtime\nanalyzer · author · reviewer", fillcolor="#dbeafe", color="#2563eb"];
+    chat [label="Chat / briefing\ntasks", fillcolor="#dbeafe", color="#2563eb"];
+    embed [label="Indexing\nembeddings", fillcolor="#dbeafe", color="#2563eb"];
+  }
+
+  subgraph cluster_core {
+    label="AI Factory — provider neutral"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
+    target [label="Global model target\nsettings → env → unconfigured\n(snapshot per run)\n+ fallback chain", fillcolor="#fef3c7", color="#d97706"];
+    registry [label="Provider registry\nDB + env · capabilities\nhealth · cost", fillcolor="#fef3c7", color="#d97706"];
+    port [label="ModelEngine port\ncomplete() · stream()", fillcolor="#fef3c7", color="#d97706"];
+    norm [label="Normalizer\nusage · errors · events", fillcolor="#fef3c7", color="#d97706"];
+    breaker [label="Timeout · retry · breaker\nper route", fillcolor="#ffedd5", color="#ea580c"];
+  }
+
+  subgraph cluster_engines {
+    label="engine adapters"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
+    harness [label="HarnessEngine\nDSH + generated patch\n(tools, sessions, sandbox)", fillcolor="#dcfce7", color="#16a34a"];
+    direct [label="OpenAICompatibleEngine\n/v1/chat/completions", fillcolor="#e0f2fe", color="#0284c7"];
+    anthropic [label="AnthropicEngine\n/v1/messages", fillcolor="#e0f2fe", color="#0284c7"];
+    future [label="Gemini · Bedrock · Azure\n(later)", fillcolor="#f3e8ff", color="#7e22ce", style="rounded,dashed,filled"];
+  }
+
+  subgraph cluster_upstream {
+    label="upstream"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
+    dsh [label="DSH / pi-ai\nprovider routes", fillcolor="#f1f5f9", color="#64748b"];
+    cloud [label="OpenAI · Anthropic\ngateways", fillcolor="#f1f5f9", color="#64748b"];
+    local [label="llama.cpp · Ollama · vLLM\n127.0.0.1", fillcolor="#f1f5f9", color="#64748b"];
+  }
+
+  stage -> target; chat -> target; embed -> target;
+  target -> registry; target -> breaker -> port;
+  port -> harness; port -> direct; port -> anthropic; port -> future [style=dashed];
+  harness -> norm; direct -> norm; anthropic -> norm;
+  harness -> dsh; direct -> cloud; direct -> local; anthropic -> cloud;
+  dsh -> cloud [style=dashed, label="pi-ai routes"];
+  dsh -> local [style=dashed];
+}

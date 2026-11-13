@@ -1,0 +1,56 @@
+digraph project_isolation {
+  graph [rankdir=TB, bgcolor="white", fontname="Helvetica", fontsize=10,
+         pad=0.25, nodesep=0.3, ranksep=0.4, compound=true];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=8.5,
+         color="#94a3b8", fillcolor="#f8fafc", penwidth=1.0, margin="0.1,0.06"];
+  edge  [fontname="Helvetica", fontsize=7.5, color="#475569", arrowsize=0.55];
+
+  ui [label="UI · project-scoped user", fillcolor="#e0f2fe", color="#0284c7"];
+  api [label="API gateway\nauth · project scope · policy", fillcolor="#dbeafe", color="#2563eb"];
+
+  subgraph cluster_a {
+    label="Project A  —  sandbox / namespace"; fontsize=9; fontcolor="#166534";
+    color="#86efac"; style="rounded,dashed";
+    dshA [label="DSH_HOME A\nprofile · sessions", fillcolor="#fef3c7", color="#d97706"];
+    rootA [label="project root A\n(read/write)", fillcolor="#f1f5f9", color="#64748b"];
+    stageA [label="stage workspace A\n.documents · AGENTS.md", fillcolor="#f1f5f9", color="#64748b"];
+    credA [label="short-lived\nproject token", shape=note, fillcolor="#fef9c3", color="#ca8a04"];
+  }
+
+  subgraph cluster_b {
+    label="Project B  —  sandbox / namespace"; fontsize=9; fontcolor="#1e3a8a";
+    color="#93c5fd"; style="rounded,dashed";
+    dshB [label="DSH_HOME B\nprofile · sessions", fillcolor="#fef3c7", color="#d97706"];
+    rootB [label="project root B\n(read/write)", fillcolor="#f1f5f9", color="#64748b"];
+    stageB [label="stage workspace B\n.documents · AGENTS.md", fillcolor="#f1f5f9", color="#64748b"];
+    credB [label="short-lived\nproject token", shape=note, fillcolor="#fef9c3", color="#ca8a04"];
+  }
+
+  pg [label="PostgreSQL\nrow-level security\nproject_id", shape=cylinder, fillcolor="#dcfce7", color="#16a34a"];
+  obj [label="Object storage\nprefix /projects/{id}/", shape=cylinder, fillcolor="#dcfce7", color="#16a34a"];
+  vec [label="Qdrant\nproject_id payload filter", shape=cylinder, fillcolor="#dcfce7", color="#16a34a"];
+  gw [label="Model gateway\nkeys held here, not in agents", fillcolor="#f3e8ff", color="#7e22ce"];
+  net [label="Egress allowlist\nmodel + Git + CI only", shape=note, fillcolor="#f1f5f9", color="#64748b"];
+
+  ui -> api;
+  api -> dshA [label="project A token"];
+  api -> dshB [label="project B token"];
+  dshA -> rootA;
+  dshA -> stageA;
+  dshA -> credA;
+  dshB -> rootB;
+  dshB -> stageB;
+  dshB -> credB;
+  rootA -> pg [label="RLS"];
+  rootB -> pg [label="RLS"];
+  stageA -> obj;
+  stageB -> obj;
+  dshA -> vec [label="A namespace"];
+  dshB -> vec [label="B namespace"];
+  dshA -> gw;
+  dshB -> gw;
+  rootA -> net;
+  rootB -> net;
+
+  dshA -> dshB [style=dashed, color="#dc2626", label="DENY", fontcolor="#dc2626", constraint=false];
+}

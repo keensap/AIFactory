@@ -1,0 +1,11 @@
+dist/
+node_modules/
+.env
+.env.local
+*.local
+
+.npm-cache/
+
+# local e2e tooling and captures
+.pw-browsers/
+.pw-*.cjs

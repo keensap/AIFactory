@@ -1,0 +1,42 @@
+digraph observability {
+  graph [rankdir=LR, bgcolor="white", fontname="Helvetica", fontsize=10, pad=0.25, nodesep=0.4, ranksep=0.55, compound=true];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9, color="#94a3b8", fillcolor="#f8fafc", margin="0.12,0.07"];
+  edge  [fontname="Helvetica", fontsize=8, color="#475569", arrowsize=0.6];
+
+  subgraph cluster_core {
+    label="AI Factory core — no vendor types"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
+    stage [label="Stage runtime\nrun/role lifecycle", fillcolor="#dbeafe", color="#2563eb"];
+    server [label="HTTP API\nsummary + delete project", fillcolor="#dbeafe", color="#2563eb"];
+    logging [label="Logging\nrequestId · traceId", fillcolor="#dbeafe", color="#2563eb"];
+  }
+
+  subgraph cluster_ports {
+    label="ports (interfaces)"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
+    recorder [label="TraceRecorder\nstartRun/startRole/events\ncomplete/fail/forget", fillcolor="#fef3c7", color="#d97706"];
+    reader [label="ObservabilityReader\nsummary/deleteProject/health", fillcolor="#fef3c7", color="#d97706"];
+    context [label="TraceContext\ncurrent trace/span ids", fillcolor="#fef3c7", color="#d97706"];
+  }
+
+  subgraph cluster_envelope {
+    label="provider envelope — non-throwing · time-bounded · breaker · health"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
+    registry [label="ObservabilityProvider registry\nAIFACTORY_OBSERVABILITY_PROVIDER", fillcolor="#ffedd5", color="#ea580c"];
+    noop [label="Noop provider\n(tests / disabled)", fillcolor="#f1f5f9", color="#64748b"];
+    phoenix [label="Phoenix adapter\nOTel trace exporter + REST reader", fillcolor="#e0f2fe", color="#0284c7"];
+    future [label="future adapter\nOTLP collector, Datadog, …", fillcolor="#f3e8ff", color="#7e22ce", style="rounded,dashed,filled"];
+  }
+
+  ext [label="Phoenix / monitor\n(REST + OTLP)", fillcolor="#dcfce7", color="#16a34a"];
+  admin [label="GET /api/admin/observability\nprovider health · breaker · drops", fillcolor="#e0f2fe", color="#0284c7"];
+
+  stage -> recorder;
+  server -> reader;
+  logging -> context;
+  recorder -> registry;
+  reader -> registry;
+  context -> registry;
+  registry -> noop [style=dashed];
+  registry -> phoenix;
+  registry -> future [style=dashed];
+  phoenix -> ext;
+  registry -> admin [style=dashed];
+}

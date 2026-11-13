@@ -1,0 +1,49 @@
+digraph stage_runtime {
+  graph [rankdir=TB, bgcolor="white", fontname="Helvetica", fontsize=10,
+         pad=0.25, nodesep=0.35, ranksep=0.45, compound=true];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9,
+         color="#94a3b8", fillcolor="#f8fafc", penwidth=1.0, margin="0.12,0.07"];
+  edge  [fontname="Helvetica", fontsize=8, color="#475569", arrowsize=0.6];
+
+  ui [label="Web UI / API client", fillcolor="#e0f2fe", color="#0284c7"];
+
+  subgraph cluster_control {
+    label="control plane"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
+    api [label="HTTP API\nauth + project scope", fillcolor="#dbeafe", color="#2563eb"];
+    controller [label="Stage controller\ndeterministic loop + budgets", fillcolor="#dbeafe", color="#2563eb"];
+  }
+
+  pg [label="PostgreSQL\nprojects · stage runs · documents · reviews", shape=cylinder, fillcolor="#dcfce7", color="#16a34a"];
+
+  subgraph cluster_runtime {
+    label="stage runtime — one project + one stage, sandboxed"; fontsize=9; fontcolor="#334155";
+    color="#fde68a"; style="rounded,dashed";
+    context [label="stage context packet\nproject + prior summaries + documents", fillcolor="#f1f5f9", color="#64748b"];
+    coordinator [label="DSH coordinator\npersona + task tools", fillcolor="#fef3c7", color="#d97706"];
+    analyzer [label="analyzer\nrequirements / PDF", fillcolor="#fef3c7", color="#d97706"];
+    author [label="author\nSRS / specification", fillcolor="#fef3c7", color="#d97706"];
+    reviewer [label="reviewer\nrubric + findings", fillcolor="#fef3c7", color="#d97706"];
+    workspace [label="project workspace\nAGENTS.md · .dsh/skills · stage docs", fillcolor="#f1f5f9", color="#64748b"];
+  }
+
+  gateway [label="model gateway\nrouting + budgets", fillcolor="#f3e8ff", color="#7e22ce"];
+  providers [label="model providers\ncloud / local", fillcolor="#f3e8ff", color="#7e22ce"];
+
+  ui -> api [label="HTTPS"];
+  api -> controller [label="start / chat"];
+  controller -> pg [label="state + audit"];
+  controller -> context [label="build packet"];
+  context -> coordinator;
+  controller -> coordinator [label="stage task", style=dashed];
+  coordinator -> analyzer [label="analyze"];
+  coordinator -> author [label="draft"];
+  coordinator -> reviewer [label="review"];
+  reviewer -> author [label="rejection findings", style=dashed, color="#dc2626"];
+  coordinator -> workspace [style=dashed];
+  author -> workspace;
+  reviewer -> workspace;
+  analyzer -> gateway [style=dashed];
+  author -> gateway [style=dashed];
+  reviewer -> gateway [style=dashed];
+  gateway -> providers;
+}

@@ -1,0 +1,34 @@
+digraph stage_data_model {
+  graph [rankdir=LR, bgcolor="white", fontname="Helvetica", fontsize=10,
+         pad=0.25, nodesep=0.3, ranksep=0.45];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=8.5,
+         color="#94a3b8", fillcolor="#f8fafc", penwidth=1.0, margin="0.1,0.06", align="left"];
+  edge  [fontname="Helvetica", fontsize=7.5, color="#475569", arrowsize=0.55];
+
+  projects [label="projects\n─────────────\nid · name · root_path\nstatus · current_stage", fillcolor="#dbeafe", color="#2563eb"];
+  stages [label="project_stages\n─────────────\nproject_id · stage\nstatus · started/completed", fillcolor="#dcfce7", color="#16a34a"];
+  runs [label="project_stage_runs\n─────────────\nid · project_id · stage\nsession_id · status · summary\ncontext_hash · attempt", fillcolor="#fef3c7", color="#d97706"];
+  reviews [label="stage_reviews\n─────────────\nrun_id · reviewer_role\ndecision · findings JSONB", fillcolor="#fef3c7", color="#d97706"];
+  events [label="stage_run_events\n─────────────\nid · run_id · role\ntype · payload JSONB", fillcolor="#fef3c7", color="#d97706"];
+  docs [label="project_documents\n─────────────\nid · project_id · stage_run_id\nstage · kind · path · sha256\nstatus · version", fillcolor="#f1f5f9", color="#64748b"];
+  checks [label="project_checklist_items\n─────────────\nproject_id · stage · key\nrequired · status · evidence_id", fillcolor="#f1f5f9", color="#64748b"];
+  roles [label="stage_role_configs\n─────────────\nrole · agent preset\nprovider/model/effort\nskills · tools", fillcolor="#f3e8ff", color="#7e22ce"];
+  overrides [label="project_role_overrides\n─────────────\nproject_id · role\nconfig overrides", fillcolor="#f3e8ff", color="#7e22ce"];
+  briefing [label="project_briefings\n─────────────\nproject_id · input_hash\nmarkdown · risks", fillcolor="#f1f5f9", color="#64748b"];
+  sdlc [label="sdlc_stages\n─────────────\nkey · name · position\nreference data only", fillcolor="#ffffff", color="#94a3b8", style="rounded,dashed"];
+  docreq [label="stage_document_requirements\n─────────────\nstage · kind · label\ncardinality · template", fillcolor="#f3e8ff", color="#7e22ce"];
+
+  projects -> stages [label="1..*"];
+  projects -> runs [label="1..*"];
+  projects -> docs [label="1..*"];
+  projects -> checks [label="1..*"];
+  projects -> overrides [label="1..*"];
+  projects -> briefing [label="1..1"];
+  runs -> reviews [label="1..*"];
+  runs -> events [label="1..*"];
+  runs -> docs [label="0..*", style=dashed, label="run evidence"];
+  stages -> checks [label="1..*", style=dashed];
+  roles -> overrides [label="defaults → overrides", style=dashed];
+  sdlc -> stages [label="names only (no FK)", style=dashed, arrowhead=none, color="#94a3b8"];
+  sdlc -> docreq [label="stage definitions", style=dashed, arrowhead=none, color="#94a3b8"];
+}

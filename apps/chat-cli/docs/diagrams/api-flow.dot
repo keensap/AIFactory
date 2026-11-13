@@ -1,0 +1,35 @@
+digraph api {
+  graph [rankdir=TB, bgcolor="white", fontname="Helvetica", fontsize=10,
+         pad=0.25, nodesep=0.32, ranksep=0.4];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9.5,
+         color="#94a3b8", fillcolor="#f8fafc", penwidth=1.0, margin="0.12,0.07"];
+  edge  [fontname="Helvetica", fontsize=8, color="#475569", arrowsize=0.6];
+
+  ui [label="Separate UI\nfetch / SSE", fillcolor="#e0f2fe", color="#0284c7"];
+
+  subgraph cluster_api {
+    label="chat API (one Node process)"; fontsize=9; fontcolor="#334155";
+    color="#cbd5e1"; style="rounded,dashed";
+    http [label="HTTP router\nCORS + bearer auth", fillcolor="#dbeafe", color="#2563eb"];
+    sessions [label="/api/sessions\nhistory + titles", fillcolor="#dbeafe", color="#2563eb"];
+    projects [label="/api/projects\nCRUD + status", fillcolor="#dbeafe", color="#2563eb"];
+    chat [label="/api/chat\n/api/chat/stream", fillcolor="#dbeafe", color="#2563eb"];
+    store [label="SessionStore\n.data/sessions.json", shape=cylinder, fillcolor="#dcfce7", color="#16a34a"];
+    harness [label="DshHarness\none per request", fillcolor="#fef3c7", color="#d97706"];
+  }
+  pg [label="PostgreSQL\naifactory.projects", shape=cylinder, fillcolor="#dbeafe", color="#2563eb"];
+  dsh [label="dsh headless\nchild per turn", fillcolor="#fef3c7", color="#d97706"];
+  model [label="model route", fillcolor="#f3e8ff", color="#7e22ce"];
+
+  ui -> http [label="HTTP/JSON or SSE"];
+  http -> sessions [label="GET / DELETE"];
+  http -> projects [label="GET / POST / PATCH / DELETE"];
+  http -> chat [label="POST"];
+  sessions -> store [label="list / get"];
+  projects -> pg [label="SQL"];
+  chat -> harness [label="run(prompt)"];
+  chat -> store [label="recordTurn", style=dashed];
+  harness -> dsh [label="spawn + stdin"];
+  dsh -> model [label="model call"];
+
+}

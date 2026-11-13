@@ -1,0 +1,827 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Factory Chat API — live documentation</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #111c2e;
+      --panel-2: #16233a;
+      --line: #253652;
+      --text: #e6eefb;
+      --muted: #94a7c4;
+      --accent: #60a5fa;
+      --accent-2: #38bdf8;
+      --green: #34d399;
+      --red: #f87171;
+      --amber: #fbbf24;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 600px at 10% -10%, #16345c 0%, transparent 55%), var(--bg);
+      color: var(--text);
+      font: 15px/1.55 var(--sans);
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, pre, textarea, input { font-family: var(--mono); }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 22px 80px; }
+    header.top {
+      display: flex; align-items: center; justify-content: space-between; gap: 18px;
+      padding: 6px 0 24px;
+    }
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .logo {
+      width: 46px; height: 46px; border-radius: 13px; display: grid; place-items: center;
+      background: linear-gradient(135deg, #2563eb, #06b6d4); font-weight: 800; letter-spacing: -0.04em;
+      box-shadow: 0 10px 30px rgba(37, 99, 235, 0.35);
+    }
+    h1 { margin: 0; font-size: 20px; letter-spacing: -0.02em; }
+    .sub { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+    .status { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 4px rgba(251,191,36,.12); }
+    .dot.ok { background: var(--green); box-shadow: 0 0 0 4px rgba(52,211,153,.12); }
+    .dot.bad { background: var(--red); box-shadow: 0 0 0 4px rgba(248,113,113,.12); }
+    .hero { display: grid; grid-template-columns: 1.4fr .9fr; gap: 22px; align-items: stretch; margin-bottom: 22px; }
+    .eyebrow { margin: 0 0 8px; color: var(--accent-2); font: 700 11px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+    .hero h2 { margin: 0 0 10px; font-size: 30px; line-height: 1.15; letter-spacing: -0.035em; }
+    .hero p { margin: 0; color: var(--muted); max-width: 62ch; }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,.025), transparent), var(--panel);
+      border: 1px solid var(--line); border-radius: 16px; padding: 18px;
+      box-shadow: 0 18px 50px rgba(0,0,0,.18);
+    }
+    .config { display: flex; flex-direction: column; justify-content: center; gap: 10px; }
+    .config label { font-size: 12px; color: var(--muted); }
+    .row { display: flex; gap: 8px; }
+    input, textarea, select {
+      width: 100%; background: #0a1525; color: var(--text); border: 1px solid var(--line);
+      border-radius: 10px; padding: 10px 12px; outline: none; font-size: 13px;
+    }
+    select { appearance: auto; }
+    input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(96,165,250,.15); }
+    textarea { resize: vertical; min-height: 82px; }
+    button {
+      border: 1px solid #2d4a73; background: #173154; color: #dbeafe; border-radius: 10px;
+      padding: 9px 13px; font: 600 12px/1 var(--sans); cursor: pointer; white-space: nowrap;
+    }
+    button:hover { background: #1d3d68; border-color: #3b6ba8; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.primary { background: linear-gradient(135deg, #2563eb, #0891b2); border-color: transparent; color: white; }
+    button.danger { border-color: #7f1d1d; color: #fecaca; background: #2a1215; }
+    .hint { margin: 0; color: var(--muted); font-size: 12px; }
+    .toc {
+      display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 24px;
+      padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: rgba(17,28,46,.7);
+    }
+    .toc a { color: var(--muted); font-size: 12px; padding: 5px 9px; border-radius: 7px; }
+    .toc a:hover { color: var(--text); background: var(--panel-2); text-decoration: none; }
+    section.endpoint { margin: 0 0 18px; }
+    .endpoint-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+    .endpoint-head code { font-size: 14px; color: #dbeafe; }
+    .method {
+      font: 800 10px/1 var(--mono); letter-spacing: .08em; padding: 6px 8px; border-radius: 6px;
+      border: 1px solid transparent;
+    }
+    .method.get { color: #93c5fd; background: rgba(59,130,246,.12); border-color: rgba(59,130,246,.3); }
+    .method.post { color: #86efac; background: rgba(34,197,94,.1); border-color: rgba(34,197,94,.28); }
+    .method.delete { color: #fca5a5; background: rgba(239,68,68,.1); border-color: rgba(239,68,68,.28); }
+    .endpoint p { margin: 0 0 12px; color: var(--muted); }
+    .endpoint .row { margin-top: 10px; }
+    .response {
+      margin: 12px 0 0; padding: 12px; border-radius: 10px; border: 1px solid var(--line);
+      background: #08111f; color: #c7d7ef; font-size: 12px; line-height: 1.55;
+      max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+    }
+    .response[data-state="ok"] { border-color: rgba(52,211,153,.35); }
+    .response[data-state="error"] { border-color: rgba(248,113,113,.4); color: #fecaca; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+    td code { font-size: 12px; color: #bfdbfe; }
+    .empty { color: var(--muted); font-size: 13px; padding: 10px 0; }
+    .stream-grid { display: grid; grid-template-columns: 1.15fr .85fr; gap: 12px; margin-top: 10px; }
+    .stream-box {
+      min-height: 210px; max-height: 360px; overflow: auto; padding: 12px; border-radius: 10px;
+      border: 1px solid var(--line); background: #08111f; white-space: pre-wrap; word-break: break-word;
+      font: 12px/1.6 var(--mono); color: #d7e5fb;
+    }
+    .stream-box.log { color: #93a7c4; }
+    .stream-state { font-size: 12px; color: var(--muted); margin-left: 4px; }
+    .stream-state.ok { color: var(--green); }
+    .stream-state.bad { color: var(--red); }
+    .toast {
+      position: fixed; right: 20px; bottom: 20px; background: #173154; color: #dbeafe;
+      border: 1px solid #2d4a73; padding: 10px 14px; border-radius: 10px; font-size: 13px;
+      opacity: 0; transform: translateY(8px); pointer-events: none; transition: .2s ease;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    footer { margin-top: 28px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); padding-top: 16px; }
+    @media (max-width: 800px) {
+      .hero, .grid-2, .stream-grid { grid-template-columns: 1fr; }
+      .hero h2 { font-size: 24px; }
+      header.top { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <div class="brand">
+        <div class="logo">AF</div>
+        <div>
+          <h1>Chat API</h1>
+          <p class="sub">Live documentation &amp; console · <span id="base-url"></span></p>
+        </div>
+      </div>
+      <div class="status"><span id="health-dot" class="dot"></span><span id="health-text">checking…</span></div>
+    </header>
+
+    <section class="hero">
+      <div class="card">
+        <p class="eyebrow">HTTP + SSE</p>
+        <h2>Talk to the harness from any UI.</h2>
+        <p>
+          One request is one harness turn. Send a message, keep the returned session id,
+          stream assistant blocks over Server-Sent Events, and list conversations for a
+          transcript view. This page runs against the live server that served it.
+        </p>
+      </div>
+      <div class="card config">
+        <label for="token">Bearer token <span class="hint">(optional)</span></label>
+        <div class="row">
+          <input id="token" type="password" autocomplete="off" placeholder="AIFACTORY_API_TOKEN">
+          <button id="save-token">Save</button>
+        </div>
+        <p class="hint">Stored in this tab's sessionStorage. Leave blank when the API has no token.</p>
+        <button id="check-health">Check health</button>
+      </div>
+    </section>
+
+    <nav class="toc" aria-label="Endpoints">
+      <a href="#health">Health</a>
+      <a href="#sessions">Sessions</a>
+      <a href="#settings">Settings</a>
+      <a href="#projects">Projects</a>
+      <a href="#pdf">PDF review</a>
+      <a href="#chat">Chat</a>
+      <a href="#stream">Stream</a>
+      <a href="#errors">Errors</a>
+      <a href="#contract">Contract</a>
+    </nav>
+
+    <section id="health" class="card endpoint">
+      <div class="endpoint-head">
+        <span class="method get">GET</span>
+        <code>/api/health</code>
+        <button id="send-health">Send</button>
+      </div>
+      <p>Liveness and the resolved harness command/profile. Public even when a token is configured.</p>
+      <pre id="health-response" class="response">No request yet.</pre>
+    </section>
+
+    <section id="sessions" class="card endpoint">
+      <div class="endpoint-head">
+        <span class="method get">GET</span>
+        <code>/api/sessions</code>
+        <button id="load-sessions">Refresh</button>
+      </div>
+      <p>Local conversation index, most recently updated first. Click <strong>Use</strong> to copy an id into the chat and stream forms.</p>
+      <div id="sessions-list" class="empty">No sessions loaded.</div>
+
+      <hr style="border:0;border-top:1px solid var(--line);margin:18px 0">
+
+      <div class="endpoint-head">
+        <span class="method get">GET</span>
+        <code>/api/sessions/{id}</code>
+        <button id="load-session">Load session</button>
+        <button id="load-messages">Load messages</button>
+      </div>
+      <div class="row">
+        <input id="session-id" data-session placeholder="session-…" aria-label="Session id">
+      </div>
+      <pre id="session-response" class="response">No session loaded.</pre>
+    </section>
+
+    <section id="settings" class="card endpoint">
+      <div class="endpoint-head">
+        <span class="method get">GET</span>
+        <code>/api/settings</code>
+        <button id="load-settings">Refresh</button>
+      </div>
+      <p>The only chat setting today is the maximum number of active projects. Default <strong>3</strong>; range 1–1000.</p>
+      <div class="row">
+        <input id="max-active-projects" type="number" min="1" max="1000" step="1" placeholder="max active projects" aria-label="Maximum active projects">
+        <button id="save-settings" class="primary">Save</button>
+      </div>
+      <pre id="settings-response" class="response">No settings request yet.</pre>
+    </section>
+
+    <section id="projects" class="card endpoint">
+      <div class="endpoint-head">
+        <span class="method get">GET</span>
+        <code>/api/projects</code>
+        <button id="load-projects">Refresh</button>
+      </div>
+      <p>
+        A project is a name plus an existing absolute root directory. Multiple projects may be active.
+        The root path is unique and removal only deletes the registry row, never the directory.
+      </p>
+      <div id="projects-list" class="empty">No projects loaded.</div>
+
+      <hr style="border:0;border-top:1px solid var(--line);margin:18px 0">
+
+      <div class="endpoint-head">
+        <span class="method post">POST</span>
+        <code>/api/projects</code>
+        <button id="create-project" class="primary">Create</button>
+      </div>
+      <div class="grid-2">
+        <input id="project-name" placeholder="name (required)" aria-label="Project name">
+        <input id="project-root" placeholder="rootPath (absolute, required)" aria-label="Project root path">
+        <input id="project-org" placeholder="organization (optional)" aria-label="Organization">
+        <input id="project-email" placeholder="ownerEmail (optional)" aria-label="Owner email">
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="project-id" placeholder="project id (UUID)" aria-label="Project id">
+        <select id="project-status" aria-label="Project status">
+          <option value="inactive">inactive</option>
+          <option value="active">active</option>
+          <option value="archived">archived</option>
+          <option value="completed">completed</option>
+          <option value="on_hold">on_hold</option>
+        </select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="load-project">Load</button>
+        <button id="update-project">Update</button>
+        <button id="status-project">Set status</button>
+        <button id="delete-project" class="danger">Delete</button>
+      </div>
+      <pre id="project-response" class="response">No project request yet.</pre>
+    </section>
+
+    <section id="pdf" class="card endpoint">
+      <div class="endpoint-head">
+        <span class="method post">POST</span>
+        <code>/api/projects/{projectId}/sessions/{sessionId}/pdf-review</code>
+        <button id="analyze-pdf" class="primary">Analyze</button>
+      </div>
+      <p>
+        Upload a requirement PDF. The API extracts its text, attaches the project context and asks the
+        configured model to act as a product manager. The response is either a Markdown review or a
+        list of questions.
+      </p>
+      <div class="grid-2">
+        <input id="pdf-project" placeholder="project id (UUID)" aria-label="PDF project id">
+        <input id="pdf-session" placeholder="session id" aria-label="PDF session id">
+      </div>
+      <div class="row" style="margin-top:8px">
+        <textarea id="pdf-message" placeholder="Review this requirement document." aria-label="PDF review message"></textarea>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="pdf-file" type="file" accept="application/pdf,.pdf" aria-label="Requirement PDF">
+      </div>
+      <pre id="pdf-response" class="response">No PDF analyzed yet.</pre>
+    </section>
+
+    <section id="chat" class="card endpoint">
+      <div class="endpoint-head">
+        <span class="method post">POST</span>
+        <code>/api/chat</code>
+        <button id="send-chat" class="primary">Send</button>
+      </div>
+      <p>One non-streaming turn. Omit <code>sessionId</code> to create a new conversation; the response returns the id.</p>
+      <textarea id="chat-message" placeholder="Explain the difference between a session and a run." aria-label="Message"></textarea>
+      <div class="row" style="margin-top:8px">
+        <input id="chat-session" data-session placeholder="sessionId (optional)" aria-label="Chat session id">
+      </div>
+      <pre id="chat-response" class="response">No request yet.</pre>
+    </section>
+
+    <section id="stream" class="card endpoint">
+      <div class="endpoint-head">
+        <span class="method post">POST</span>
+        <code>/api/chat/stream</code>
+        <button id="start-stream" class="primary">Start</button>
+        <button id="stop-stream" disabled>Stop</button>
+        <span id="stream-state" class="stream-state">idle</span>
+      </div>
+      <p>Server-Sent Events. <code>text</code> blocks are committed assistant output; <code>done.text</code> is the final answer.</p>
+      <textarea id="stream-message" placeholder="Write a short status update." aria-label="Stream message"></textarea>
+      <div class="row" style="margin-top:8px">
+        <input id="stream-session" data-session placeholder="sessionId (optional)" aria-label="Stream session id">
+      </div>
+      <div class="stream-grid">
+        <div id="stream-text" class="stream-box" aria-live="polite">Assistant text appears here.</div>
+        <div id="stream-log" class="stream-box log" aria-label="Event log">Event log</div>
+      </div>
+    </section>
+
+    <section id="errors" class="card endpoint">
+      <div class="endpoint-head"><span class="method get">ERR</span><code>error envelope</code></div>
+      <p>Every JSON error has the same shape: <code>{ "error": { "message", "code", "status" } }</code>. SSE failures arrive as an <code>error</code> event.</p>
+      <table>
+        <thead><tr><th>Status</th><th>Code</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td>400</td><td><code>INVALID_*</code></td><td>Malformed JSON, message or session id</td></tr>
+          <tr><td>401</td><td><code>UNAUTHORIZED</code></td><td>Missing or wrong bearer token</td></tr>
+          <tr><td>404</td><td><code>NOT_FOUND</code>, <code>SESSION_NOT_FOUND</code>, <code>PROJECT_NOT_FOUND</code></td><td>Unknown route, session or project</td></tr>
+          <tr><td>409</td><td><code>SESSION_BUSY</code>, <code>ROOT_PATH_CONFLICT</code>, <code>ACTIVE_PROJECT_LIMIT_REACHED</code>, <code>ACTIVE_LIMIT_BELOW_ACTIVE</code></td><td>Turn already running, duplicate root, active limit reached, or limit below active count</td></tr>
+          <tr><td>413</td><td><code>BODY_TOO_LARGE</code>, <code>MESSAGE_TOO_LARGE</code></td><td>Body &gt; 1 MiB or message &gt; 64 KiB</td></tr>
+          <tr><td>502</td><td><code>HARNESS_*</code></td><td>Harness turn failed</td></tr>
+          <tr><td>503</td><td><code>HARNESS_UNAVAILABLE</code>, <code>DATABASE_NOT_CONFIGURED</code></td><td>Harness executable or project database unavailable</td></tr>
+          <tr><td>504</td><td><code>HARNESS_TIMEOUT</code></td><td>Per-turn timeout</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="contract" class="card endpoint">
+      <div class="endpoint-head"><span class="method get">GET</span><code>contract</code></div>
+      <p>
+        The machine-readable contract is served by this same process:
+        <a href="/openapi.yaml" target="_blank" rel="noreferrer">/openapi.yaml</a>,
+        and the project tool catalog is at
+        <a href="/api/tools" target="_blank" rel="noreferrer">/api/tools</a>.
+        The default base URL is <code id="base-url-2"></code>; the API binds to loopback by default.
+      </p>
+      <p class="hint">No external assets or CDNs are used by this page; it works offline on the API host.</p>
+    </section>
+
+    <footer>
+      AI Factory chat API · one process per harness turn · <a href="/docs">/docs</a> · <a href="/openapi.yaml">/openapi.yaml</a>
+    </footer>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    (() => {
+      const $ = (selector, root = document) => root.querySelector(selector)
+      const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector))
+      const TOKEN_KEY = 'aifactory.chat.token'
+      let token = sessionStorage.getItem(TOKEN_KEY) || ''
+      let streamController = null
+
+      const tokenInput = $('#token')
+      tokenInput.value = token
+      $('#base-url').textContent = location.origin
+      $('#base-url-2').textContent = location.origin
+
+      const toast = (() => {
+        let timer
+        return (message) => {
+          const element = $('#toast')
+          element.textContent = message
+          element.classList.add('show')
+          clearTimeout(timer)
+          timer = setTimeout(() => element.classList.remove('show'), 2200)
+        }
+      })()
+
+      $('#save-token').addEventListener('click', () => {
+        token = tokenInput.value.trim()
+        if (token) sessionStorage.setItem(TOKEN_KEY, token)
+        else sessionStorage.removeItem(TOKEN_KEY)
+        toast(token ? 'Token saved for this tab' : 'Token cleared')
+        if (token) $('#load-sessions').click()
+      })
+
+      function authHeaders() {
+        return token ? { Authorization: 'Bearer ' + token } : {}
+      }
+
+      async function api(path, options = {}) {
+        const started = performance.now()
+        const response = await fetch(path, {
+          ...options,
+          headers: {
+            ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+            ...authHeaders(),
+            ...(options.headers || {}),
+          },
+        })
+        const text = await response.text()
+        let body = text
+        try { body = text ? JSON.parse(text) : null } catch {}
+        return { ok: response.ok, status: response.status, ms: Math.round(performance.now() - started), body }
+      }
+
+      function showResponse(element, result) {
+        const body = typeof result.body === 'string' ? result.body : JSON.stringify(result.body, null, 2)
+        element.textContent = 'HTTP ' + result.status + ' · ' + result.ms + ' ms\n\n' + body
+        element.dataset.state = result.ok ? 'ok' : 'error'
+      }
+
+      async function checkHealth() {
+        const dot = $('#health-dot')
+        const text = $('#health-text')
+        try {
+          const result = await api('/api/health')
+          if (!result.ok) throw new Error('HTTP ' + result.status)
+          dot.className = 'dot ok'
+          text.textContent = 'online · v' + result.body.version
+          return result
+        } catch {
+          dot.className = 'dot bad'
+          text.textContent = 'offline'
+          return null
+        }
+      }
+
+      function setSession(id) {
+        $$('[data-session]').forEach((input) => { input.value = id })
+      }
+
+      $('#check-health').addEventListener('click', async () => {
+        const result = await checkHealth()
+        showResponse($('#health-response'), result || { ok: false, status: 0, ms: 0, body: 'health check failed' })
+      })
+
+      $('#send-health').addEventListener('click', async () => {
+        const result = await api('/api/health')
+        showResponse($('#health-response'), result)
+      })
+
+      $('#load-sessions').addEventListener('click', async () => {
+        const container = $('#sessions-list')
+        const result = await api('/api/sessions')
+        container.replaceChildren()
+        if (!result.ok) {
+          container.textContent = result.status === 401
+            ? 'Protected API — save a bearer token above, then Refresh.'
+            : 'HTTP ' + result.status + ' · ' + JSON.stringify(result.body)
+          return
+        }
+        const sessions = Array.isArray(result.body.sessions) ? result.body.sessions : []
+        if (!sessions.length) {
+          container.textContent = 'No sessions yet. Send a message in the Chat section.'
+          return
+        }
+        const table = document.createElement('table')
+        table.innerHTML = '<thead><tr><th>Title</th><th>Session</th><th>Updated</th><th></th></tr></thead>'
+        const tbody = document.createElement('tbody')
+        for (const session of sessions) {
+          const tr = document.createElement('tr')
+          const title = document.createElement('td')
+          title.textContent = session.title || 'Untitled'
+          const id = document.createElement('td')
+          const code = document.createElement('code')
+          code.textContent = session.id
+          id.append(code)
+          const updated = document.createElement('td')
+          updated.textContent = new Date(session.updatedAt).toLocaleString()
+          const action = document.createElement('td')
+          const use = document.createElement('button')
+          use.textContent = 'Use'
+          use.addEventListener('click', () => { setSession(session.id); toast('Session id copied into the forms') })
+          action.append(use)
+          tr.append(title, id, updated, action)
+          tbody.append(tr)
+        }
+        table.append(tbody)
+        container.replaceChildren(table)
+      })
+
+      $('#load-session').addEventListener('click', async () => {
+        const id = $('#session-id').value.trim()
+        if (!id) return toast('Enter a session id')
+        showResponse($('#session-response'), await api('/api/sessions/' + encodeURIComponent(id)))
+      })
+
+      $('#load-messages').addEventListener('click', async () => {
+        const id = $('#session-id').value.trim()
+        if (!id) return toast('Enter a session id')
+        showResponse($('#session-response'), await api('/api/sessions/' + encodeURIComponent(id) + '/messages'))
+      })
+
+      async function loadSettings() {
+        const result = await api('/api/settings')
+        showResponse($('#settings-response'), result)
+        if (result.ok && result.body.settings) {
+          $('#max-active-projects').value = String(result.body.settings.maxActiveProjects)
+        }
+      }
+
+      $('#load-settings').addEventListener('click', loadSettings)
+
+      $('#save-settings').addEventListener('click', async () => {
+        const value = Number($('#max-active-projects').value)
+        if (!Number.isInteger(value) || value < 1 || value > 1000) {
+          return toast('maxActiveProjects must be an integer between 1 and 1000')
+        }
+        const result = await api('/api/settings', {
+          method: 'PATCH',
+          body: JSON.stringify({ maxActiveProjects: value }),
+        })
+        showResponse($('#settings-response'), result)
+        if (result.ok) await loadProjects()
+      })
+
+      async function loadProjects() {
+        const container = $('#projects-list')
+        const result = await api('/api/projects')
+        container.replaceChildren()
+        if (!result.ok) {
+          container.textContent = result.status === 401
+            ? 'Protected API — save a bearer token above, then Refresh.'
+            : result.status === 503
+              ? 'Project registry disabled — set DATABASE_URL on the API server.'
+              : 'HTTP ' + result.status + ' · ' + JSON.stringify(result.body)
+          return
+        }
+        const projects = Array.isArray(result.body.projects) ? result.body.projects : []
+        if (!projects.length) {
+          container.textContent = 'No projects yet. Create one below.'
+          return
+        }
+        const table = document.createElement('table')
+        table.innerHTML = '<thead><tr><th>Name</th><th>Root</th><th>Status</th><th>ID</th><th></th></tr></thead>'
+        const tbody = document.createElement('tbody')
+        for (const project of projects) {
+          const tr = document.createElement('tr')
+          const name = document.createElement('td')
+          name.textContent = project.name
+          const root = document.createElement('td')
+          const rootCode = document.createElement('code')
+          rootCode.textContent = project.rootPath
+          root.append(rootCode)
+          const status = document.createElement('td')
+          status.textContent = project.status
+          const id = document.createElement('td')
+          const idCode = document.createElement('code')
+          idCode.textContent = project.id
+          id.append(idCode)
+          const action = document.createElement('td')
+          const use = document.createElement('button')
+          use.textContent = 'Use'
+          use.addEventListener('click', () => {
+            setProject(project)
+            toast('Project loaded into the form')
+          })
+          action.append(use)
+          tr.append(name, root, status, id, action)
+          tbody.append(tr)
+        }
+        table.append(tbody)
+        container.replaceChildren(table)
+      }
+
+      function setProject(project) {
+        $('#project-id').value = project.id || ''
+        $('#project-name').value = project.name || ''
+        $('#project-root').value = project.rootPath || ''
+        $('#project-org').value = project.organization || ''
+        $('#project-email').value = project.ownerEmail || ''
+        $('#project-status').value = project.status || 'inactive'
+      }
+
+      function projectBody() {
+        const body = {}
+        const name = $('#project-name').value.trim()
+        const rootPath = $('#project-root').value.trim()
+        if (name) body.name = name
+        if (rootPath) body.rootPath = rootPath
+        body.organization = $('#project-org').value.trim() || null
+        body.ownerEmail = $('#project-email').value.trim() || null
+        body.status = $('#project-status').value
+        return body
+      }
+
+      $('#load-projects').addEventListener('click', loadProjects)
+
+      $('#create-project').addEventListener('click', async () => {
+        const body = projectBody()
+        if (!body.name || !body.rootPath) return toast('name and rootPath are required')
+        const result = await api('/api/projects', { method: 'POST', body: JSON.stringify(body) })
+        showResponse($('#project-response'), result)
+        if (result.ok && result.body.project) {
+          setProject(result.body.project)
+          await loadProjects()
+        }
+      })
+
+      $('#load-project').addEventListener('click', async () => {
+        const id = $('#project-id').value.trim()
+        if (!id) return toast('Enter a project id')
+        const result = await api('/api/projects/' + encodeURIComponent(id))
+        showResponse($('#project-response'), result)
+        if (result.ok && result.body.project) setProject(result.body.project)
+      })
+
+      $('#update-project').addEventListener('click', async () => {
+        const id = $('#project-id').value.trim()
+        if (!id) return toast('Enter a project id')
+        const body = projectBody()
+        if (Object.keys(body).length === 0) return toast('No fields to update')
+        const result = await api('/api/projects/' + encodeURIComponent(id), {
+          method: 'PATCH',
+          body: JSON.stringify(body),
+        })
+        showResponse($('#project-response'), result)
+        if (result.ok) await loadProjects()
+      })
+
+      $('#status-project').addEventListener('click', async () => {
+        const id = $('#project-id').value.trim()
+        if (!id) return toast('Enter a project id')
+        const result = await api('/api/projects/' + encodeURIComponent(id) + '/status', {
+          method: 'PATCH',
+          body: JSON.stringify({ status: $('#project-status').value }),
+        })
+        showResponse($('#project-response'), result)
+        if (result.ok) await loadProjects()
+      })
+
+      $('#delete-project').addEventListener('click', async () => {
+        const id = $('#project-id').value.trim()
+        if (!id) return toast('Enter a project id')
+        if (!window.confirm('Remove this project row? The root directory will not be deleted.')) return
+        const started = performance.now()
+        const response = await fetch('/api/projects/' + encodeURIComponent(id), {
+          method: 'DELETE',
+          headers: authHeaders(),
+        })
+        const result = {
+          ok: response.ok,
+          status: response.status,
+          ms: Math.round(performance.now() - started),
+          body: response.status === 204 ? 'removed' : await response.text(),
+        }
+        showResponse($('#project-response'), result)
+        if (result.ok) {
+          setProject({ id: '', name: '', rootPath: '', organization: null, ownerEmail: null, status: 'inactive' })
+          await loadProjects()
+        }
+      })
+
+      $('#send-chat').addEventListener('click', async () => {
+        const message = $('#chat-message').value
+        if (!message.trim()) return toast('Message is required')
+        const button = $('#send-chat')
+        button.disabled = true
+        try {
+          const sessionId = $('#chat-session').value.trim()
+          const result = await api('/api/chat', {
+            method: 'POST',
+            body: JSON.stringify(sessionId ? { message, sessionId } : { message }),
+          })
+          showResponse($('#chat-response'), result)
+          if (result.ok && result.body && result.body.sessionId) setSession(result.body.sessionId)
+        } catch (error) {
+          showResponse($('#chat-response'), { ok: false, status: 0, ms: 0, body: String(error) })
+        } finally {
+          button.disabled = false
+        }
+      })
+
+      function setStreamState(label, kind) {
+        const element = $('#stream-state')
+        element.textContent = label
+        element.className = 'stream-state' + (kind ? ' ' + kind : '')
+      }
+
+      function consumeFrame(frame) {
+        let event = 'message'
+        const data = []
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim()
+          else if (line.startsWith('data:')) data.push(line.slice(5).trimStart())
+        }
+        if (!data.length) return
+        let payload = data.join('\n')
+        try { payload = JSON.parse(payload) } catch {}
+        const log = $('#stream-log')
+        log.textContent += event + '  ' + (typeof payload === 'string' ? payload : JSON.stringify(payload)) + '\n'
+        log.scrollTop = log.scrollHeight
+
+        if (event === 'session' && payload && payload.sessionId) setSession(payload.sessionId)
+        if (event === 'text' && payload && payload.text) {
+          const text = $('#stream-text')
+          text.textContent += payload.text
+          text.scrollTop = text.scrollHeight
+        }
+        if (event === 'final' && payload && payload.text) {
+          const text = $('#stream-text')
+          if (!text.textContent.trim()) text.textContent = payload.text
+        }
+        if (event === 'done') {
+          if (payload && payload.text) $('#stream-text').textContent = payload.text
+          setStreamState('done', 'ok')
+        }
+        if (event === 'error') setStreamState('error', 'bad')
+      }
+
+      $('#analyze-pdf').addEventListener('click', async () => {
+        const projectId = $('#pdf-project').value.trim()
+        const sessionId = $('#pdf-session').value.trim()
+        const file = $('#pdf-file').files && $('#pdf-file').files[0]
+        const message = $('#pdf-message').value.trim()
+        if (!projectId || !sessionId) return toast('Project id and session id are required')
+        if (!file) return toast('Choose a PDF file')
+        if (!message) return toast('A review message is required')
+        const form = new FormData()
+        form.set('message', message)
+        form.set('file', file)
+        const started = performance.now()
+        try {
+          const response = await fetch(
+            '/api/projects/' + encodeURIComponent(projectId)
+              + '/sessions/' + encodeURIComponent(sessionId) + '/pdf-review',
+            { method: 'POST', headers: authHeaders(), body: form },
+          )
+          const text = await response.text()
+          let body = text
+          try { body = text ? JSON.parse(text) : null } catch {}
+          showResponse($('#pdf-response'), {
+            ok: response.ok,
+            status: response.status,
+            ms: Math.round(performance.now() - started),
+            body,
+          })
+        } catch (error) {
+          showResponse($('#pdf-response'), {
+            ok: false, status: 0, ms: 0, body: String(error),
+          })
+        }
+      })
+
+      $('#start-stream').addEventListener('click', async () => {
+        const message = $('#stream-message').value
+        if (!message.trim()) return toast('Message is required')
+        if (streamController) return
+        streamController = new AbortController()
+        $('#start-stream').disabled = true
+        $('#stop-stream').disabled = false
+        setStreamState('connecting…')
+        $('#stream-text').textContent = ''
+        $('#stream-log').textContent = ''
+        try {
+          const sessionId = $('#stream-session').value.trim()
+          const response = await fetch('/api/chat/stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify(sessionId ? { message, sessionId } : { message }),
+            signal: streamController.signal,
+          })
+          if (!response.ok) {
+            const body = await response.text()
+            throw new Error('HTTP ' + response.status + ' · ' + body)
+          }
+          setStreamState('streaming…')
+          const reader = response.body.getReader()
+          const decoder = new TextDecoder()
+          let buffer = ''
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            let index
+            while ((index = buffer.indexOf('\n\n')) !== -1) {
+              const frame = buffer.slice(0, index)
+              buffer = buffer.slice(index + 2)
+              if (frame.trim()) consumeFrame(frame)
+            }
+          }
+          if (buffer.trim()) consumeFrame(buffer)
+          if ($('#stream-state').textContent === 'streaming…') setStreamState('closed')
+        } catch (error) {
+          if (error && error.name === 'AbortError') {
+            setStreamState('stopped')
+          } else {
+            setStreamState('error', 'bad')
+            $('#stream-log').textContent += 'client error: ' + String(error) + '\n'
+          }
+        } finally {
+          streamController = null
+          $('#start-stream').disabled = false
+          $('#stop-stream').disabled = true
+        }
+      })
+
+      $('#stop-stream').addEventListener('click', () => {
+        if (streamController) streamController.abort()
+      })
+
+      $('#chat-message').addEventListener('keydown', (event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') $('#send-chat').click()
+      })
+      $('#stream-message').addEventListener('keydown', (event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') $('#start-stream').click()
+      })
+
+      checkHealth()
+      $('#load-sessions').click()
+      $('#load-settings').click()
+      $('#load-projects').click()
+    })()
+  </script>
+</body>
+</html>

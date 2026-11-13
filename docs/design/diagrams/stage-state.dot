@@ -1,0 +1,30 @@
+digraph stage_state {
+  graph [rankdir=TB, bgcolor="white", fontname="Helvetica", fontsize=10,
+         pad=0.3, nodesep=0.35, ranksep=0.4];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9,
+         color="#94a3b8", fillcolor="#f8fafc", penwidth=1.0, margin="0.14,0.08"];
+  edge  [fontname="Helvetica", fontsize=8, color="#475569", arrowsize=0.6];
+
+  pending [label="pending", fillcolor="#e0f2fe", color="#0284c7"];
+  analyzing [label="analyzing\nanalyzer agent", fillcolor="#fef3c7", color="#d97706"];
+  drafting [label="drafting\nauthor agent", fillcolor="#fef3c7", color="#d97706"];
+  reviewing [label="reviewing\nreviewer agent", fillcolor="#fef3c7", color="#d97706"];
+  revising [label="revising\nfindings → author", fillcolor="#ffedd5", color="#ea580c"];
+  human [label="awaiting_human\ngate", fillcolor="#dbeafe", color="#2563eb"];
+  completed [label="completed", fillcolor="#dcfce7", color="#16a34a"];
+  failed [label="failed\nmax cycles / budget", fillcolor="#fee2e2", color="#dc2626"];
+  note [shape=note, label="A run may be cancelled from any non-terminal state.\nEvery transition is written to the audit log.", fillcolor="#f8fafc", color="#94a3b8"];
+
+  pending -> analyzing;
+  analyzing -> drafting;
+  drafting -> reviewing;
+  reviewing -> revising [label="needs_revision"];
+  revising -> drafting [label="new draft"];
+  reviewing -> human [label="approved"];
+  human -> completed [label="human approves"];
+  human -> revising [label="human requests changes", style=dashed];
+  reviewing -> failed [label="cycle limit"];
+
+  { rank=same; reviewing; revising; }
+  { rank=same; human; failed; }
+}

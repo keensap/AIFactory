@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+
+# secrets — never commit; .env.example documents the contract
+.env
+.env.*
+!.env.example
+
+# local state and logs
+.data/
+.dsh-home/
+*.log
+.tmp/
+.tmp-*
+.screens/
+.pw-browsers/
+.pw-logs/
+.npm-cache/
+
+# build output
+dist/
+.next/
+coverage/
+*.tsbuildinfo
+
+# OS noise
+.DS_Store

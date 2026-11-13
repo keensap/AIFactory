@@ -1,0 +1,2381 @@
+openapi: 3.1.0
+info:
+  title: AI Factory Chat API
+  version: 0.1.0
+  description: |
+    Thin HTTP/JSON and SSE API over a DeepSeek Harness headless runtime.
+    One request is one harness turn. The harness Session id is the public
+    conversation id; the local session index exists for UI listing and history.
+servers:
+  - url: http://127.0.0.1:8787
+    description: Default local server
+security:
+  - {}
+  - bearerAuth: []
+tags:
+  - name: health
+  - name: sessions
+  - name: chat
+  - name: stage-runs
+  - name: stats
+  - name: logs
+  - name: observability
+  - name: retrieval
+paths:
+  /api/health:
+    get:
+      tags: [health]
+      summary: Liveness and configuration summary
+      security: []
+      responses:
+        '200':
+          description: API is running
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, version, uptimeSeconds]
+                properties:
+                  ok:
+                    type: boolean
+                  version:
+                    type: string
+                  uptimeSeconds:
+                    type: integer
+                  harness:
+                    oneOf:
+                      - type: object
+                        properties:
+                          command:
+                            type: string
+                          profile:
+                            type: string
+                      - type: 'null'
+
+  /api/sessions:
+    get:
+      tags: [sessions]
+      summary: List locally indexed conversations
+      parameters:
+        - name: projectId
+          in: query
+          required: false
+          description: Only sessions bound to this registry project.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Session summaries, most recently updated first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessions]
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SessionSummary'
+
+  /api/sessions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [sessions]
+      summary: Get a conversation with messages
+      responses:
+        '200':
+          description: Full local session record
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session]
+                properties:
+                  session:
+                    $ref: '#/components/schemas/Session'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [sessions]
+      summary: Delete the local session record
+      description: Does not delete the harness Session or its transcript.
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Busy'
+
+  /api/sessions/{id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [sessions]
+      summary: Get only the messages of a conversation
+      responses:
+        '200':
+          description: Messages in chronological order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [messages]
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Message'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tools:
+    get:
+      tags: [tools]
+      summary: List agent-facing project tool descriptors
+      responses:
+        '200':
+          description: Tool names, descriptions and JSON Schemas
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tools]
+                properties:
+                  tools:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ToolDescriptor'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+
+  /api/sdlc/stages:
+    get:
+      tags: [sdlc]
+      summary: List the default SDLC stage names
+      description: |
+        Reference list for UI display. Project stage state stores the stage key;
+        this table is not a foreign-key parent for project_stages.
+      responses:
+        '200':
+          description: Stages in display order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stages]
+                properties:
+                  stages:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SdlcStage'
+
+  /api/settings:
+    get:
+      tags: [settings]
+      summary: View chat settings
+      responses:
+        '200':
+          description: Current settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsResponse'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+    patch:
+      tags: [settings]
+      summary: Update chat settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettingsPatch'
+      responses:
+        '200':
+          description: Updated settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+
+  /api/projects:
+    get:
+      tags: [projects]
+      summary: List projects
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ProjectStatus'
+        - name: organization
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Projects, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [projects]
+                properties:
+                  projects:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+    post:
+      tags: [projects]
+      summary: Create a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectInput'
+      responses:
+        '201':
+          description: Created project with SDLC status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectDetailResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+
+  /api/projects/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [projects]
+      summary: Get one project
+      responses:
+        '200':
+          description: Project with SDLC status and documents
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectDetailResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+    patch:
+      tags: [projects]
+      summary: Update project fields
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectPatch'
+      responses:
+        '200':
+          description: Updated project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+    delete:
+      tags: [projects]
+      summary: Remove a project
+      description: Deletes the registry row only; the root directory is never removed.
+      responses:
+        '204':
+          description: Removed
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+
+  /api/projects/{id}/status:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    patch:
+      tags: [projects]
+      summary: Change project status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  $ref: '#/components/schemas/ProjectStatus'
+      responses:
+        '200':
+          description: Updated project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+
+  /api/fs/directories:
+    get:
+      tags: [projects]
+      summary: List subdirectories on the API host (directory picker)
+      parameters:
+        - name: path
+          in: query
+          required: false
+          description: Absolute path; defaults to the API host's home directory.
+          schema:
+            type: string
+        - name: hidden
+          in: query
+          required: false
+          description: Set to 1 to include dot-directories.
+          schema:
+            type: string
+            enum: ['1']
+      responses:
+        '200':
+          description: Subdirectories of the canonical path
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [path, parent, home, entries, truncated]
+                properties:
+                  path: { type: string }
+                  parent: { type: [string, 'null'] }
+                  home: { type: string }
+                  truncated: { type: boolean }
+                  entries:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, path]
+                      properties:
+                        name: { type: string }
+                        path: { type: string }
+        '400': { description: 'INVALID_PATH or NOT_A_DIRECTORY' }
+        '403': { description: PATH_NOT_READABLE }
+        '404': { description: PATH_NOT_FOUND }
+  /api/projects/{projectId}/sessions/{sessionId}/pdf-review:
+    post:
+      tags: [pdf]
+      summary: Review a requirement PDF as a product manager
+      description: |
+        Extracts PDF text, attaches project context, runs the configured model
+        and returns either a Markdown review or a list of questions.
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, message]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Requirement PDF, maximum 20 MB.
+                message:
+                  type: string
+                  minLength: 1
+                  maxLength: 20000
+      responses:
+        '200':
+          description: Review or questions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PdfReviewResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          description: PDF contains no extractable text
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          $ref: '#/components/responses/HarnessError'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+
+  /api/projects/{id}/stage:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    patch:
+      tags: [projects]
+      summary: Advance a project to the next SDLC stage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stage]
+              properties:
+                stage:
+                  $ref: '#/components/schemas/ProjectStage'
+      responses:
+        '200':
+          description: Updated project status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectDetailResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/projects/{id}/checklist/{stage}/{key}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: stage
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/ProjectStage'
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      tags: [projects]
+      summary: Update a stage checklist item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [open, done, waived]
+                evidenceDocumentId:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Updated checklist item
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  item:
+                    $ref: '#/components/schemas/ChecklistItem'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/projects/{id}/documents:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [documents]
+      summary: List project documents
+      responses:
+        '200':
+          description: Documents
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [documents]
+                properties:
+                  documents:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ProjectDocument'
+    post:
+      tags: [documents]
+      summary: Upload a project document
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, stage, kind]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                stage:
+                  $ref: '#/components/schemas/ProjectStage'
+                kind:
+                  type: string
+                title:
+                  type: string
+      responses:
+        '201':
+          description: Created document
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document:
+                    $ref: '#/components/schemas/ProjectDocument'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+
+  /api/projects/{id}/documents/{documentId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: documentId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [documents]
+      summary: Get document metadata
+      responses:
+        '200':
+          description: Document
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document:
+                    $ref: '#/components/schemas/ProjectDocument'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [documents]
+      summary: Update document status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [uploaded, in_review, approved, rejected, superseded]
+      responses:
+        '200':
+          description: Updated document
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document:
+                    $ref: '#/components/schemas/ProjectDocument'
+
+  /api/projects/{id}/documents/{documentId}/content:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: documentId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [documents]
+      summary: Download the stored document
+      responses:
+        '200':
+          description: Binary file
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/projects/{id}/briefing:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [projects]
+      summary: Read the cached AI briefing
+      responses:
+        '200':
+          description: Cached briefing
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [briefing]
+                properties:
+                  briefing:
+                    $ref: '#/components/schemas/ProjectBriefing'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [projects]
+      summary: Generate or refresh the AI briefing
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh:
+                  type: boolean
+      responses:
+        '200':
+          description: Generated briefing
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [briefing]
+                properties:
+                  briefing:
+                    $ref: '#/components/schemas/ProjectBriefing'
+        '502':
+          $ref: '#/components/responses/HarnessError'
+
+  /api/projects/{id}/stats:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [stats]
+      summary: Token consumption and task-duration statistics
+      description: >-
+        Derived from the durable harness stage event log (status usage and
+        role_end durations). Does not depend on Phoenix. Default window is the
+        last 30 days.
+      parameters:
+        - name: days
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 365, default: 30}
+        - name: from
+          in: query
+          schema: {type: string, format: date-time}
+        - name: to
+          in: query
+          schema: {type: string, format: date-time}
+        - name: stage
+          in: query
+          schema: {$ref: '#/components/schemas/ProjectStage'}
+        - name: role
+          in: query
+          schema: {type: string}
+      responses:
+        '200':
+          description: Aggregated statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stats]
+                properties:
+                  stats:
+                    $ref: '#/components/schemas/ProjectStats'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+
+  /api/projects/{id}/logs:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [logs]
+      summary: Read project logs (stage events, application logs, or both)
+      parameters:
+        - name: source
+          in: query
+          description: >-
+            events (default, id cursor), app (application logs, id cursor) or
+            all (merged newest-first; `before` is an ISO timestamp).
+          schema:
+            type: string
+            enum: [events, app, all]
+            default: events
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: before
+          in: query
+          schema:
+            type: string
+        - name: level
+          in: query
+          schema:
+            type: string
+            enum: [debug, info, warn, error]
+        - name: type
+          in: query
+          schema:
+            type: string
+        - name: role
+          in: query
+          schema:
+            type: string
+        - name: runId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: stage
+          in: query
+          schema:
+            $ref: '#/components/schemas/ProjectStage'
+        - name: q
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Newest-first project logs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [logs, nextBefore]
+                properties:
+                  source:
+                    type: string
+                  logs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ProjectLog'
+                  nextBefore:
+                    type: [string, 'null']
+                  postgresEnabled:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          description: Application log storage is not configured (source=app|all)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/logs:
+    get:
+      tags: [logs]
+      summary: Query application logs (requires PostgreSQL storage)
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+        - {name: before, in: query, description: Numeric id cursor, schema: {type: string}}
+        - {name: level, in: query, schema: {$ref: '#/components/schemas/LogLevel'}}
+        - {name: minLevel, in: query, schema: {$ref: '#/components/schemas/LogLevel'}}
+        - {name: event, in: query, description: Exact event, or prefix when it ends with *, schema: {type: string}}
+        - {name: component, in: query, schema: {type: string}}
+        - {name: projectId, in: query, schema: {type: string}}
+        - {name: stageRunId, in: query, schema: {type: string}}
+        - {name: requestId, in: query, schema: {type: string}}
+        - {name: role, in: query, schema: {type: string}}
+        - {name: q, in: query, schema: {type: string}}
+        - {name: from, in: query, schema: {type: string, format: date-time}}
+        - {name: to, in: query, schema: {type: string, format: date-time}}
+      responses:
+        '200':
+          description: Newest-first application logs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [logs, nextBefore, postgresEnabled]
+                properties:
+                  logs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AppLog'
+                  nextBefore:
+                    type: [string, 'null']
+                  postgresEnabled:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          description: Log storage is not configured (LOG_STORE_NOT_CONFIGURED)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/settings/logging:
+    get:
+      tags: [logs]
+      summary: Read logging settings
+      responses:
+        '200':
+          description: Settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoggingSettingsResponse'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+    patch:
+      tags: [logs]
+      summary: Update logging settings (applied live and persisted)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoggingSettingsPatch'
+      responses:
+        '200':
+          description: Updated settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoggingSettingsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: POSTGRES_UNAVAILABLE — no database configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/admin/observability:
+    get:
+      tags: [stats]
+      summary: Observability provider health
+      description: Requires the bearer token, or a loopback client when no token is configured.
+      responses:
+        '200':
+          description: Provider health and cache statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  observability:
+                    $ref: '#/components/schemas/ObservabilityHealth'
+        '403':
+          description: ADMIN_FORBIDDEN
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: OBSERVABILITY_DISABLED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/admin/logging:
+    get:
+      tags: [logs]
+      summary: Logging pipeline health and effective configuration
+      description: Requires the bearer token, or a loopback client when no token is configured.
+      responses:
+        '200':
+          description: Diagnostics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logging:
+                    type: object
+                    additionalProperties: true
+        '403':
+          description: ADMIN_FORBIDDEN
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/admin/logging/level:
+    put:
+      tags: [logs]
+      summary: Temporary or runtime log level change
+      description: >-
+        Global level with optional ttlSeconds auto-revert, or a per-component
+        override (no TTL). level null clears a component override or returns the
+        global level to its configured value.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [level]
+              properties:
+                level:
+                  oneOf:
+                    - $ref: '#/components/schemas/LogLevel'
+                    - type: 'null'
+                ttlSeconds:
+                  type: integer
+                  minimum: 1
+                  maximum: 86400
+                component:
+                  type: string
+      responses:
+        '200':
+          description: Effective levels
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  levels:
+                    type: object
+                    additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: ADMIN_FORBIDDEN
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/projects/{id}/observability:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [observability]
+      summary: Phoenix trace summary for a project
+      parameters:
+        - name: hours
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 168
+            default: 24
+      responses:
+        '200':
+          description: Project observability summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [observability]
+                properties:
+                  observability:
+                    $ref: '#/components/schemas/ObservabilitySummary'
+        '503':
+          description: Phoenix integration is disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/projects/{id}/index:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [retrieval]
+      summary: Index project documents into pgvector
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                documentId:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Index result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IndexProjectResult'
+        '503':
+          description: Semantic indexing is disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/projects/{id}/search:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [retrieval]
+      summary: Search project chunks semantically
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 8
+        - name: sourceType
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [query, results]
+                properties:
+                  query:
+                    type: string
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ChunkSearchResult'
+        '503':
+          description: Semantic search is disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/projects/{id}/stages/{stage}/runs:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/Stage'
+    get:
+      tags: [stage-runs]
+      summary: List stage runs
+      responses:
+        '200':
+          description: Runs, most recent first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs]
+                properties:
+                  runs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/StageRun'
+        '501':
+          description: Stage runtime is not implemented for this stage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags: [stage-runs]
+      summary: Create a planning stage run
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                brief:
+                  type: string
+                  description: High-level business idea and stakeholder goals for the run.
+      responses:
+        '201':
+          description: Created run
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run]
+                properties:
+                  run:
+                    $ref: '#/components/schemas/StageRunDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '501':
+          description: Stage runtime is not implemented for this stage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/stage-runs/{runId}:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
+    get:
+      tags: [stage-runs]
+      summary: Get a stage run with reviews and documents
+      responses:
+        '200':
+          description: Stage run
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run]
+                properties:
+                  run:
+                    $ref: '#/components/schemas/StageRunDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/stage-runs/{runId}/reviews:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
+    get:
+      tags: [stage-runs]
+      summary: List review decisions
+      responses:
+        '200':
+          description: Reviews
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [reviews]
+                properties:
+                  reviews:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/StageReview'
+
+  /api/stage-runs/{runId}/events:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
+    get:
+      tags: [stage-runs]
+      summary: Read persisted stage-run events
+      parameters:
+        - name: after
+          in: query
+          required: false
+          description: Return events with an id greater than this value.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 200
+      responses:
+        '200':
+          description: Ordered events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events, nextAfter]
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/StageRunEvent'
+                  nextAfter:
+                    type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/stage-runs/{runId}/events/stream:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
+    get:
+      tags: [stage-runs]
+      summary: Stream stage-run events over SSE
+      description: |
+        Replays persisted events after the `after` query or Last-Event-ID header,
+        then tails new events. The stream ends after a terminal run event.
+        Browsers should use fetch + ReadableStream so the bearer token can be sent.
+      parameters:
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Server-sent event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/stage-runs/{runId}/execute:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
+    post:
+      tags: [stage-runs]
+      summary: Start the analyzer, author and reviewer loop
+      parameters:
+        - name: wait
+          in: query
+          required: false
+          description: Wait for completion instead of returning 202 immediately.
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Run advanced to awaiting_human (wait=1)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run]
+                properties:
+                  run:
+                    $ref: '#/components/schemas/StageRunDetail'
+        '202':
+          description: Execution started; poll the run
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run]
+                properties:
+                  run:
+                    $ref: '#/components/schemas/StageRunDetail'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '502':
+          $ref: '#/components/responses/HarnessError'
+
+  /api/stage-runs/{runId}/decision:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
+    post:
+      tags: [stage-runs]
+      summary: Record the human go/no-go decision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision:
+                  type: string
+                  enum: [go, conditional_go, no_go]
+                note:
+                  type: string
+      responses:
+        '200':
+          description: Completed stage run
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run]
+                properties:
+                  run:
+                    $ref: '#/components/schemas/StageRunDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/chat:
+    post:
+      tags: [chat]
+      summary: Run one non-streaming turn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: Assistant reply
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Busy'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '502':
+          $ref: '#/components/responses/HarnessError'
+        '503':
+          $ref: '#/components/responses/HarnessUnavailable'
+        '504':
+          $ref: '#/components/responses/HarnessTimeout'
+
+  /api/chat/stream:
+    post:
+      tags: [chat]
+      summary: Run one turn and stream Server-Sent Events
+      description: |
+        Event names: session, status, text, thinking (only with
+        --show-thinking), tool_call, tool_result, final, done, error.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Newline-delimited SSE frames.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Busy'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Required only when AIFACTORY_API_TOKEN is configured.
+
+  parameters:
+    SessionId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        examples: [session-53dedc16-56c1-4f0e-b076-b7a799b75933]
+    ProjectId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Stage:
+      name: stage
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/ProjectStage'
+    RunId:
+      name: runId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    ChatRequest:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          minLength: 1
+          maxLength: 65536
+        sessionId:
+          type: string
+          description: Omit to start a new conversation.
+        projectId:
+          type: string
+          format: uuid
+          description: >-
+            Run the turn in this registry project's rootPath. Binds a new session
+            to the project; a continued session always uses its bound project and
+            a different projectId is rejected with 409 SESSION_PROJECT_MISMATCH.
+            Archived projects cannot start new sessions (409 PROJECT_ARCHIVED).
+            Requires DATABASE_URL (503 DATABASE_NOT_CONFIGURED otherwise).
+    ChatResponse:
+      type: object
+      required: [sessionId, reply, reason, durationMs]
+      properties:
+        sessionId:
+          type: string
+        reply:
+          type: string
+        reason:
+          $ref: '#/components/schemas/TurnReason'
+        durationMs:
+          type: integer
+    TurnReason:
+      oneOf:
+        - type: object
+          properties:
+            kind:
+              type: string
+          additionalProperties: true
+        - type: 'null'
+    Message:
+      type: object
+      required: [role, content, at]
+      properties:
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+        at:
+          type: string
+          format: date-time
+    SessionSummary:
+      type: object
+      required: [id, title, createdAt, updatedAt, messageCount]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        messageCount:
+          type: integer
+        projectId:
+          type: string
+          format: uuid
+          description: Present when the session was started with a projectId.
+    Session:
+      allOf:
+        - $ref: '#/components/schemas/SessionSummary'
+        - type: object
+          required: [messages]
+          properties:
+            messages:
+              type: array
+              items:
+                $ref: '#/components/schemas/Message'
+    ToolDescriptor:
+      type: object
+      required: [name, description, inputSchema]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        inputSchema:
+          type: object
+          additionalProperties: true
+    PdfReviewDocument:
+      type: object
+      required: [filename, pages, characters, truncated]
+      properties:
+        filename:
+          type: string
+        pages:
+          type: integer
+        characters:
+          type: integer
+        truncated:
+          type: boolean
+    PdfReviewAnalysis:
+      oneOf:
+        - type: object
+          required: [type, decision, markdown, questions]
+          properties:
+            type:
+              const: review
+            decision:
+              type: string
+              enum: [complete, needs_revision]
+            markdown:
+              type: string
+            questions:
+              type: array
+              items:
+                type: string
+        - type: object
+          required: [type, decision, questions, markdown]
+          properties:
+            type:
+              const: questions
+            decision:
+              const: questions_required
+            questions:
+              type: array
+              items:
+                type: string
+            markdown:
+              type: string
+    PdfReviewResult:
+      type: object
+      required: [project, sessionId, document, analysis, durationMs]
+      properties:
+        project:
+          $ref: '#/components/schemas/Project'
+        sessionId:
+          type: string
+        document:
+          $ref: '#/components/schemas/PdfReviewDocument'
+        analysis:
+          $ref: '#/components/schemas/PdfReviewAnalysis'
+        durationMs:
+          type: integer
+    ProjectStatus:
+      type: string
+      enum: [active, inactive, archived, completed, on_hold]
+    Settings:
+      type: object
+      required: [maxActiveProjects, updatedAt]
+      properties:
+        maxActiveProjects:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 3
+        updatedAt:
+          type: string
+          format: date-time
+    SettingsPatch:
+      type: object
+      required: [maxActiveProjects]
+      properties:
+        maxActiveProjects:
+          type: integer
+          minimum: 1
+          maximum: 1000
+    SettingsResponse:
+      type: object
+      required: [settings]
+      properties:
+        settings:
+          $ref: '#/components/schemas/Settings'
+    SdlcStage:
+      type: object
+      required: [key, name, position]
+      properties:
+        key:
+          type: string
+        name:
+          type: string
+        position:
+          type: integer
+    LogLevel:
+      type: string
+      enum: [trace, debug, info, warn, error, fatal]
+    AppLog:
+      type: object
+      required: [id, ts, level, message, record]
+      properties:
+        id: {type: string}
+        ts: {type: string, format: date-time}
+        level: {$ref: '#/components/schemas/LogLevel'}
+        event: {type: [string, 'null']}
+        component: {type: [string, 'null']}
+        message: {type: string}
+        requestId: {type: [string, 'null']}
+        traceId: {type: [string, 'null']}
+        projectId: {type: [string, 'null']}
+        stageRunId: {type: [string, 'null']}
+        stage: {type: [string, 'null']}
+        role: {type: [string, 'null']}
+        record: {type: object, additionalProperties: true}
+    LoggingSettings:
+      type: object
+      properties:
+        level:
+          oneOf:
+            - $ref: '#/components/schemas/LogLevel'
+            - type: 'null'
+        postgres:
+          type: object
+          properties:
+            enabled: {type: boolean}
+            minLevel: {$ref: '#/components/schemas/LogLevel'}
+            retentionDays: {type: integer, minimum: 1, maximum: 365}
+        file:
+          type: object
+          properties:
+            retentionDays: {type: integer, minimum: 0, maximum: 365}
+        updatedAt: {type: [string, 'null'], format: date-time}
+    LoggingSettingsPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        level:
+          oneOf:
+            - $ref: '#/components/schemas/LogLevel'
+            - type: 'null'
+        postgres:
+          type: object
+          additionalProperties: false
+          properties:
+            enabled: {type: boolean}
+            minLevel: {$ref: '#/components/schemas/LogLevel'}
+            retentionDays: {type: integer, minimum: 1, maximum: 365}
+        file:
+          type: object
+          additionalProperties: false
+          properties:
+            retentionDays: {type: integer, minimum: 0, maximum: 365}
+    LoggingSettingsResponse:
+      type: object
+      properties:
+        settings: {$ref: '#/components/schemas/LoggingSettings'}
+        postgresAvailable: {type: boolean}
+    TokenTotals:
+      type: object
+      required: [input, output, total, cacheRead, cacheWrite]
+      properties:
+        input: {type: integer}
+        output: {type: integer}
+        total: {type: integer}
+        cacheRead: {type: integer}
+        cacheWrite: {type: integer}
+    DurationStats:
+      type: object
+      required: [count, totalMs, avgMs, p50Ms, p95Ms, maxMs]
+      properties:
+        count: {type: integer}
+        totalMs: {type: integer}
+        avgMs: {type: integer}
+        p50Ms: {type: integer}
+        p95Ms: {type: integer}
+        maxMs: {type: integer}
+    ObservabilityHealth:
+      type: object
+      required: [provider, enabled, state, projects, exports, failures, droppedSpans]
+      properties:
+        provider: {type: string}
+        enabled: {type: boolean}
+        state:
+          type: string
+          enum: [healthy, degraded, open, disabled]
+        projects: {type: integer}
+        exports: {type: integer}
+        failures: {type: integer}
+        droppedSpans: {type: integer}
+        lastError: {type: [string, 'null']}
+        openUntil: {type: [string, 'null'], format: date-time}
+        cache:
+          type: object
+          properties:
+            entries: {type: integer}
+            hits: {type: integer}
+            misses: {type: integer}
+            timeouts: {type: integer}
+            ttlMs: {type: integer}
+            deadlineMs: {type: integer}
+    ProjectStats:
+      type: object
+      required: [projectId, from, to, runs, tokens, runDurationMs, activeDurationMs, byRole, byStage, daily, recentRuns]
+      properties:
+        projectId: {type: string, format: uuid}
+        from: {type: string, format: date-time}
+        to: {type: string, format: date-time}
+        runs:
+          type: object
+          properties:
+            total: {type: integer}
+            byStatus:
+              type: object
+              additionalProperties: {type: integer}
+            byStage:
+              type: object
+              additionalProperties: {type: integer}
+        tokens: {$ref: '#/components/schemas/TokenTotals'}
+        runDurationMs:
+          allOf:
+            - $ref: '#/components/schemas/DurationStats'
+          description: Wall-clock run duration; may include time waiting for a human decision.
+        activeDurationMs:
+          allOf:
+            - $ref: '#/components/schemas/DurationStats'
+          description: Sum of analyzer/author/reviewer execution durations.
+        byRole:
+          type: array
+          items:
+            type: object
+            properties:
+              role: {type: string}
+              runs: {type: integer}
+              attempts: {type: integer}
+              tokens: {$ref: '#/components/schemas/TokenTotals'}
+              durationMs: {$ref: '#/components/schemas/DurationStats'}
+        byStage:
+          type: array
+          items:
+            type: object
+            properties:
+              stage: {$ref: '#/components/schemas/ProjectStage'}
+              runs: {type: integer}
+              tokens: {$ref: '#/components/schemas/TokenTotals'}
+              activeDurationMs: {$ref: '#/components/schemas/DurationStats'}
+        daily:
+          type: array
+          items:
+            type: object
+            properties:
+              date: {type: string, format: date}
+              runs: {type: integer}
+              tokens: {$ref: '#/components/schemas/TokenTotals'}
+              activeDurationMs: {type: integer}
+        recentRuns:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            properties:
+              id: {type: string, format: uuid}
+              stage: {$ref: '#/components/schemas/ProjectStage'}
+              attempt: {type: integer}
+              status: {type: string}
+              startedAt: {type: [string, 'null'], format: date-time}
+              endedAt: {type: [string, 'null'], format: date-time}
+              durationMs: {type: [integer, 'null']}
+              activeDurationMs: {type: integer}
+              tokens: {$ref: '#/components/schemas/TokenTotals'}
+              roles:
+                type: array
+                items: {type: string}
+    ProjectLog:
+      type: object
+      required: [id, projectId, stageRunId, stage, attempt, type, level, message, createdAt]
+      properties:
+        id:
+          type: string
+        projectId:
+          type: string
+          format: uuid
+        stageRunId:
+          type: string
+          format: uuid
+        stage:
+          $ref: '#/components/schemas/ProjectStage'
+        attempt:
+          type: integer
+        role:
+          type: [string, 'null']
+        agentId:
+          type: [string, 'null']
+        type:
+          type: string
+        phase:
+          type: [string, 'null']
+        level:
+          type: string
+          enum: [debug, info, warn, error]
+        message:
+          type: string
+        preview:
+          type: [string, 'null']
+        source:
+          type: string
+          enum: [events, app]
+        component:
+          type: [string, 'null']
+        requestId:
+          type: [string, 'null']
+        traceId:
+          type: [string, 'null']
+        payload:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+    ObservabilitySummary:
+      type: object
+      properties:
+        available:
+          type: boolean
+        reason:
+          type: string
+        projectName:
+          type: string
+        windowHours:
+          type: integer
+        traces:
+          type: integer
+        spans:
+          type: integer
+        errors:
+          type: integer
+        tools:
+          type: integer
+        tokens:
+          type: integer
+        latencyMs:
+          type: object
+          properties:
+            count:
+              type: integer
+            avg:
+              type: integer
+            p50:
+              type: integer
+            p95:
+              type: integer
+            max:
+              type: integer
+        roles:
+          type: array
+          items:
+            type: object
+            properties:
+              role:
+                type: string
+              spans:
+                type: integer
+              errors:
+                type: integer
+              durationMs:
+                type: integer
+              tokens:
+                type: integer
+        lastSpanAt:
+          type: [string, 'null']
+          format: date-time
+        truncated:
+          type: boolean
+    IndexedDocument:
+      type: object
+      required: [documentId, title, chunks]
+      properties:
+        documentId:
+          type: string
+          format: uuid
+        title:
+          type: string
+        chunks:
+          type: integer
+    IndexProjectResult:
+      type: object
+      required: [indexed, skipped, chunks]
+      properties:
+        indexed:
+          type: array
+          items:
+            $ref: '#/components/schemas/IndexedDocument'
+        skipped:
+          type: array
+          items:
+            type: object
+            properties:
+              documentId:
+                type: string
+              title:
+                type: string
+              reason:
+                type: string
+        chunks:
+          type: integer
+    ChunkSearchResult:
+      type: object
+      required: [id, projectId, sourceType, sourcePath, chunkIndex, content, score]
+      properties:
+        id:
+          type: string
+        projectId:
+          type: string
+          format: uuid
+        documentId:
+          type: [string, 'null']
+        stageRunId:
+          type: [string, 'null']
+        sourceType:
+          type: string
+        sourcePath:
+          type: string
+        chunkIndex:
+          type: integer
+        content:
+          type: string
+        score:
+          type: number
+    StageRunEvent:
+      type: object
+      required: [id, projectId, stageRunId, type, payload, createdAt]
+      properties:
+        id:
+          type: string
+        projectId:
+          type: string
+          format: uuid
+        stageRunId:
+          type: string
+          format: uuid
+        role:
+          type: [string, 'null']
+        agentId:
+          type: [string, 'null']
+        type:
+          type: string
+        phase:
+          type: [string, 'null']
+        payload:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+    StageRun:
+      type: object
+      required: [id, projectId, stage, attempt, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        projectId:
+          type: string
+          format: uuid
+        stage:
+          $ref: '#/components/schemas/ProjectStage'
+        attempt:
+          type: integer
+        sessionId:
+          type: [string, 'null']
+        status:
+          type: string
+          enum: [pending, analyzing, drafting, reviewing, revising, awaiting_human, completed, failed, cancelled]
+        contextHash:
+          type: [string, 'null']
+        context:
+          type: [object, 'null']
+          additionalProperties: true
+        inputText:
+          type: [string, 'null']
+        analysisMarkdown:
+          type: [string, 'null']
+        draftMarkdown:
+          type: [string, 'null']
+        summaryMarkdown:
+          type: [string, 'null']
+        startedAt:
+          type: [string, 'null']
+          format: date-time
+        completedAt:
+          type: [string, 'null']
+          format: date-time
+        lockedBy:
+          type: [string, 'null']
+        leaseExpiresAt:
+          type: [string, 'null']
+          format: date-time
+        executionAttempts:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    StageReview:
+      type: object
+      required: [id, stageRunId, reviewerRole, decision, findings, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        stageRunId:
+          type: string
+          format: uuid
+        reviewerRole:
+          type: string
+        decision:
+          type: string
+          enum: [approved, needs_revision, rejected]
+        findings:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+    StageRunDetail:
+      allOf:
+        - $ref: '#/components/schemas/StageRun'
+        - type: object
+          required: [reviews, documents]
+          properties:
+            reviews:
+              type: array
+              items:
+                $ref: '#/components/schemas/StageReview'
+            documents:
+              type: array
+              items:
+                $ref: '#/components/schemas/ProjectDocument'
+    ProjectStage:
+      type: string
+      enum: [planning, requirements, design, architecture, development, testing, deployment, maintenance]
+    StageState:
+      type: object
+      required: [stage, status]
+      properties:
+        stage:
+          $ref: '#/components/schemas/ProjectStage'
+        status:
+          type: string
+          enum: [not_started, in_progress, completed, blocked, skipped]
+        startedAt:
+          type: [string, 'null']
+          format: date-time
+        completedAt:
+          type: [string, 'null']
+          format: date-time
+        notes:
+          type: [string, 'null']
+    ChecklistItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        stage:
+          $ref: '#/components/schemas/ProjectStage'
+        key:
+          type: string
+        label:
+          type: string
+        required:
+          type: boolean
+        status:
+          type: string
+          enum: [open, done, waived]
+        evidenceDocumentId:
+          type: [string, 'null']
+          format: uuid
+        completedAt:
+          type: [string, 'null']
+          format: date-time
+    NextAction:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [checklist, advance_stage, complete_project]
+        stage:
+          $ref: '#/components/schemas/ProjectStage'
+        key:
+          type: string
+        label:
+          type: string
+        required:
+          type: boolean
+    SdlcStatus:
+      type: object
+      properties:
+        currentStage:
+          $ref: '#/components/schemas/ProjectStage'
+        stages:
+          type: array
+          items:
+            $ref: '#/components/schemas/StageState'
+        checklist:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChecklistItem'
+        nextActions:
+          type: array
+          items:
+            $ref: '#/components/schemas/NextAction'
+        progress:
+          type: object
+          properties:
+            completedStages:
+              type: integer
+            totalStages:
+              type: integer
+            completedRequiredItems:
+              type: integer
+            totalRequiredItems:
+              type: integer
+    ProjectDocument:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        projectId:
+          type: string
+          format: uuid
+        stage:
+          $ref: '#/components/schemas/ProjectStage'
+        kind:
+          type: string
+        title:
+          type: string
+        storagePath:
+          type: string
+        mimeType:
+          type: string
+        sizeBytes:
+          type: integer
+        sha256:
+          type: string
+        status:
+          type: string
+          enum: [uploaded, in_review, approved, rejected, superseded]
+        version:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ProjectDetailResponse:
+      type: object
+      required: [project]
+      properties:
+        project:
+          $ref: '#/components/schemas/Project'
+        sdlc:
+          $ref: '#/components/schemas/SdlcStatus'
+        documents:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProjectDocument'
+    ProjectBriefing:
+      type: object
+      properties:
+        projectId:
+          type: string
+          format: uuid
+        inputHash:
+          type: string
+        markdown:
+          type: string
+        risks:
+          type: array
+          items:
+            type: string
+        generatedAt:
+          type: string
+          format: date-time
+        model:
+          type: [string, 'null']
+        nextActions:
+          type: array
+          items:
+            $ref: '#/components/schemas/NextAction'
+        stale:
+          type: boolean
+    Project:
+      type: object
+      required: [id, name, rootPath, organization, ownerEmail, status, currentStage, stageUpdatedAt, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        rootPath:
+          type: string
+        organization:
+          type: [string, 'null']
+        ownerEmail:
+          type: [string, 'null']
+        status:
+          $ref: '#/components/schemas/ProjectStatus'
+        currentStage:
+          $ref: '#/components/schemas/ProjectStage'
+        stageUpdatedAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ProjectInput:
+      type: object
+      required: [name, rootPath]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        rootPath:
+          type: string
+          description: Absolute path to an existing directory; canonicalised with realpath.
+        organization:
+          type: [string, 'null']
+        ownerEmail:
+          type: [string, 'null']
+          format: email
+        status:
+          $ref: '#/components/schemas/ProjectStatus'
+    ProjectPatch:
+      type: object
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        rootPath:
+          type: string
+        organization:
+          type: [string, 'null']
+        ownerEmail:
+          type: [string, 'null']
+          format: email
+        status:
+          $ref: '#/components/schemas/ProjectStatus'
+    ProjectResponse:
+      type: object
+      required: [project]
+      properties:
+        project:
+          $ref: '#/components/schemas/Project'
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [message, code, status]
+          properties:
+            message:
+              type: string
+            code:
+              type: string
+            status:
+              type: integer
+
+  responses:
+    BadRequest:
+      description: Malformed request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Unknown route or local session
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Busy:
+      description: A turn is already running for the session
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooLarge:
+      description: Body or message exceeds the limit
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Unique constraint conflict, such as a duplicate root path
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    DatabaseUnavailable:
+      description: Project registry is disabled because DATABASE_URL is not set
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    HarnessError:
+      description: Harness turn failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    HarnessUnavailable:
+      description: Harness executable could not start
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    HarnessTimeout:
+      description: Turn timed out
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

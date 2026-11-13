@@ -1,0 +1,34 @@
+digraph turn {
+  graph [rankdir=TB, bgcolor="white", fontname="Helvetica", fontsize=10,
+         pad=0.25, nodesep=0.35, ranksep=0.3];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9.5,
+         color="#94a3b8", fillcolor="#f8fafc", penwidth=1.0, margin="0.14,0.08"];
+  edge  [fontname="Helvetica", fontsize=8, color="#475569", arrowsize=0.6];
+
+  input   [label="1  user enters a prompt in the REPL", fillcolor="#e0f2fe", color="#0284c7"];
+  runTurn [label="2  runTurn(): reset render state, start spinner", fillcolor="#dbeafe", color="#2563eb"];
+  call    [label="3  DshHarness.run(prompt, sessionId?)", fillcolor="#dbeafe", color="#2563eb"];
+  spawn   [label="4  spawn  dsh --profile headless --json  [--session-id …]", fillcolor="#dbeafe", color="#2563eb"];
+  stdin   [label="5  write prompt to the child's stdin (not argv)", fillcolor="#dbeafe", color="#2563eb"];
+
+  subgraph cluster_child {
+    label="child process: one headless run";
+    fontsize=9; fontcolor="#92400e"; color="#fde68a"; style="rounded,dashed";
+    boot    [label="6  boot headless, open or adopt the Session", fillcolor="#fef3c7", color="#d97706"];
+    steps   [label="7  model / tool steps execute inside the harness", fillcolor="#fef3c7", color="#d97706"];
+    events  [label="8  emit NDJSON: session, status, text, thinking,\ntool_call, tool_result, final", fillcolor="#fef3c7", color="#d97706"];
+    final   [label="9  write final event and exit", fillcolor="#fef3c7", color="#d97706"];
+  }
+
+  consume [label="10  CLI reads each line: prints text, shows tools, accumulates result", fillcolor="#dbeafe", color="#2563eb"];
+  decide  [label="11  success?  exit 0 + completed + sessionId", shape=diamond, fillcolor="#ecfdf5", color="#059669", margin="0.02,0.02"];
+  store   [label="12  remember sessionId for the next turn", fillcolor="#dcfce7", color="#16a34a"];
+  next    [label="13  prompt again  /  /new  /  /exit", fillcolor="#e0f2fe", color="#0284c7"];
+  fail    [label="error path: HarnessError → render message", fillcolor="#fee2e2", color="#dc2626"];
+
+  input -> runTurn -> call -> spawn -> stdin -> boot -> steps -> events -> final -> consume -> decide;
+  decide -> store [label="yes"];
+  store -> next;
+  decide -> fail [label="no", color="#dc2626", fontcolor="#dc2626"];
+  fail -> next [style=dashed];
+}

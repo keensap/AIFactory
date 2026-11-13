@@ -1,0 +1,33 @@
+digraph stage_events_flow {
+  graph [rankdir=TB, bgcolor="white", fontname="Helvetica", fontsize=10,
+         pad=0.25, nodesep=0.35, ranksep=0.35];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9,
+         color="#94a3b8", fillcolor="#f8fafc", penwidth=1.0, margin="0.12,0.07"];
+  edge  [fontname="Helvetica", fontsize=8, color="#475569", arrowsize=0.6];
+
+  execute [label="POST /execute\nrun enters analyzing", fillcolor="#dbeafe", color="#2563eb"];
+  analyzer [label="analyzer\nrole_start → DSH events → role_end", fillcolor="#fef3c7", color="#d97706"];
+  author [label="author\nrole_start → draft → role_end", fillcolor="#fef3c7", color="#d97706"];
+  reviewer [label="reviewer\nrole_start → findings → role_end", fillcolor="#fef3c7", color="#d97706"];
+  decision [label="review_decision", shape=diamond, fillcolor="#ffedd5", color="#ea580c"];
+  revise [label="revising\nauthor addresses findings", fillcolor="#ffedd5", color="#ea580c"];
+  document [label="document_created\nTELOS saved + approved", fillcolor="#dcfce7", color="#16a34a"];
+  human [label="awaiting_human\nhuman gate", fillcolor="#dbeafe", color="#2563eb"];
+  completed [label="human_decision\ncompleted", fillcolor="#dcfce7", color="#16a34a"];
+  failed [label="role_error / run failed\nterminal event", fillcolor="#fee2e2", color="#dc2626"];
+  sse [label="every event:\nDB append → SSE\nafter / Last-Event-ID", shape=note, fillcolor="#f1f5f9", color="#64748b"];
+
+  execute -> analyzer;
+  analyzer -> author;
+  author -> reviewer;
+  reviewer -> decision;
+  decision -> document [label="approved"];
+  decision -> revise [label="needs_revision\n≤3 cycles"];
+  revise -> reviewer [label="new draft", style=dashed];
+  decision -> failed [label="error / cycle limit", style=dashed, color="#dc2626"];
+  document -> human;
+  human -> completed [label="go / conditional_go / no_go"];
+  reviewer -> sse [style=dotted, label="events"];
+  human -> sse [style=dotted];
+  failed -> sse [style=dotted];
+}

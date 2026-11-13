@@ -1,0 +1,36 @@
+digraph context {
+  graph [rankdir=TB, bgcolor="white", fontname="Helvetica", fontsize=11,
+         pad=0.25, nodesep=0.35, ranksep=0.5, compound=true];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=10,
+         color="#94a3b8", fillcolor="#f8fafc", penwidth=1.1, margin="0.12,0.08"];
+  edge  [fontname="Helvetica", fontsize=8.5, color="#475569", arrowsize=0.65];
+
+  user [label="User\nterminal", fillcolor="#e0f2fe", color="#0284c7"];
+
+  subgraph cluster_cli {
+    label="Chat CLI  (one Node process)";
+    fontsize=11; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
+    cli      [label="REPL + renderer\ncli.ts", fillcolor="#dbeafe", color="#2563eb"];
+    harness  [label="DshHarness\nharness.ts", fillcolor="#dbeafe", color="#2563eb"];
+    protocol [label="NDJSON parser\nprotocol.ts", fillcolor="#dbeafe", color="#2563eb"];
+    cli -> harness -> protocol [style=invis];
+  }
+
+  dsh [label="dsh --profile headless --json\none child process per turn", fillcolor="#fef3c7", color="#d97706"];
+  model [label="Model route\nDeepSeek API / configured provider", fillcolor="#f3e8ff", color="#7e22ce"];
+  sessions [label="DSH Session store\npersisted transcript", shape=cylinder, fillcolor="#dcfce7", color="#16a34a"];
+  env [label="Shell env + workspace .env\nAIFACTORY_DSH_BIN / API key / timeout", shape=note, fillcolor="#f1f5f9", color="#64748b"];
+  fake [label="Fake harness\n(tests only)", style="rounded,dashed", fillcolor="#ffffff", color="#94a3b8"];
+
+  user -> cli [label="prompt, /commands"];
+  cli -> harness [label="run(prompt, sessionId)"];
+  harness -> protocol [label="parse each line"];
+  harness -> dsh [label="spawn\nprompt on stdin", style=bold];
+  dsh -> harness [label="stdout: NDJSON events\nstderr: diagnostics", style=bold, constraint=false];
+  dsh -> model [label="model calls", dir=both];
+  dsh -> sessions [label="persist / adopt", dir=both];
+  env -> cli [label="loads", style=dashed, color="#64748b", constraint=false];
+  fake -> harness [label="test-only transport", style=dashed, color="#94a3b8", constraint=false];
+
+  { rank=same; model; sessions; }
+}
