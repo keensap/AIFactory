@@ -38,6 +38,10 @@ export interface DshHarnessOptions {
   permissionMode?: string
   /** Extra environment variables for the child. */
   env?: Record<string, string | undefined>
+  /** Environment variables removed from the child (after merging `env`). */
+  envDelete?: string[]
+  /** Config overlays applied with `--patch`, in order. */
+  patches?: string[]
 }
 
 export interface RunOptions {
@@ -105,6 +109,8 @@ export class DshHarness {
   private readonly timeoutMs: number
   private readonly permissionMode?: string
   private readonly env?: Record<string, string | undefined>
+  private readonly envDelete?: string[]
+  private readonly patches?: string[]
   private active: ActiveRun | null = null
 
   constructor(options: DshHarnessOptions = {}) {
@@ -115,6 +121,8 @@ export class DshHarness {
     this.timeoutMs = options.timeoutMs ?? 120_000
     if (options.permissionMode !== undefined) this.permissionMode = options.permissionMode
     if (options.env !== undefined) this.env = options.env
+    if (options.envDelete !== undefined) this.envDelete = options.envDelete
+    if (options.patches !== undefined) this.patches = options.patches
   }
 
   /** Ask the in-flight turn to stop. Safe to call when idle. */
@@ -129,6 +137,7 @@ export class DshHarness {
       ...this.commandArgs,
       '--profile',
       this.profile,
+      ...(this.patches ?? []).flatMap((path) => ['--patch', path]),
       '--json',
     ]
     if (options.sessionId !== undefined && options.sessionId !== '') {
@@ -138,9 +147,11 @@ export class DshHarness {
       args.push('--permission-mode', this.permissionMode)
     }
 
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...this.env }
+    for (const key of this.envDelete ?? []) delete childEnv[key]
     const child = spawn(this.command, args, {
       cwd: this.cwd,
-      env: { ...process.env, ...this.env },
+      env: childEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 

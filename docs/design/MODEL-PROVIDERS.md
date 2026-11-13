@@ -1,6 +1,6 @@
 # Model Providers — Plan
 
-**Status:** decisions confirmed 2026-11-13; **Phases 0–1 implemented**  
+**Status:** decisions confirmed 2026-11-13; **Phases 0–2 implemented**  
 **Date:** 2026-11-13  
 **Goal:** let AI Factory run on Claude, OpenAI, local llama.cpp and other third-party APIs through one interface — one global target for the whole Factory, with a documented seam for per-agent-behavior targets later — and no vendor logic in the core.
 
@@ -435,6 +435,40 @@ Code: `apps/chat-cli/src/models/` (`catalog/`, `settings.ts`, `service.ts`).
 | `DELETE /api/settings/models` | `source:"unconfigured"` |
 
 **Deferred to Phase 2:** applying the target to stage runs through the harness (patch generation), and to Phase 3: direct engines, usage/cost, retry/breaker/fallback.
+
+## 10.3 Phase 2 implemented (2026-11-13)
+
+Code: `apps/chat-cli/src/models/harness/` plus `DshHarness` changes.
+
+| Item | Status |
+|---|---|
+| `buildModelPatch` — overlay with `llm-pi-ai` routes and `agent-default-model` | Done |
+| Route mapping: catalog providers keep their `apiKeyEnv`; `openai-compatible` routes are hand-declared with `api`, `baseURL` and `models` | Done |
+| Fallbacks routed together; a provider used twice gets one route with both models | Done |
+| `ModelRuntime` — snapshot, patch file lifecycle, key scrubbing, bounded `--dump-config` validation, refresh on target change | Done |
+| `DshHarness` — `--patch` before app flags, `envDelete` to drop unselected credentials | Done |
+| Every harness consumer (stage roles, chat, briefings) goes through the runtime | Done |
+| `GET /api/admin/models` — applied target, patch path, warnings, last error | Done |
+
+**Behavioural decisions:**
+
+- A refresh failure **keeps the previous patch** applied and reports `lastError`: a bad settings change must not break runs.
+- Patch validation failures are **warnings**. A broken `DSH_HOME` or a `dsh` that cannot run must not block saving a target; `AIFACTORY_MODEL_PATCH_VALIDATE=0` disables validation entirely.
+- The previous patch file is kept on disk (last five) so a harness spawned moments earlier can still read it.
+- Only managed cloud keys are scrubbed; the harness's own credentials (for example DeepSeek) are untouched.
+
+**End-to-end verification** (wrapper harness that records argv, fake llama.cpp on `:8080`):
+
+| Check | Result |
+|---|---|
+| Discovery | `qwen3-8b`, context window 32768 |
+| `PATCH /api/settings/models` | patch regenerated, `applied:true` |
+| Validation | two `--dump-config` invocations, both accepted (no warnings) |
+| Stage run | **3 role invocations**, each `--profile headless --patch …/model-target-….json` |
+| Patch content | route `llamacpp` + `agent-default-model`, no secrets |
+| `DELETE` target | patch removed, `applied:false` |
+
+**Deviation:** the plan expected the harness to receive *only* the selected provider key. It now receives only the selected **managed** keys; unrelated ambient credentials still pass through. Full environment minimisation needs a harness-level allowlist and is tracked as future work.
 
 ## 11. Test strategy
 

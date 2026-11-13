@@ -714,6 +714,31 @@ Validation errors: `INVALID_BODY`, `INVALID_TARGET`, `PROVIDER_NOT_FOUND`, `PROV
 
 The target is a snapshot taken when a run starts; changing it affects later runs only.
 
+**Applying the target.** Each target revision generates a harness overlay, passed to every run as `dsh --profile <p> --patch <file>`:
+
+```json
+[
+  { "id": "llm-pi-ai", "config": { "providers": { "llamacpp": {
+      "api": "openai-completions", "baseURL": "http://127.0.0.1:8080/v1",
+      "models": [{ "id": "qwen3-8b", "contextWindow": 32768 }] } } } },
+  { "id": "agent-default-model", "config": { "provider": "llamacpp", "model": "qwen3-8b", "reasoningEffort": "medium" } }
+]
+```
+
+- Patch files live in `.data/model-patches` (directory 0700, file 0600 where the filesystem honours it), and the last five are kept so an in-flight run can still read its own.
+- The overlay contains **credential references only** (`apiKeyEnv`), never values.
+- On refresh, the patch is validated with `dsh --profile <p> --dump-config --patch <file>`; a rejection is recorded as a **warning**, not an error, so a broken harness never blocks saving settings. Disable with `AIFACTORY_MODEL_PATCH_VALIDATE=0`.
+- A failed refresh keeps the previous patch applied and reports `lastError`.
+- The spawned harness receives only the credentials the selected routes need: other managed provider keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, …) are removed from its environment.
+
+`GET /api/admin/models` shows what is actually applied (admin token or loopback):
+
+```json
+{ "models": { "applied": true, "provider": "llamacpp", "model": "qwen3-8b",
+  "source": "settings", "patchPath": ".data/model-patches/model-target-….json",
+  "warnings": [], "lastError": null } }
+```
+
 `.env` is resolved from the working directory, then the nearest parent up to the workspace root (a directory containing `.git`). `AIFACTORY_DOTENV` overrides the path. Real environment variables always win over `.env` values.
 
 ### Token and task-duration statistics

@@ -121,6 +121,33 @@ test('discovery and health are explicit POST actions', async () => {
   })
 })
 
+test('admin exposes the applied model runtime status', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'aifactory-models-admin-'))
+  const server = createChatServer({
+    harnessFactory: () => new DshHarness({ command: process.execPath, commandArgs: ['-e', ''] }),
+    store: new SessionStore({ dataDir }),
+    version: 'test',
+    modelRuntime: {
+      status: () => ({
+        applied: true, provider: 'llamacpp', model: 'qwen3-8b', source: 'settings',
+        patchPath: '/tmp/model-target-1.json', warnings: [], lastError: null,
+      }),
+    },
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  try {
+    const response = await fetch(`http://127.0.0.1:${serverPort(server)}/api/admin/models`)
+    assert.equal(response.status, 200)
+    const body = await response.json() as { models: { applied: boolean; provider: string; patchPath: string } }
+    assert.equal(body.models.applied, true)
+    assert.equal(body.models.provider, 'llamacpp')
+    assert.match(body.models.patchPath, /model-target-1\.json$/)
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
 test('model routes report 503 when the catalogue is not configured', async () => {
   await withApi({ missing: true }, async (base) => {
     for (const path of ['/api/models', '/api/models/providers', '/api/settings/models']) {

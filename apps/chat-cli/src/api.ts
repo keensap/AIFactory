@@ -37,7 +37,7 @@ import { PostgresSettingsStore, SettingsService } from './settings.ts'
 import { PlanningStageRuntime } from './stage-runtime.ts'
 import { SemanticIndexService } from './semantic-index.ts'
 import { PostgresVectorStore } from './vector-store.ts'
-import { ModelService, PostgresModelCatalog, PostgresModelSettingsStore } from './models/index.ts'
+import { ModelRuntime, ModelService, PostgresModelCatalog, PostgresModelSettingsStore } from './models/index.ts'
 import { createObservabilityProvider } from './observability/registry/index.ts'
 import { CachedObservabilityReader, type ObservabilityProvider, type ObservabilityReader, type TraceRecorder } from './observability/index.ts'
 import { PostgresProjectWorkspace, type ProjectDocument } from './workspace.ts'
@@ -339,11 +339,16 @@ async function main(): Promise<void> {
     dataDir,
     warn: (message) => log.warn({ event: 'session_store.warning' }, message),
   })
-  const harnessFactory = (projectCwd?: string, timeoutMs?: number): DshHarness => new DshHarness({
-    ...harness,
-    ...(projectCwd !== undefined ? { cwd: projectCwd } : {}),
-    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-  })
+  let modelRuntime: ModelRuntime | undefined
+  // Every harness run goes through the runtime, so the global model target
+  // applies to stage roles, chat and briefings alike.
+  const harnessFactory = (projectCwd?: string, timeoutMs?: number): DshHarness => modelRuntime !== undefined
+    ? modelRuntime.harness(projectCwd, timeoutMs)
+    : new DshHarness({
+        ...harness,
+        ...(projectCwd !== undefined ? { cwd: projectCwd } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      })
   const stageRoleTimeoutMs = (() => {
     const value = Number(process.env.AIFACTORY_STAGE_ROLE_TIMEOUT_MS)
     return Number.isSafeInteger(value) && value > 0 ? value : 300_000
@@ -408,6 +413,25 @@ async function main(): Promise<void> {
         store: new PostgresModelSettingsStore(databaseUrl),
         env: process.env,
       })
+      modelRuntime = new ModelRuntime({
+        service: modelService,
+        command: harness.command,
+        profile: harness.profile,
+        ...(harness.permissionMode !== undefined ? { permissionMode: harness.permissionMode } : {}),
+        patchDir: join(dataDir, 'model-patches'),
+        logger: logging.logger,
+        validate: process.env.AIFACTORY_MODEL_PATCH_VALIDATE !== '0',
+      })
+      modelService.setTargetChangeHandler(async () => { await modelRuntime?.refresh() })
+      const applied = await modelRuntime.refresh()
+      log.info({
+        event: 'models.runtime_ready',
+        applied: applied.applied,
+        provider: applied.provider,
+        model: applied.model,
+        source: applied.source,
+        warnings: applied.warnings.length,
+      })
     } catch (error) {
       log.warn({ event: 'models.catalog_init_failed', err: error }, 'model catalogue unavailable')
       await modelCatalog.close().catch(() => {})
@@ -442,6 +466,7 @@ async function main(): Promise<void> {
     ...(semanticIndex !== undefined ? { semanticIndex } : {}),
     ...(observabilityReader !== undefined ? { observability: observabilityReader } : {}),
     ...(modelService !== undefined ? { models: modelService } : {}),
+    ...(modelRuntime !== undefined ? { modelRuntime } : {}),
     ...(traces !== undefined ? { observabilityRecorder: traces } : {}),
     loggingManager,
     ...(logStore !== undefined ? { logStore } : {}),
@@ -511,6 +536,7 @@ async function main(): Promise<void> {
       await vectorStore?.close().catch(() => {})
       await logStore?.close().catch(() => {})
       await loggingSettingsStore?.close().catch(() => {})
+      await modelRuntime?.shutdown().catch(() => {})
       await modelService?.close().catch(() => {})
       await observability?.shutdown().catch(() => {})
       await logging.shutdown({ timeoutMs: 2000 })

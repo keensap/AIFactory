@@ -86,6 +86,12 @@ export interface ChatApiOptions {
   logStore?: PostgresLogStore
   /** Global model target, provider catalogue and discovery. */
   models?: ModelService
+  /** Applies the global target to harness runs. */
+  modelRuntime?: ModelRuntimeLike
+}
+
+export interface ModelRuntimeLike {
+  status(): unknown
 }
 
 export function createChatServer(options: ChatApiOptions): Server {
@@ -233,6 +239,7 @@ async function route(
         modelDiscover: 'POST /api/models/providers/:id/discover',
         modelHealth: 'POST /api/models/providers/:id/health',
         modelTarget: 'GET/PATCH/DELETE /api/settings/models',
+        modelRuntime: 'GET /api/admin/models',
       },
     })
     return
@@ -311,6 +318,16 @@ async function route(
       return
     }
     throw new HttpError(405, 'method not allowed', 'METHOD_NOT_ALLOWED')
+  }
+
+  if (resource === 'admin' && rest[0] === 'models') {
+    requireAdmin(request, options)
+    if (rest.length !== 1 || request.method !== 'GET') throw new HttpError(404, 'not found', 'NOT_FOUND')
+    if (options.modelRuntime === undefined) {
+      throw new HttpError(503, 'model runtime is disabled; set DATABASE_URL', 'MODELS_NOT_CONFIGURED')
+    }
+    sendJson(response, 200, { models: options.modelRuntime.status() })
+    return
   }
 
   if (resource === 'admin' && rest[0] === 'observability') {

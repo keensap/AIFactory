@@ -56,3 +56,7 @@ export type {
 } from './settings.ts'
 export { ModelService } from './service.ts'
 export type { DiscoveryResult, ModelServiceOptions, ProviderView, TargetView } from './service.ts'
+export { buildModelPatch, assertRoutable, keysToScrub, MANAGED_KEY_PATTERN } from './harness/patch.ts'
+export type { ModelPatch, RouteModel, RouteProfile } from './harness/patch.ts'
+export { ModelRuntime } from './harness/runtime.ts'
+export type { ModelRuntimeOptions, ModelRuntimeStatus } from './harness/runtime.ts'

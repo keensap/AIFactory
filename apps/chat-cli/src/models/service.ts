@@ -49,6 +49,7 @@ export class ModelService {
   private readonly fetchImpl?: typeof fetch
   private readonly discoverTimeoutMs: number
   private readonly healthTimeoutMs: number
+  private onTargetChange?: () => Promise<void> | void
 
   constructor(options: ModelServiceOptions) {
     this.catalog = options.catalog
@@ -68,6 +69,12 @@ export class ModelService {
     return this.catalog.listModels(provider)
   }
 
+  /** Raw records for consumers that build harness patches. */
+  async snapshot(): Promise<{ providers: ProviderRecord[]; models: ModelRecord[] }> {
+    const [providers, models] = await Promise.all([this.catalog.listProviders(), this.catalog.listModels()])
+    return { providers, models }
+  }
+
   async target(): Promise<TargetView> {
     const [providers, models] = await Promise.all([this.catalog.listProviders(), this.catalog.listModels()])
     const resolved = await resolveTarget(this.store, this.env, { providers, models })
@@ -78,12 +85,28 @@ export class ModelService {
     const [providers, models] = await Promise.all([this.catalog.listProviders(), this.catalog.listModels()])
     const target = validateTarget(input, { providers, models })
     await this.store.save(target)
+    await this.notifyTargetChange()
     return this.target()
+  }
+
+  /** Late-bound so the runtime can refresh without a construction cycle. */
+  setTargetChangeHandler(handler: () => Promise<void> | void): void {
+    this.onTargetChange = handler
+  }
+
+  private async notifyTargetChange(): Promise<void> {
+    if (this.onTargetChange === undefined) return
+    try {
+      await this.onTargetChange()
+    } catch {
+      // A refresh failure is logged by the runtime; settings stay saved.
+    }
   }
 
   /** Remove the stored target; resolution falls back to the environment. */
   async clearTarget(): Promise<TargetView> {
     await this.store.clear()
+    await this.notifyTargetChange()
     return this.target()
   }
 
