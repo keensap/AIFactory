@@ -1,6 +1,6 @@
 # Model Providers — Plan
 
-**Status:** decisions confirmed 2026-11-13 (global-only scope)  
+**Status:** decisions confirmed 2026-11-13; **Phase 0 implemented**  
 **Date:** 2026-11-13  
 **Goal:** let AI Factory run on Claude, OpenAI, local llama.cpp and other third-party APIs through one interface — one global target for the whole Factory, with a documented seam for per-agent-behavior targets later — and no vendor logic in the core.
 
@@ -373,6 +373,38 @@ Harness path is unchanged (NDJSON → SSE projection).
 | **6 — Extra providers** | Gemini, Bedrock, Azure, per-project allowlists | Adapter checklist complete; no core changes |
 
 Effort estimate for phases 0–4: **7–10 days**. Phase 5 is intentionally deferred.
+
+## 10.1 Phase 0 implemented (2026-11-13)
+
+Code: `apps/chat-cli/src/models/`.
+
+| Item | Status |
+|---|---|
+| `ports.ts` — `ModelEngine`, `ModelRequest`/`Response`/`Event`, `ModelError` (+ kinds, retryability, HTTP mapping), `Usage` + normalization, `ModelCapabilities`, capability assertions | Done |
+| `fake.ts` — deterministic `FakeEngine` (scripted responses, usage, thinking, latency, abort, simulated failure) | Done |
+| `index.ts` — public surface | Done |
+| `test/support/model-engine-contract.ts` — reusable contract suite: usage integrity, no request mutation, exactly one `done`, abort semantics, unsupported-capability rejection, health shape | Done |
+| `scripts/check-model-imports.mjs` + `npm run check:models` — ports stay vendor-free; core files may not import an adapter directly | Done |
+| `test/models-ports.test.ts` — 20 tests covering the contract, normalization, error mapping and the guard | Done |
+
+**Invariants now enforced by tests:**
+
+- `complete`/`stream` reject only with `ModelError`;
+- a caller abort yields kind `aborted` and no `done` event;
+- `usage.totalTokens` is never below input + output, and every counter is a non-negative integer;
+- an unsupported capability fails before the engine is called (no state change);
+- `stream` produces exactly one terminal `done` whose text equals the concatenated deltas;
+- requests are never mutated.
+
+**Adding an engine** = implement `ModelEngine`, then add one line:
+
+```ts
+defineModelEngineContract('openai-compatible', () => new OpenAICompatibleEngine({ ... }), {
+  withoutTools: () => new OpenAICompatibleEngine({ ...withoutTools }),
+})
+```
+
+Phase 1 (registry + global target + root `.env` + `/api/models*`) is next.
 
 ## 11. Test strategy
 
