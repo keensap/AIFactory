@@ -25,3 +25,6 @@ coverage/
 
 # OS noise
 .DS_Store
+
+# FUSE leftovers from replacing an open file
+.fuse_hidden*

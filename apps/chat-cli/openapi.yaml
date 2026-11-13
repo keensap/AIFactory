@@ -1040,6 +1040,116 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/models/test:
+    post:
+      tags: [models]
+      summary: Bounded completion through the real routing path
+      description: Requires the bearer token, or a loopback client when no token is configured. Uses the global target and its fallback chain.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                prompt: {type: string, maxLength: 2000}
+                maxTokens: {type: integer, minimum: 1, maximum: 256, default: 32}
+                timeoutMs: {type: integer, minimum: 1000, maximum: 300000, default: 60000}
+      responses:
+        '200':
+          description: Result and every attempt made
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  test: {$ref: '#/components/schemas/ModelTestResult'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          description: MODEL_CONTENT_FILTER
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: MODEL_UNAVAILABLE, MODEL_AUTH, MODEL_NETWORK, MODEL_OVERLOADED, ...
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: MODEL_UNCONFIGURED or MODELS_NOT_CONFIGURED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '504':
+          description: MODEL_TIMEOUT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/models/price:
+    put:
+      tags: [models]
+      summary: Set a model price (USD per million tokens)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, model]
+              properties:
+                provider: {type: string}
+                model: {type: string}
+                input: {type: number, minimum: 0, maximum: 100000}
+                output: {type: number, minimum: 0, maximum: 100000}
+                cacheRead: {type: number, minimum: 0, maximum: 100000}
+                cacheWrite: {type: number, minimum: 0, maximum: 100000}
+      responses:
+        '200':
+          description: The updated catalogue entry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  model: {$ref: '#/components/schemas/ModelEntry'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: PROVIDER_NOT_FOUND or MODEL_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/admin/models/providers/{id}/reset:
+    post:
+      tags: [models]
+      summary: Close a provider's circuit breaker
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Whether a breaker existed and was reset
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  provider: {type: string}
+                  reset: {type: boolean}
+        '404':
+          description: PROVIDER_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/admin/models:
     get:
       tags: [models]
@@ -1065,6 +1175,9 @@ paths:
                         type: array
                         items: {type: string}
                       lastError: {type: [string, 'null']}
+                      providers:
+                        type: array
+                        items: {$ref: '#/components/schemas/ProviderBreaker'}
         '403':
           description: ADMIN_FORBIDDEN
           content:
@@ -1947,6 +2060,58 @@ components:
         providers:
           type: array
           items: {$ref: '#/components/schemas/ModelProvider'}
+    ProviderBreaker:
+      type: object
+      properties:
+        provider: {type: string}
+        breaker:
+          type: object
+          properties:
+            state: {type: string, enum: [closed, open, half_open]}
+            consecutiveFailures: {type: integer}
+            openedAt: {type: [integer, 'null'], description: epoch milliseconds}
+            retryAt: {type: [integer, 'null'], description: epoch milliseconds}
+            lastError: {type: [string, 'null']}
+            successes: {type: integer}
+            failures: {type: integer}
+    ModelUsage:
+      type: object
+      description: inputTokens excludes cached tokens; totalTokens includes cache read and write.
+      properties:
+        inputTokens: {type: integer}
+        outputTokens: {type: integer}
+        totalTokens: {type: integer}
+        cacheReadTokens: {type: integer}
+        cacheWriteTokens: {type: integer}
+    ModelAttempt:
+      type: object
+      properties:
+        provider: {type: string}
+        model: {type: string}
+        position: {type: integer, description: 0 for the primary target, 1.. for fallbacks}
+        outcome: {type: string, enum: [ok, error, skipped]}
+        durationMs: {type: integer}
+        kind:
+          type: string
+          enum: [auth, quota, rate_limit, overloaded, timeout, network, invalid_request, context_overflow, content_filter, unsupported, aborted, unavailable, unconfigured, unknown]
+        status: {type: integer}
+        message: {type: string}
+        usage: {$ref: '#/components/schemas/ModelUsage'}
+        costUsd: {type: number}
+    ModelTestResult:
+      type: object
+      properties:
+        provider: {type: string}
+        model: {type: string}
+        text: {type: string, description: Truncated to 500 characters}
+        truncated: {type: boolean}
+        finishReason: {type: string, enum: [stop, tool_calls, length, content_filter, error]}
+        usage: {$ref: '#/components/schemas/ModelUsage'}
+        costUsd: {type: [number, 'null'], description: null when the model has no price}
+        durationMs: {type: integer}
+        attempts:
+          type: array
+          items: {$ref: '#/components/schemas/ModelAttempt'}
     ProviderHealth:
       type: object
       properties:

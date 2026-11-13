@@ -28,6 +28,13 @@ export interface FakeEngineOptions {
   thinking?: string
   /** Throw this instead of answering. */
   failWith?: ModelError
+  /**
+   * Per-call outcomes consumed in order; the last one repeats. `'ok'` answers,
+   * a `ModelError` is thrown. Takes precedence over `failWith`.
+   */
+  outcomes?: Array<ModelError | 'ok'>
+  /** Streams only: emit the first chunk of text, then throw this. */
+  failMidStream?: ModelError
   /** Simulated latency per call; honours abort. */
   latencyMs?: number
   /** Split streamed text into chunks of this size. */
@@ -49,6 +56,16 @@ export class FakeEngine implements ModelEngine {
     return this.calls
   }
 
+  /** The failure for the call being made now (1-based `this.calls`), if any. */
+  private outcome(): ModelError | undefined {
+    const outcomes = this.options.outcomes
+    if (outcomes !== undefined && outcomes.length > 0) {
+      const next = outcomes[Math.min(this.calls - 1, outcomes.length - 1)]
+      return next === 'ok' || next === undefined ? undefined : next
+    }
+    return this.options.failWith
+  }
+
   capabilities(): ModelCapabilities {
     const base: ModelCapabilities = {
       contextWindow: 128_000,
@@ -67,7 +84,8 @@ export class FakeEngine implements ModelEngine {
     assertCapabilities(request, this.capabilities())
     this.requests.push(request)
     this.calls += 1
-    if (this.options.failWith !== undefined) throw this.options.failWith
+    const failure = this.outcome()
+    if (failure !== undefined) throw failure
     await this.delay(signal)
     const text = this.nextText(request)
     return {
@@ -86,10 +104,8 @@ export class FakeEngine implements ModelEngine {
     assertCapabilities(request, this.capabilities())
     this.requests.push(request)
     this.calls += 1
-    if (this.options.failWith !== undefined) {
-      yield { type: 'error', error: this.options.failWith }
-      return
-    }
+    const failure = this.outcome()
+    if (failure !== undefined) throw failure
     await this.delay(signal)
     if (this.options.thinking !== undefined) {
       yield { type: 'thinking', text: this.options.thinking }
@@ -99,6 +115,7 @@ export class FakeEngine implements ModelEngine {
     for (let index = 0; index < text.length; index += size) {
       if (signal?.aborted === true) throw abortError()
       yield { type: 'text', text: text.slice(index, index + size) }
+      if (index === 0 && this.options.failMidStream !== undefined) throw this.options.failMidStream
     }
     const usage = normalizeUsage(this.options.usage)
     yield { type: 'usage', usage }

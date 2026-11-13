@@ -11,6 +11,7 @@ import {
   type LogSink,
   type Logging,
 } from '../src/logging/index.ts'
+import { scrubString } from '../src/logging/sanitize.ts'
 
 class MemorySink implements LogSink {
   readonly name: string
@@ -359,4 +360,28 @@ test('circuit breaker opens, drops while open, probes after cool-down and closes
   assert.ok(events.some((line) => line.includes('"state":"open"')))
   assert.ok(events.some((line) => line.includes('"state":"healthy"')))
   await logging.shutdown()
+})
+
+test('provider credential shapes are redacted in free text and JSON-quoted headers', () => {
+  const secrets = [
+    'sk-ant-api03-AbCdEf_GhIjKlMnOpQrStUvWxYz0123456789-abcdefghij',
+    'sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_abcdef',
+    'sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef',
+    'AIzaSyA1234567890abcdefghijklmnopqrstuv',
+    'AKIAIOSFODNN7EXAMPLE',
+    'supersecretvalue123',
+    'anothersecret456',
+  ]
+  const text = [
+    `key ${secrets[0]} end`,
+    `key ${secrets[1]} end`,
+    `key ${secrets[2]} end`,
+    `key ${secrets[3]} end`,
+    `aws ${secrets[4]}`,
+    `{"x-api-key":"${secrets[5]}","api-key": "${secrets[6]}","model":"gpt-4o","inputTokens":42}`,
+  ].join('\n')
+  const out = scrubString(text)
+  for (const secret of secrets) assert.ok(!out.includes(secret), `leaked: ${secret}`)
+  assert.match(out, /"model":"gpt-4o"/, 'ordinary fields survive')
+  assert.match(out, /"inputTokens":42/, 'numeric token counts are not mistaken for secrets')
 })

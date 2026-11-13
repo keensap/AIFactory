@@ -5,6 +5,7 @@
  * request. Discovery writes the static catalogue; health only reports.
  */
 
+import { inferCapabilities } from '../capabilities.ts'
 import { ModelError, modelErrorFromStatus, type ModelCapabilities } from '../ports.ts'
 import type { ModelRecord, ProviderRecord } from './types.ts'
 
@@ -63,20 +64,6 @@ function num(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : null
 }
 
-function capabilitiesFor(provider: ProviderRecord): ModelCapabilities {
-  // Cloud vendors generally support tools; local servers only when started with
-  // `--jinja`. Discovery cannot prove it, so local routes start conservative and
-  // the router reports `unsupported` until the operator enables it.
-  return {
-    contextWindow: 8192,
-    tools: !provider.local,
-    thinking: !provider.local,
-    jsonMode: !provider.local,
-    vision: false,
-    streaming: true,
-  }
-}
-
 export async function discoverModels(provider: ProviderRecord, options: ProbeOptions = {}): Promise<DiscoveredModel[]> {
   if (provider.kind === 'google' || provider.kind === 'bedrock' || provider.kind === 'azure-openai') {
     throw new ModelError('unsupported', `discovery is not implemented for ${provider.kind} yet`, { provider: provider.id })
@@ -102,7 +89,7 @@ export async function discoverModels(provider: ProviderRecord, options: ProbeOpt
     }
     const body = await response.json() as { data?: unknown }
     const entries = Array.isArray(body.data) ? body.data : []
-    const base = capabilitiesFor(provider)
+    const base = inferCapabilities(provider)
     const models: DiscoveredModel[] = []
     for (const entry of entries) {
       if (entry === null || typeof entry !== 'object') continue

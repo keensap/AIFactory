@@ -122,3 +122,23 @@ export function emptyCapabilities(): ModelCapabilities {
 export function providerEnvPrefix(id: string): string {
   return `AIFACTORY_${id.replace(/[^A-Za-z0-9]/g, '_').toUpperCase()}`
 }
+
+/**
+ * The provider as it is actually used: environment overrides applied.
+ *
+ * `AIFACTORY_<ID>_BASE_URL` replaces the stored endpoint, so a deployment can
+ * point llama.cpp or a gateway at another host without editing the database.
+ * Only well-formed http(s) URLs are accepted; anything else is ignored rather
+ * than breaking the provider.
+ */
+export function effectiveProvider(provider: ProviderRecord, env: Record<string, string | undefined>): ProviderRecord {
+  const raw = env[`${providerEnvPrefix(provider.id)}_BASE_URL`]?.trim()
+  if (raw === undefined || raw === '') return provider
+  try {
+    const url = new URL(raw)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return provider
+    return { ...provider, baseUrl: raw.replace(/\/+$/, '') }
+  } catch {
+    return provider
+  }
+}

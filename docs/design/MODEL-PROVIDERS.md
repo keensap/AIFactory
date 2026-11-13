@@ -1,6 +1,6 @@
 # Model Providers — Plan
 
-**Status:** decisions confirmed 2026-11-13; **Phases 0–2 implemented**  
+**Status:** decisions confirmed 2026-11-13; **Phases 0–3 implemented**  
 **Date:** 2026-11-13  
 **Goal:** let AI Factory run on Claude, OpenAI, local llama.cpp and other third-party APIs through one interface — one global target for the whole Factory, with a documented seam for per-agent-behavior targets later — and no vendor logic in the core.
 
@@ -232,15 +232,23 @@ A versioned price table (`model_prices`) keyed by provider/model with `input`, `
 type ModelErrorKind =
   | 'auth' | 'quota' | 'rate_limit' | 'overloaded'
   | 'timeout' | 'network' | 'invalid_request'
-  | 'context_overflow' | 'content_filter' | 'unsupported' | 'unknown'
+  | 'context_overflow' | 'content_filter' | 'unsupported'
+  | 'aborted' | 'unavailable' | 'unconfigured' | 'unknown'
 ```
 
-| Kind | Retry | Fallback | User-visible |
-|---|---|---|---|
-| `rate_limit`, `overloaded`, `timeout`, `network` | yes, jittered backoff | yes | "provider busy, retrying" |
-| `auth`, `invalid_request`, `unsupported` | no | next in chain | configuration error |
-| `context_overflow` | no | model with larger window | run fails with actionable message |
-| `content_filter` | no | no | surfaced to the reviewer/human gate |
+`unavailable` = every target in the chain failed, or the route is shut by its circuit breaker. `unconfigured` = no target is set.
+
+| Kind | Retry same route | Fall back to next target | Breaker | HTTP |
+|---|---|---|---|---|
+| `rate_limit`, `overloaded`, `timeout`, `network` | yes — jittered backoff, honours `Retry-After` | yes | counts as a failure | 502 (`timeout` 504) |
+| `auth`, `quota`, `invalid_request`, `unsupported` | no | yes | an HTTP status proves the provider is up; a *local* error gives no evidence | 502 (`auth`, `quota`), 400 (`invalid_request`, `unsupported`) |
+| `context_overflow` | no | only to a model with a **larger** context window | as above | 400 |
+| `content_filter` | no | **no** | as above | 422 |
+| `aborted` | no | **no** | released, not counted | — |
+| `unavailable` | no | yes (next target) | — | 502 |
+| `unconfigured` | no | — | — | 503 |
+
+**Streams throw.** `complete` and `stream` both reject with `ModelError`; the `error` event variant exists only for the SSE projection, which turns a thrown error into a terminal event. A stream is retried or fallen back **only before its first event** — a partially delivered answer is never silently restarted.
 
 ### 5.4 Capabilities
 
@@ -319,7 +327,12 @@ Changing the global target applies to runs started after the change. There is no
 | `POST` | `/api/models/providers/:id/health` | Probe one route (bounded) |
 | `GET` | `/api/settings/models` | Current global target, effective source, fallback chain |
 | `PATCH` | `/api/settings/models` | Validate, persist and apply a new global target |
-| `GET` | `/api/projects/:id/stats?groupBy=model` | Tokens/cost per provider/model |
+| `DELETE` | `/api/settings/models` | Remove the stored target (fall back to the environment) |
+| `POST` | `/api/models/test` | Bounded completion through the real routing path (admin) |
+| `PUT` | `/api/models/price` | Set a model's price per million tokens (admin) |
+| `GET` | `/api/admin/models` | Applied harness target **and** per-provider circuit-breaker state (admin) |
+| `POST` | `/api/admin/models/providers/:id/reset` | Close a provider's breaker (admin) |
+| `GET` | `/api/projects/:id/stats?groupBy=model` | Tokens/cost per provider/model *(Phase 4)* |
 
 There is deliberately no per-project model endpoint.
 
@@ -470,6 +483,68 @@ Code: `apps/chat-cli/src/models/harness/` plus `DshHarness` changes.
 
 **Deviation:** the plan expected the harness to receive *only* the selected provider key. It now receives only the selected **managed** keys; unrelated ambient credentials still pass through. Full environment minimisation needs a harness-level allowlist and is tracked as future work.
 
+## 10.4 Phase 3 implemented (2026-11-13)
+
+Code: `apps/chat-cli/src/models/` — `engines/`, `resilience.ts`, `registry.ts`, `router.ts`, `cost.ts`, `egress.ts`, `capabilities.ts`.
+
+| Item | Status |
+|---|---|
+| `OpenAICompatibleEngine` — OpenAI, llama.cpp, Ollama, vLLM, OpenRouter and gateways | Done |
+| `AnthropicEngine` — Messages API, tools, thinking, cache usage, in-stream errors | Done |
+| Shared transport: incremental SSE parser, Retry-After, error normalization with redaction | Done |
+| `ResilientEngine` — per-attempt deadline, bounded jittered retry, per-provider circuit breaker | Done |
+| `EngineRegistry` — one resilient engine per provider, rebuilt with a **fresh breaker** when the provider's endpoint/key reference/headers change | Done |
+| `ModelRouter` — target **snapshot per run**, fallback chain per the §5.3 table, cost at call time | Done |
+| Cost from the catalogue price table (`PUT /api/models/price`); unknown price ≠ free | Done |
+| `AIFACTORY_MODEL_EGRESS=local-only` enforced at save time and on every routed call | Done |
+| `AIFACTORY_<ID>_BASE_URL` overrides applied everywhere (views, discovery, health, harness patch, direct calls) | Done |
+| `POST /api/models/test`, `/api/admin/models` breaker state, breaker reset | Done |
+| Structured logs: `models.call`, `models.call_failed`, `models.call_skipped`, `models.retry` — metadata only | Done |
+| Sanitizer extended: Google/AWS keys and JSON-quoted `x-api-key`/`api-key` values | Done |
+
+**Wire details (checked against the Claude API docs and provider behaviour):**
+
+| Concern | Handling |
+|---|---|
+| OpenAI reasoning models (`o*`, `gpt-5*`) | `max_completion_tokens`, no `temperature` |
+| OpenAI streaming usage | `stream_options.include_usage`; usage arrives in a final chunk with empty `choices` |
+| Cached tokens | `inputTokens` **excludes** cached tokens (matches the harness); `totalTokens` includes cache read/write |
+| Anthropic | system prompt top-level, `max_tokens` always sent, `tool_result` blocks first in a user message, thinking budget ≥ 1024 and < `max_tokens`, no `temperature` with thinking, cumulative `message_delta` usage, `ping` and in-stream `error` events |
+| Anthropic JSON mode | expressed as a system instruction (there is no JSON-mode flag) |
+| Truncated Anthropic stream (no `message_stop`) | retryable `network` error — never a silent short answer |
+| Local servers (`llama-server`) | tools refused with `unsupported` until the catalogue marks the model tool-capable (`--jinja`) |
+
+**Behavioural decisions:**
+
+- **Breaker evidence rule.** A retryable failure counts against the route. An HTTP error status proves the provider answered, so it counts as success. An error raised locally (unsupported capability, missing key, abort) gives **no evidence** and just releases the probe slot — otherwise one bad request could close a half-open breaker without a real probe.
+- **No doomed retries.** When a failure opens the breaker, the call fails immediately instead of sleeping a backoff before a retry that cannot be admitted.
+- **Reasoning effort applies to the primary target only**; sampling parameters follow the chain.
+- **Fallback follows §5.3**, which is slightly broader than the earlier §7 wording ("only when retryable"): `auth`, `quota`, `invalid_request`, `unsupported` and `unavailable` also try the next target because another provider may not share the problem. `content_filter` and `aborted` never do.
+- **Provider response ids are logged as `providerRequestId`**, not `requestId`, which carries the HTTP correlation id (found and fixed during live verification).
+
+**Live verification** (real API process, fake OpenAI/Anthropic/llama.cpp servers, outages induced by killing the servers):
+
+| Step | Result |
+|---|---|
+| Discovery of three providers | 3 catalogues populated |
+| Healthy call, price set | `served by openai`, cost `0.45` = (100 000 × 2.5 + 20 000 × 10) / 10⁶ |
+| Kill OpenAI | first call fell back to Anthropic in ~120 ms (one retry with backoff included); breaker **open** after 3 failures; later calls skip OpenAI in 0 ms (3–8 ms end to end) |
+| Kill Anthropic | served by llama.cpp (`cost` null: no price) |
+| Kill llama.cpp (all down) | `502 MODEL_UNAVAILABLE` listing every target; 3 ms once breakers are open |
+| API during the total outage | `/api/health` 1 ms, `/api/projects` 27 ms, settings/providers/admin all 200 |
+| Restart OpenAI | probe admitted after the cool-down; breaker **closed**; primary reclaimed without a restart |
+| Admin reset | remaining breakers closed |
+| Secret scan | 0 occurrences of either key in logs, sessions, patches or spool; database holds only `apiKeyEnv` names |
+
+**Scope note — read this before relying on the direct path.** The engines, router, breaker and cost computation are complete and tested, but **no production code path calls the router yet**. Stage runs, chat and briefings still run through the harness (Phase 2), which keeps its own retry behaviour and is **not** covered by these breakers. The router is exercised today by `POST /api/models/test`. Wiring a first real consumer (for example briefing summaries or session titles) is a separate, deliberate step, because it changes which code path produces user-visible output.
+
+**Not done / deferred:**
+
+- Usage and cost in `/api/projects/:id/stats` (Phase 4) — the router already reports them via `onAttempt` and logs.
+- An API to add or edit providers: only the five seeded providers exist; "adding a provider is configuration only" is therefore true at the database level but has no endpoint yet.
+- OpenAI Responses API, Azure OpenAI, Gemini and Bedrock engines.
+- A live test against a real `llama-server --jinja` — pending the operator starting it; covered by fake-server tests only.
+
 ## 11. Test strategy
 
 - **Conformance suite** (same shape as `test/observability-contract.test.ts`): every engine must satisfy usage normalization, error mapping, capability rejection, timeout, and non-throwing behavior.
@@ -478,20 +553,20 @@ Code: `apps/chat-cli/src/models/harness/` plus `DshHarness` changes.
 - **Failure tests**: 429, 500, timeout, TCP reset, context overflow, auth failure — assert retry/fallback/breaker decisions.
 - **Patch validation**: generated overlays parse and pass `dsh --dump-config`.
 - **Security tests**: no key appears in logs, errors, traces or API responses.
-- **Regression**: existing 148 tests stay green.
+- **Regression**: the suite grew from 148 to 348 tests with no regressions.
 
 ## 12. Acceptance criteria
 
-- [ ] One global target applies to **every project and every stage**; there is no per-project or per-stage override.
-- [ ] The target can be set from `settings` or environment, with a documented priority and an explicit `MODEL_UNCONFIGURED` state.
-- [ ] Changing the target affects subsequent runs only; an in-flight run keeps its snapshot.
-- [ ] Claude, OpenAI and a llama.cpp-configured route are all reachable through the same interface.
+- [x] One global target applies to **every project and every stage**; there is no per-project or per-stage override.
+- [x] The target can be set from `settings` or environment, with a documented priority and an explicit `MODEL_UNCONFIGURED` state.
+- [x] Changing the target affects subsequent runs only; an in-flight run keeps its snapshot. *(direct path: tested via `plan()`; harness path: a patch is read at spawn)*
+- [x] Claude, OpenAI and a llama.cpp-configured route are all reachable through the same interface. *(llama.cpp against a fake server only)*
 - [ ] Adding an OpenAI-compatible provider is configuration only.
-- [ ] A provider outage falls back or fails cleanly; stage runs and the API stay responsive.
+- [x] A provider outage falls back or fails cleanly; the API stays responsive. *(direct path; harness runs are not breaker-protected — see the scope note)*
 - [ ] Usage and cost appear in `/api/projects/:id/stats` for every provider.
-- [ ] No vendor SDK import exists outside `src/models/<adapter>/`.
-- [ ] No secret is written to disk, logged, traced or returned by any endpoint; missing keys are reported without values.
-- [ ] `npm test`, typecheck and the import guard pass.
+- [x] No vendor SDK import exists outside `src/models/<adapter>/` (there are none: engines use `fetch`).
+- [x] No secret is written to disk, logged, traced or returned by any endpoint; missing keys are reported without values.
+- [x] `npm test`, typecheck and the import guard pass.
 
 ## 13. Decisions
 

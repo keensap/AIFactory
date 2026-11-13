@@ -37,8 +37,10 @@ function count(value: unknown): number {
 /**
  * Normalize a provider's usage report.
  *
- * `totalTokens` falls back to input + output when a provider omits it, which is
- * the same rule the stage stats use, so cross-provider totals stay comparable.
+ * Convention (matches the harness): `inputTokens` excludes cached tokens, which
+ * are reported separately, so `totalTokens` = input + output + cacheRead +
+ * cacheWrite. When a provider omits the total it is derived the same way, so
+ * cross-provider totals stay comparable.
  */
 export function normalizeUsage(partial: Partial<Usage> | undefined | null): Usage {
   if (partial === null || partial === undefined) return emptyUsage()
@@ -48,7 +50,9 @@ export function normalizeUsage(partial: Partial<Usage> | undefined | null): Usag
   return {
     inputTokens,
     outputTokens,
-    totalTokens: total > 0 ? total : inputTokens + outputTokens,
+    totalTokens: total > 0
+      ? total
+      : inputTokens + outputTokens + count(partial.cacheReadTokens) + count(partial.cacheWriteTokens),
     cacheReadTokens: count(partial.cacheReadTokens),
     cacheWriteTokens: count(partial.cacheWriteTokens),
   }
@@ -195,6 +199,10 @@ export type ModelErrorKind =
   | 'content_filter'
   | 'unsupported'
   | 'aborted'
+  /** Every target in the chain failed, or the route is shut by its breaker. */
+  | 'unavailable'
+  /** No model target is configured (settings and environment are both empty). */
+  | 'unconfigured'
   | 'unknown'
 
 const RETRYABLE: ReadonlySet<ModelErrorKind> = new Set<ModelErrorKind>([
@@ -212,6 +220,8 @@ export function isRetryable(kind: ModelErrorKind): boolean {
 export interface ModelErrorOptions {
   status?: number
   retryable?: boolean
+  /** Provider-suggested wait before a retry (Retry-After), in milliseconds. */
+  retryAfterMs?: number
   provider?: string
   model?: string
   providerRequestId?: string
@@ -222,6 +232,7 @@ export class ModelError extends Error {
   readonly kind: ModelErrorKind
   readonly status?: number
   readonly retryable: boolean
+  readonly retryAfterMs?: number
   readonly provider?: string
   readonly model?: string
   readonly providerRequestId?: string
@@ -232,6 +243,7 @@ export class ModelError extends Error {
     this.kind = kind
     this.retryable = options.retryable ?? isRetryable(kind)
     if (options.status !== undefined) this.status = options.status
+    if (options.retryAfterMs !== undefined) this.retryAfterMs = options.retryAfterMs
     if (options.provider !== undefined) this.provider = options.provider
     if (options.model !== undefined) this.model = options.model
     if (options.providerRequestId !== undefined) this.providerRequestId = options.providerRequestId

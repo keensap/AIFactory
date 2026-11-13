@@ -408,10 +408,45 @@ async function main(): Promise<void> {
     modelCatalog = new PostgresModelCatalog(databaseUrl)
     try {
       await modelCatalog.migrate()
+      const modelLog = logging.logger.child({ component: 'models' })
       modelService = new ModelService({
         catalog: modelCatalog,
         store: new PostgresModelSettingsStore(databaseUrl),
         env: process.env,
+        // Metadata only: never prompts, completions or keys.
+        onAttempt: (info) => {
+          const base = {
+            provider: info.provider,
+            model: info.model,
+            position: info.position,
+            durationMs: info.durationMs,
+            ...(info.projectId !== undefined ? { projectId: info.projectId } : {}),
+            ...(info.stageRunId !== undefined ? { stageRunId: info.stageRunId } : {}),
+            ...(info.role !== undefined ? { role: info.role } : {}),
+          }
+          if (info.outcome === 'ok') {
+            modelLog.info({
+              event: 'models.call',
+              ...base,
+              inputTokens: info.usage?.inputTokens ?? 0,
+              outputTokens: info.usage?.outputTokens ?? 0,
+              cacheReadTokens: info.usage?.cacheReadTokens ?? 0,
+              cacheWriteTokens: info.usage?.cacheWriteTokens ?? 0,
+              ...(info.costUsd !== undefined ? { costUsd: info.costUsd } : {}),
+              // Not `requestId`: that name carries the HTTP request correlation id.
+              ...(info.requestId !== undefined ? { providerRequestId: info.requestId } : {}),
+            })
+          } else {
+            modelLog.warn({
+              event: info.outcome === 'skipped' ? 'models.call_skipped' : 'models.call_failed',
+              ...base,
+              kind: info.kind,
+              ...(info.status !== undefined ? { status: info.status } : {}),
+              reason: info.message,
+            })
+          }
+        },
+        onRetry: (info) => modelLog.warn({ event: 'models.retry', ...info }),
       })
       modelRuntime = new ModelRuntime({
         service: modelService,
@@ -466,7 +501,14 @@ async function main(): Promise<void> {
     ...(semanticIndex !== undefined ? { semanticIndex } : {}),
     ...(observabilityReader !== undefined ? { observability: observabilityReader } : {}),
     ...(modelService !== undefined ? { models: modelService } : {}),
-    ...(modelRuntime !== undefined ? { modelRuntime } : {}),
+    ...(modelRuntime !== undefined && modelService !== undefined
+      ? {
+          modelRuntime: {
+            // What the harness applies plus per-provider circuit-breaker state.
+            status: () => ({ ...modelRuntime!.status(), providers: modelService!.runtime() }),
+          },
+        }
+      : {}),
     ...(traces !== undefined ? { observabilityRecorder: traces } : {}),
     loggingManager,
     ...(logStore !== undefined ? { logStore } : {}),

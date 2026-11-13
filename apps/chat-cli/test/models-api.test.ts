@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { DshHarness } from '../src/harness.ts'
+import { ModelError, ModelSettingsError, type ModelErrorKind } from '../src/models/index.ts'
 import { createChatServer, serverPort } from '../src/server.ts'
 import { SessionStore } from '../src/store.ts'
 
@@ -16,7 +17,10 @@ function fakeModels() {
   const state = {
     updated: null as unknown,
     discovered: [] as string[],
-   health: [] as string[],
+    health: [] as string[],
+    tests: [] as unknown[],
+    prices: [] as unknown[],
+    resets: [] as string[],
   }
   const providers = [
     { id: 'openai', kind: 'openai', displayName: 'OpenAI', baseUrl: null, apiKeyEnv: 'OPENAI_API_KEY', local: false, enabled: true, credentialPresent: false, modelCount: 1 },
@@ -37,6 +41,20 @@ function fakeModels() {
       },
       async updateTarget(input: unknown) { state.updated = input; return this.target() },
       async clearTarget() { return this.target() },
+      async test(input: { fail?: ModelErrorKind; prompt?: string }) {
+        state.tests.push(input)
+        if (input.fail !== undefined) throw new ModelError(input.fail, `simulated ${input.fail}`)
+        return { provider: 'openai', model: 'gpt-5', text: 'ok', truncated: false, finishReason: 'stop', usage: {}, costUsd: 0.01, durationMs: 5, attempts: [] }
+      },
+      async setPrice(provider: string, model: string, price: Record<string, unknown>) {
+        state.prices.push({ provider, model, price })
+        if (model === 'missing') throw new ModelSettingsError(404, 'MODEL_NOT_FOUND', 'not in the catalogue')
+        return { provider, model, price }
+      },
+      async resetBreaker(provider: string) {
+        state.resets.push(provider)
+        return { provider, reset: true }
+      },
       async discover(id: string) {
         state.discovered.push(id)
         return { provider: id, discovered: 1, models }
@@ -166,5 +184,75 @@ test('discovery requires the bearer token when one is configured', async () => {
       headers: { Authorization: 'Bearer secret-token' },
     })
     assert.equal(ok.status, 200)
+  })
+})
+
+const json = (body: unknown): RequestInit => ({ headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+
+test('POST /api/models/test runs a routed completion (admin only)', async () => {
+  await withApi({ apiToken: 'tok' }, async (base, fake) => {
+    assert.equal((await fetch(`${base}/api/models/test`, { method: 'POST', ...json({}) })).status, 401)
+    const ok = await fetch(`${base}/api/models/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer tok' },
+      body: JSON.stringify({ prompt: 'ping' }),
+    })
+    assert.equal(ok.status, 200)
+    const body = await ok.json() as { test: { provider: string; text: string; costUsd: number } }
+    assert.equal(body.test.provider, 'openai')
+    assert.equal(body.test.costUsd, 0.01)
+    assert.deepEqual(fake.state.tests, [{ prompt: 'ping' }])
+  })
+})
+
+test('POST /api/models/test with an empty body uses defaults', async () => {
+  await withApi({}, async (base, fake) => {
+    assert.equal((await fetch(`${base}/api/models/test`, { method: 'POST' })).status, 200)
+    assert.deepEqual(fake.state.tests, [{}])
+  })
+})
+
+test('model failures map to distinguishable HTTP statuses and codes', async () => {
+  const expected: Array<[ModelErrorKind, number]> = [
+    ['invalid_request', 400], ['unsupported', 400], ['context_overflow', 400],
+    ['content_filter', 422], ['unconfigured', 503], ['timeout', 504],
+    ['auth', 502], ['quota', 502], ['rate_limit', 502], ['overloaded', 502],
+    ['network', 502], ['unavailable', 502], ['unknown', 502],
+  ]
+  await withApi({}, async (base) => {
+    for (const [kind, status] of expected) {
+      const response = await fetch(`${base}/api/models/test`, { method: 'POST', ...json({ fail: kind }) })
+      assert.equal(response.status, status, kind)
+      const body = await response.json() as { error: { code: string; message: string } }
+      assert.equal(body.error.code, `MODEL_${kind.toUpperCase()}`)
+    }
+  })
+})
+
+test('PUT /api/models/price validates the body and returns the updated model', async () => {
+  await withApi({ apiToken: 'tok' }, async (base, fake) => {
+    const auth = { 'Content-Type': 'application/json', Authorization: 'Bearer tok' }
+    assert.equal((await fetch(`${base}/api/models/price`, { method: 'PUT', ...json({ provider: 'openai', model: 'gpt-5', input: 1 }) })).status, 401)
+
+    const ok = await fetch(`${base}/api/models/price`, { method: 'PUT', headers: auth, body: JSON.stringify({ provider: 'openai', model: 'gpt-5', input: 1.25, output: 10 }) })
+    assert.equal(ok.status, 200)
+    assert.deepEqual(fake.state.prices, [{ provider: 'openai', model: 'gpt-5', price: { input: 1.25, output: 10 } }])
+
+    const missing = await fetch(`${base}/api/models/price`, { method: 'PUT', headers: auth, body: JSON.stringify({ input: 1 }) })
+    assert.equal(missing.status, 400)
+    assert.equal(((await missing.json()) as { error: { code: string } }).error.code, 'INVALID_PRICE')
+
+    const unknown = await fetch(`${base}/api/models/price`, { method: 'PUT', headers: auth, body: JSON.stringify({ provider: 'openai', model: 'missing', input: 1 }) })
+    assert.equal(unknown.status, 404)
+  })
+})
+
+test('POST /api/admin/models/providers/:id/reset closes a provider breaker (admin only)', async () => {
+  await withApi({ apiToken: 'tok' }, async (base, fake) => {
+    assert.equal((await fetch(`${base}/api/admin/models/providers/openai/reset`, { method: 'POST' })).status, 401)
+    const ok = await fetch(`${base}/api/admin/models/providers/openai/reset`, { method: 'POST', headers: { Authorization: 'Bearer tok' } })
+    assert.equal(ok.status, 200)
+    assert.deepEqual(await ok.json(), { provider: 'openai', reset: true })
+    assert.deepEqual(fake.state.resets, ['openai'])
   })
 })

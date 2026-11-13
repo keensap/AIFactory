@@ -1,42 +1,58 @@
 digraph providers {
-  graph [rankdir=LR, bgcolor="white", fontname="Helvetica", fontsize=10, pad=0.25, nodesep=0.4, ranksep=0.5, compound=true];
+  graph [rankdir=LR, bgcolor="white", fontname="Helvetica", fontsize=10, pad=0.25, nodesep=0.35, ranksep=0.55, compound=true];
   node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9, color="#94a3b8", fillcolor="#f8fafc", margin="0.12,0.07"];
   edge  [fontname="Helvetica", fontsize=8, color="#475569", arrowsize=0.6];
 
   subgraph cluster_callers {
     label="callers — every run uses the same target"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
     stage [label="Stage runtime\nanalyzer · author · reviewer", fillcolor="#dbeafe", color="#2563eb"];
-    chat [label="Chat", fillcolor="#dbeafe", color="#2563eb"];
-    brief [label="Briefing", fillcolor="#dbeafe", color="#2563eb"];
+    chat [label="Chat · Briefing", fillcolor="#dbeafe", color="#2563eb"];
+    test [label="POST /api/models/test\n(first direct caller)", fillcolor="#dbeafe", color="#2563eb"];
   }
 
   subgraph cluster_config {
-    label="configuration (settings → env → unconfigured)"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
-    target [label="Global target\none provider/model", fillcolor="#fef3c7", color="#d97706"];
-    registry [label="Provider registry\nmodel_providers · model_catalog", fillcolor="#fef3c7", color="#d97706"];
-    discover [label="Explicit discovery\n+ health probe", fillcolor="#fef3c7", color="#d97706"];
+    label="configuration  (settings → env → unconfigured)"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
+    target [label="Global target\nprovider/model + fallback chain\n(snapshot per run)", fillcolor="#fef3c7", color="#d97706"];
+    registry [label="Provider registry + catalogue\nprices · capabilities · discovery", fillcolor="#fef3c7", color="#d97706"];
+    policy [label="Policy\nlocal-only egress\nbase-URL overrides", fillcolor="#fef3c7", color="#d97706"];
   }
 
-  subgraph cluster_runtime {
-    label="Phase 2 — applied to the harness"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
-    runtime [label="ModelRuntime\nsnapshot · scrub keys · refresh", fillcolor="#dcfce7", color="#16a34a"];
-    patch [label="patch overlay (0600)\nllm-pi-ai routes\n+ agent-default-model", fillcolor="#dcfce7", color="#16a34a"];
-    harness [label="DshHarness\ndsh --patch", fillcolor="#dcfce7", color="#16a34a"];
-    validate [label="dump-config\nvalidation", fillcolor="#dcfce7", color="#16a34a"];
+  subgraph cluster_harness {
+    label="Phase 2 — harness path (agent work, tools)"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
+    runtime [label="ModelRuntime\npatch · key scrubbing", fillcolor="#dcfce7", color="#16a34a"];
+    dsh [label="dsh --patch\nowns its agent loop & retries", fillcolor="#dcfce7", color="#16a34a"];
+  }
+
+  subgraph cluster_direct {
+    label="Phase 3 — direct path (single completions)"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,filled"; fillcolor="#faf5ff";
+    router [label="ModelRouter\nfallback chain · cost at call time\ncontext-overflow → larger window only", fillcolor="#f3e8ff", color="#7e22ce"];
+    resilient [label="ResilientEngine (per provider)\nattempt deadline · jittered retry\ncircuit breaker: closed → open → half-open", fillcolor="#f3e8ff", color="#7e22ce"];
+    oai [label="OpenAICompatibleEngine\nOpenAI · llama.cpp · Ollama\nOpenRouter · vLLM", fillcolor="#f3e8ff", color="#7e22ce"];
+    ant [label="AnthropicEngine\nMessages API", fillcolor="#f3e8ff", color="#7e22ce"];
+    shared [label="shared transport\nSSE parser · Retry-After\nerror normalisation + redaction", fillcolor="#f3e8ff", color="#7e22ce"];
   }
 
   subgraph cluster_upstream {
-    label="upstream (Phase 2 routes)"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
+    label="upstream"; fontsize=9; fontcolor="#334155"; color="#cbd5e1"; style="rounded,dashed";
     cloud [label="Anthropic · OpenAI\nOpenRouter", fillcolor="#f1f5f9", color="#64748b"];
     local [label="llama.cpp · Ollama\n127.0.0.1", fillcolor="#f1f5f9", color="#64748b"];
   }
 
-  direct [label="Phase 3 — direct engines\nOpenAI-compatible · Anthropic\n(no agent loop)", fillcolor="#f3e8ff", color="#7e22ce", style="rounded,dashed,filled"];
+  logs [label="Logs (metadata only)\nmodels.call · call_failed\ncall_skipped · retry", fillcolor="#f1f5f9", color="#64748b"];
+  stats [label="Phase 4\nstats by model · cost", fillcolor="#f8fafc", color="#94a3b8", style="rounded,dashed,filled"];
 
-  stage -> runtime; chat -> runtime; brief -> runtime;
-  target -> runtime; registry -> runtime; discover -> registry;
-  runtime -> patch -> harness;
-  runtime -> validate [style=dashed, label="on refresh"];
-  harness -> cloud; harness -> local;
-  runtime -> direct [style=dashed];
+  stage -> runtime; chat -> runtime;
+  runtime -> dsh;
+  dsh -> cloud; dsh -> local;
+  target -> runtime; registry -> runtime;
+
+  test -> router;
+  chat -> router [style=dashed, label="not wired yet"];
+  target -> router; registry -> router; policy -> router;
+  router -> resilient;
+  resilient -> oai; resilient -> ant;
+  oai -> shared [style=dotted, arrowhead=none]; ant -> shared [style=dotted, arrowhead=none];
+  oai -> cloud; oai -> local; ant -> cloud;
+  router -> logs [style=dashed];
+  router -> stats [style=dashed, label="onAttempt"];
 }

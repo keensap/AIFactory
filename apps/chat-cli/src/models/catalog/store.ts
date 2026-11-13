@@ -58,6 +58,8 @@ export interface ModelCatalog {
   getProvider(id: string): Promise<ProviderRecord | undefined>
   listModels(provider?: string): Promise<ModelRecord[]>
   replaceModels(provider: string, models: Array<Omit<ModelRecord, 'provider' | 'discoveredAt'>>): Promise<ModelRecord[]>
+  /** Set or replace a model's price. Returns undefined when the model is not in the catalogue. */
+  setPrice(provider: string, model: string, price: ModelPrice): Promise<ModelRecord | undefined>
   close?(): Promise<void>
 }
 
@@ -150,6 +152,15 @@ export class PostgresModelCatalog implements ModelCatalog {
       client.release()
     }
     return this.listModels(provider)
+  }
+
+  async setPrice(provider: string, model: string, price: ModelPrice): Promise<ModelRecord | undefined> {
+    const result = await this.pool.query(
+      `UPDATE model_catalog SET price = $3::jsonb WHERE provider = $1 AND model = $2`,
+      [provider, model, JSON.stringify(price)],
+    )
+    if ((result.rowCount ?? 0) === 0) return undefined
+    return (await this.listModels(provider)).find((entry) => entry.model === model)
   }
 
   async close(): Promise<void> {

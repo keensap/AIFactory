@@ -239,6 +239,8 @@ async function route(
         modelDiscover: 'POST /api/models/providers/:id/discover',
         modelHealth: 'POST /api/models/providers/:id/health',
         modelTarget: 'GET/PATCH/DELETE /api/settings/models',
+        modelTest: 'POST /api/models/test',
+        modelPrice: 'PUT /api/models/price',
         modelRuntime: 'GET /api/admin/models',
       },
     })
@@ -284,6 +286,22 @@ async function route(
       sendJson(response, 200, { health: await models.health(decodeURIComponent(rest[1]!)) })
       return
     }
+    if (rest.length === 1 && rest[0] === 'test' && request.method === 'POST') {
+      requireAdmin(request, options)
+      sendJson(response, 200, { test: await models.test(await readJson(request)) })
+      return
+    }
+    if (rest.length === 1 && rest[0] === 'price' && request.method === 'PUT') {
+      requireAdmin(request, options)
+      const body = await readJson(request)
+      const record = (body !== null && typeof body === 'object' && !Array.isArray(body) ? body : {}) as Record<string, unknown>
+      if (typeof record.provider !== 'string' || typeof record.model !== 'string') {
+        throw new HttpError(400, 'provider and model are required', 'INVALID_PRICE')
+      }
+      const { provider, model, ...price } = record
+      sendJson(response, 200, { model: await models.setPrice(provider, model, price) })
+      return
+    }
     throw new HttpError(404, 'not found', 'NOT_FOUND')
   }
 
@@ -322,6 +340,13 @@ async function route(
 
   if (resource === 'admin' && rest[0] === 'models') {
     requireAdmin(request, options)
+    if (rest.length === 4 && rest[1] === 'providers' && rest[3] === 'reset' && request.method === 'POST') {
+      if (options.models === undefined) {
+        throw new HttpError(503, 'model providers are disabled; set DATABASE_URL', 'MODELS_NOT_CONFIGURED')
+      }
+      sendJson(response, 200, await options.models.resetBreaker(decodeURIComponent(rest[2]!)))
+      return
+    }
     if (rest.length !== 1 || request.method !== 'GET') throw new HttpError(404, 'not found', 'NOT_FOUND')
     if (options.modelRuntime === undefined) {
       throw new HttpError(503, 'model runtime is disabled; set DATABASE_URL', 'MODELS_NOT_CONFIGURED')
@@ -1449,6 +1474,28 @@ class HttpError extends Error {
   }
 }
 
+/**
+ * HTTP status for a model failure. Caller mistakes are 4xx; anything the
+ * upstream provider or our own configuration caused is 5xx so clients can tell
+ * "fix your request" from "the model layer is unhealthy".
+ */
+function modelErrorStatus(error: ModelError): number {
+  switch (error.kind) {
+    case 'invalid_request':
+    case 'unsupported':
+    case 'context_overflow':
+      return 400
+    case 'content_filter':
+      return 422
+    case 'unconfigured':
+      return 503
+    case 'timeout':
+      return 504
+    default:
+      return 502
+  }
+}
+
 function toHttpError(error: unknown): HttpError {
   if (error instanceof HttpError) return error
   if (error instanceof ProjectError) return new HttpError(error.status, error.message, error.code)
@@ -1460,7 +1507,7 @@ function toHttpError(error: unknown): HttpError {
   if (error instanceof VectorStoreError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof ObservabilityError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof ModelSettingsError) return new HttpError(error.status, error.message, error.code)
-  if (error instanceof ModelError) return new HttpError(error.kind === 'auth' || error.kind === 'invalid_request' ? 400 : 502, error.message, `MODEL_${error.kind.toUpperCase()}`)
+  if (error instanceof ModelError) return new HttpError(modelErrorStatus(error), error.message, `MODEL_${error.kind.toUpperCase()}`)
   if (error instanceof LogStoreError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof LoggingSettingsError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof DirectoryError) return new HttpError(error.status, error.message, error.code)

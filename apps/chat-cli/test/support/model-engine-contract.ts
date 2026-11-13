@@ -19,6 +19,8 @@ export interface EngineContractOptions {
   withoutTools?: () => ModelEngine
   /** Skip the abort case when an engine cannot be cancelled. */
   supportsAbort?: boolean
+  /** An engine whose upstream fails with a provider error (e.g. HTTP 503). */
+  failing?: () => ModelEngine
 }
 
 export function baseRequest(overrides: Partial<ModelRequest> = {}): ModelRequest {
@@ -111,6 +113,23 @@ export function defineModelEngineContract(
         }
       }, (error: unknown) => error instanceof ModelError && error.kind === 'aborted')
       assert.equal(sawDone, false)
+    })
+  }
+
+  if (options.failing !== undefined) {
+    const failing = options.failing
+    test(`${name}: upstream failures reject with a ModelError in both modes`, async () => {
+      await assert.rejects(
+        () => failing().complete(baseRequest()),
+        (error: unknown) => error instanceof ModelError && typeof error.kind === 'string',
+      )
+      const events: ModelEvent[] = []
+      await assert.rejects(async () => {
+        for await (const event of failing().stream(baseRequest())) events.push(event)
+      }, (error: unknown) => error instanceof ModelError)
+      // Streams throw; the `error` event is only produced by the SSE projection.
+      assert.equal(events.some((event) => event.type === 'error'), false)
+      assert.equal(events.some((event) => event.type === 'done'), false)
     })
   }
 

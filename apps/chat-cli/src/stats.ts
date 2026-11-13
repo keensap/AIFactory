@@ -178,7 +178,7 @@ export function buildProjectStats(input: {
     const tokens: TokenTotals = {
       input: row.input,
       output: row.output,
-      total: row.total > 0 ? row.total : row.input + row.output,
+      total: row.total > 0 ? row.total : row.input + row.output + row.cacheRead + row.cacheWrite,
       cacheRead: row.cacheRead,
       cacheWrite: row.cacheWrite,
     }

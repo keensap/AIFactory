@@ -37,6 +37,7 @@ class FakeCatalog implements ModelCatalog {
     return providerId === undefined ? this.models : this.models.filter((entry) => entry.provider === providerId)
   }
   async replaceModels(): Promise<ModelRecord[]> { return [] }
+  async setPrice(): Promise<ModelRecord | undefined> { return undefined }
 }
 
 class FakeSettings implements ModelSettingsStore {

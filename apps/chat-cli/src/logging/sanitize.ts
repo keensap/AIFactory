@@ -22,6 +22,11 @@ const RESERVED_KEYS = new Set(['level', 'ts', 'time', 'msg', 'schema', 'service'
 const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,512}/gi, '$1 [redacted]'],
   [/\bsk-[A-Za-z0-9_-]{16,256}/g, 'sk-[redacted]'],
+  // Google API keys and AWS access key ids.
+  [/\bAIza[0-9A-Za-z_-]{30,64}/g, 'AIza[redacted]'],
+  [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '[redacted-aws-key]'],
+  // JSON-quoted credentials, as echoed by provider error bodies and header dumps.
+  [/("(?:[A-Za-z0-9_-]*)(?:password|passwd|secret|token|api[_-]?key|authorization)"\s*:\s*)"[^"]{0,2048}"/gi, '$1"[redacted]"'],
   [/(:\/\/[^/\s:@]{1,128}:)[^@\s/]{1,256}@/g, '$1[redacted]@'],
   [/\b(password|passwd|pwd|secret|token|api[_-]?key|authorization)(\s*[=:]\s*)("[^"]{1,256}"|'[^']{1,256}'|[^\s,;&"']{1,256})/gi, '$1$2[redacted]'],
 ]

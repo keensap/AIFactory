@@ -21,6 +21,7 @@ import { baseRequest, defineModelEngineContract } from './support/model-engine-c
 
 defineModelEngineContract('fake', () => new FakeEngine({ usage: { inputTokens: 10, outputTokens: 4 } }), {
   withoutTools: () => new FakeEngine({ capabilities: { tools: false } }),
+  failing: () => new FakeEngine({ failWith: new ModelError('overloaded', 'provider busy') }),
 })
 
 test('normalizeUsage falls back to input + output and floors counts', () => {
@@ -117,9 +118,7 @@ test('the fake engine records calls and repeats the last scripted response', asy
 test('the fake engine can simulate a provider failure in both modes', async () => {
   const engine = new FakeEngine({ failWith: new ModelError('overloaded', 'provider busy') })
   await assert.rejects(() => engine.complete(baseRequest()), /provider busy/)
-  const events = []
-  for await (const event of engine.stream(baseRequest())) events.push(event)
-  assert.equal(events.at(-1)?.type, 'error')
+  await assert.rejects(async () => { for await (const _ of engine.stream(baseRequest())) void _ }, /provider busy/)
   assert.equal((await engine.health()).state, 'degraded')
 })
 

@@ -739,6 +739,67 @@ The target is a snapshot taken when a run starts; changing it affects later runs
   "warnings": [], "lastError": null } }
 ```
 
+**Direct path (single completions).** Alongside the harness, a provider-neutral router can call a model directly — OpenAI Chat Completions (OpenAI, llama.cpp, Ollama, vLLM, OpenRouter, gateways) and the Anthropic Messages API — with a per-provider circuit breaker, bounded retry and the target's fallback chain. No stage run uses it yet; it is exercised by `POST /api/models/test`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/models/test` | Run a small completion through the real routing path (admin) |
+| `PUT` | `/api/models/price` | Set a model's price, USD per million tokens (admin) |
+| `POST` | `/api/admin/models/providers/:id/reset` | Close a provider's circuit breaker (admin) |
+
+```sh
+curl -X POST http://127.0.0.1:8787/api/models/test \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Reply with the single word: ok","maxTokens":32,"timeoutMs":60000}'
+```
+
+```json
+{ "test": {
+    "provider": "anthropic", "model": "claude-sonnet-4-5", "text": "ok", "truncated": false,
+    "finishReason": "stop",
+    "usage": { "inputTokens": 12, "outputTokens": 4, "totalTokens": 16, "cacheReadTokens": 0, "cacheWriteTokens": 0 },
+    "costUsd": 0.000096, "durationMs": 412,
+    "attempts": [
+      { "provider": "openai", "model": "gpt-4o", "position": 0, "outcome": "error", "kind": "overloaded", "status": 503, "durationMs": 99 },
+      { "provider": "anthropic", "model": "claude-sonnet-4-5", "position": 1, "outcome": "ok", "durationMs": 313 }
+    ] } }
+```
+
+Limits: `prompt` ≤ 2000 characters (default `Reply with the single word: ok`), `maxTokens` 1–256 (default 32), `timeoutMs` 1000–300000 (default 60000). `text` is truncated to 500 characters. `costUsd` is `null` when the model has no price (a free local model with price 0 reports `0`).
+
+`PUT /api/models/price` takes `{ "provider", "model", "input"?, "output"?, "cacheRead"?, "cacheWrite"? }` (numbers 0–100000). The model must already be in the catalogue (run discovery first). Cost is computed when a call is made and is not recomputed when prices change later.
+
+**Token convention.** `inputTokens` excludes cached tokens, which are reported separately; `totalTokens = input + output + cacheRead + cacheWrite`.
+
+**Error mapping for model failures:**
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `MODEL_INVALID_REQUEST`, `MODEL_UNSUPPORTED`, `MODEL_CONTEXT_OVERFLOW` | 400 | The request cannot be served as sent |
+| `MODEL_CONTENT_FILTER` | 422 | The provider refused; never falls back |
+| `MODEL_UNCONFIGURED` | 503 | No target is set |
+| `MODEL_TIMEOUT` | 504 | The call did not finish in time |
+| `MODEL_AUTH`, `MODEL_QUOTA`, `MODEL_RATE_LIMIT`, `MODEL_OVERLOADED`, `MODEL_NETWORK`, `MODEL_UNKNOWN` | 502 | The provider (or our credential for it) failed |
+| `MODEL_UNAVAILABLE` | 502 | Every target failed or is quarantined; the message lists each one |
+
+**Fallback.** After a failure the router tries the next target for `rate_limit`, `overloaded`, `timeout`, `network`, `auth`, `quota`, `invalid_request`, `unsupported` and `unavailable`. It does **not** fall back for `content_filter` or a caller abort, and a `context_overflow` only moves to a model with a larger context window. A stream falls back only before its first event.
+
+**Circuit breaker (per provider).** After `AIFACTORY_MODEL_BREAKER_THRESHOLD` consecutive retryable failures the route opens for `AIFACTORY_MODEL_BREAKER_COOLDOWN_MS`; calls then skip it without network I/O. After the cool-down one probe call is admitted: success closes it, failure re-opens it. Changing a provider's endpoint, key reference or headers starts a fresh breaker.
+
+`GET /api/admin/models` also reports each provider's breaker:
+
+```json
+{ "models": { "applied": true, "provider": "openai", "model": "gpt-4o", "source": "settings",
+  "providers": [
+    { "provider": "openai", "breaker": { "state": "open", "consecutiveFailures": 3,
+      "retryAt": 1794577000000, "lastError": "network: openai unreachable: ECONNREFUSED",
+      "successes": 4, "failures": 3 } } ] } }
+```
+
+**Egress policy.** `AIFACTORY_MODEL_EGRESS=local-only` rejects a target (or fallback) that is not a local provider with `400 EGRESS_BLOCKED` when it is saved, and skips non-local providers on every routed call.
+
+**Logs.** Each attempt is logged as `models.call` (tokens, cost, duration, `providerRequestId`), `models.call_failed` or `models.call_skipped` (kind, status, redacted reason), and each retry as `models.retry`. Prompts, completions and keys are never logged.
+
 `.env` is resolved from the working directory, then the nearest parent up to the workspace root (a directory containing `.git`). `AIFACTORY_DOTENV` overrides the path. Real environment variables always win over `.env` values.
 
 ### Token and task-duration statistics
