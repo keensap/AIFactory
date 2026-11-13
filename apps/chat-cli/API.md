@@ -666,6 +666,56 @@ Segments replay oldest-first after the sink recovers and at startup. Delivery is
 
 **Failure isolation** — a sink that throws or hangs is retried with backoff, then its breaker opens (after 5 consecutive failed batches) and its batches are dropped and counted instead of blocking; one probe batch retries after the cool-down (30 s, doubling to 5 min). The application and the other sinks are unaffected. Deleting a project also deletes its `app_logs` rows.
 
+### Model providers and the global target
+
+One provider/model is active for the whole Factory. Every project and every stage use it; there is no per-project or per-stage override.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/models/providers` | Configured providers, credential presence, model counts |
+| `GET` | `/api/models?provider=` | Static catalogue |
+| `POST` | `/api/models/providers/:id/discover` | Fetch the provider's models and replace its catalogue (admin) |
+| `POST` | `/api/models/providers/:id/health` | Bounded reachability probe (admin) |
+| `GET` | `/api/settings/models` | Current target, its source and warnings |
+| `PATCH` | `/api/settings/models` | Validate and persist a target |
+| `DELETE` | `/api/settings/models` | Remove the stored target (fall back to the environment) |
+
+**Credentials are references, never values.** A provider row holds `apiKeyEnv` (for example `OPENAI_API_KEY`); the API returns only `credentialPresent: true|false`. A missing key is a warning, not an error.
+
+```json
+{
+  "providers": [
+    { "id": "anthropic", "kind": "anthropic", "baseUrl": null, "apiKeyEnv": "ANTHROPIC_API_KEY",
+      "local": false, "enabled": true, "credentialPresent": false, "modelCount": 0 },
+    { "id": "llamacpp", "kind": "openai-compatible", "baseUrl": "http://127.0.0.1:8080/v1",
+      "apiKeyEnv": null, "local": true, "enabled": true, "credentialPresent": true, "modelCount": 2 }
+  ]
+}
+```
+
+Seeded providers: `anthropic`, `openai`, `openrouter`, `llamacpp`, `ollama`. A per-provider base URL can be overridden with `AIFACTORY_<ID>_BASE_URL` (for example `AIFACTORY_LLAMACPP_BASE_URL`).
+
+**Target resolution:** stored setting → environment (`AIFACTORY_MODEL_PROVIDER` + `AIFACTORY_MODEL`) → `unconfigured`.
+
+```json
+{
+  "provider": "llamacpp",
+  "model": "qwen3-8b",
+  "temperature": 0.2,
+  "maxTokens": 4096,
+  "reasoningEffort": "medium",
+  "fallback": [{ "provider": "openai", "model": "gpt-5" }]
+}
+```
+
+Validation errors: `INVALID_BODY`, `INVALID_TARGET`, `PROVIDER_NOT_FOUND`, `PROVIDER_DISABLED`, `MODEL_NOT_FOUND` (only when that provider's catalogue is non-empty), `INVALID_FALLBACK` (max 4 entries, no duplicates). When a provider has no catalogue yet, any model string is accepted; run discovery to enforce membership.
+
+`GET /api/settings/models` returns the target plus `source` (`settings`|`environment`|`unconfigured`) and `warnings` such as `OPENAI_API_KEY is not set; openai cannot be called`.
+
+The target is a snapshot taken when a run starts; changing it affects later runs only.
+
+`.env` is resolved from the working directory, then the nearest parent up to the workspace root (a directory containing `.git`). `AIFACTORY_DOTENV` overrides the path. Real environment variables always win over `.env` values.
+
 ### Token and task-duration statistics
 
 ```http

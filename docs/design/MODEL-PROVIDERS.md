@@ -1,6 +1,6 @@
 # Model Providers — Plan
 
-**Status:** decisions confirmed 2026-11-13; **Phase 0 implemented**  
+**Status:** decisions confirmed 2026-11-13; **Phases 0–1 implemented**  
 **Date:** 2026-11-13  
 **Goal:** let AI Factory run on Claude, OpenAI, local llama.cpp and other third-party APIs through one interface — one global target for the whole Factory, with a documented seam for per-agent-behavior targets later — and no vendor logic in the core.
 
@@ -405,6 +405,36 @@ defineModelEngineContract('openai-compatible', () => new OpenAICompatibleEngine(
 ```
 
 Phase 1 (registry + global target + root `.env` + `/api/models*`) is next.
+
+## 10.2 Phase 1 implemented (2026-11-13)
+
+Code: `apps/chat-cli/src/models/` (`catalog/`, `settings.ts`, `service.ts`).
+
+| Item | Status |
+|---|---|
+| `model_providers` / `model_catalog` tables, idempotent migration, seeded providers (`anthropic`, `openai`, `openrouter`, `llamacpp`, `ollama`) | Done |
+| Credential handling: `apiKeyEnv` references only; `credentialPresent` booleans; missing keys are warnings | Done |
+| Global target in `settings` key `models`, with `GET/PATCH/DELETE /api/settings/models` | Done |
+| Resolution: settings → environment → `unconfigured`, with snapshot-per-run semantics | Done |
+| Validation: provider existence/enabled state, catalogue membership (when non-empty), temperature 0–2, max tokens, fallback ≤ 4 with no duplicates | Done |
+| Explicit discovery (`POST /api/models/providers/:id/discover`) for OpenAI-compatible and Anthropic, persisting the static catalogue | Done |
+| Bounded health probe (`POST .../health`): credential check, reachability, latency; cloud routes with vendor defaults are not probed | Done |
+| Root `.env` resolution: cwd → nearest parent up to the workspace root (`.git`), `AIFACTORY_DOTENV` override, environment wins | Done |
+| `GET /api/models/providers`, `GET /api/models?provider=` | Done |
+| `npm run check:models` — ports **and** `catalog/` stay vendor-free; core may not import an adapter | Done |
+
+**Live verification** (fake llama.cpp endpoint on `127.0.0.1:8080`):
+
+| Check | Result |
+|---|---|
+| `GET /api/models/providers` | 5 seeded providers; `llamacpp.credentialPresent:true`, cloud providers `false` |
+| `POST /api/models/providers/llamacpp/health` | `healthy`, `reachable:true`, 24 ms |
+| `POST .../discover` | 2 models written, context window captured |
+| `PATCH /api/settings/models` | target saved, `source:"settings"` |
+| `PATCH` with an unknown model | `400 MODEL_NOT_FOUND` |
+| `DELETE /api/settings/models` | `source:"unconfigured"` |
+
+**Deferred to Phase 2:** applying the target to stage runs through the harness (patch generation), and to Phase 3: direct engines, usage/cost, retry/breaker/fallback.
 
 ## 11. Test strategy
 

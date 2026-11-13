@@ -32,6 +32,7 @@ import { readMultipart, UploadError } from './multipart.ts'
 import { PdfError } from './pdf.ts'
 import { PdfReviewError, type PdfReviewService } from './pdf-review.ts'
 import { ObservabilityError, type ObservabilityReader, type TraceRecorder } from './observability/index.ts'
+import { ModelError, ModelSettingsError, type ModelService } from './models/index.ts'
 import type { HarnessEvent } from './protocol.ts'
 import { ProjectError, type ProjectService, type ProjectStatus } from './projects.ts'
 import type { ProjectStage } from './sdlc.ts'
@@ -83,6 +84,8 @@ export interface ChatApiOptions {
   loggingManager?: LoggingManager
   /** Query access to the PostgreSQL application-log table. */
   logStore?: PostgresLogStore
+  /** Global model target, provider catalogue and discovery. */
+  models?: ModelService
 }
 
 export function createChatServer(options: ChatApiOptions): Server {
@@ -225,6 +228,11 @@ async function route(
         loggingAdmin: 'GET /api/admin/logging',
         loggingLevel: 'PUT /api/admin/logging/level',
         observabilityAdmin: 'GET /api/admin/observability',
+        modelProviders: 'GET /api/models/providers',
+        models: 'GET /api/models?provider=',
+        modelDiscover: 'POST /api/models/providers/:id/discover',
+        modelHealth: 'POST /api/models/providers/:id/health',
+        modelTarget: 'GET/PATCH/DELETE /api/settings/models',
       },
     })
     return
@@ -243,6 +251,53 @@ async function route(
       database: options.projects === undefined ? 'disabled' : 'postgres',
     })
     return
+  }
+
+  if (resource === 'models') {
+    const models = options.models
+    if (models === undefined) {
+      throw new HttpError(503, 'model providers are disabled; set DATABASE_URL', 'MODELS_NOT_CONFIGURED')
+    }
+    if (rest.length === 0 && request.method === 'GET') {
+      const provider = url.searchParams.get('provider') ?? undefined
+      sendJson(response, 200, { models: await models.models(provider) })
+      return
+    }
+    if (rest.length === 1 && rest[0] === 'providers' && request.method === 'GET') {
+      sendJson(response, 200, { providers: await models.providers() })
+      return
+    }
+    if (rest.length === 3 && rest[0] === 'providers' && rest[2] === 'discover' && request.method === 'POST') {
+      requireAdmin(request, options)
+      sendJson(response, 200, { discovery: await models.discover(decodeURIComponent(rest[1]!)) })
+      return
+    }
+    if (rest.length === 3 && rest[0] === 'providers' && rest[2] === 'health' && request.method === 'POST') {
+      requireAdmin(request, options)
+      sendJson(response, 200, { health: await models.health(decodeURIComponent(rest[1]!)) })
+      return
+    }
+    throw new HttpError(404, 'not found', 'NOT_FOUND')
+  }
+
+  if (resource === 'settings' && rest.length === 1 && rest[0] === 'models') {
+    const models = options.models
+    if (models === undefined) {
+      throw new HttpError(503, 'model providers are disabled; set DATABASE_URL', 'MODELS_NOT_CONFIGURED')
+    }
+    if (request.method === 'GET') {
+      sendJson(response, 200, await models.target())
+      return
+    }
+    if (request.method === 'PATCH') {
+      sendJson(response, 200, await models.updateTarget(await readJson(request)))
+      return
+    }
+    if (request.method === 'DELETE') {
+      sendJson(response, 200, await models.clearTarget())
+      return
+    }
+    throw new HttpError(405, 'method not allowed', 'METHOD_NOT_ALLOWED')
   }
 
   if (resource === 'settings' && rest.length === 1 && rest[0] === 'logging') {
@@ -1387,6 +1442,8 @@ function toHttpError(error: unknown): HttpError {
   if (error instanceof SemanticIndexError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof VectorStoreError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof ObservabilityError) return new HttpError(error.status, error.message, error.code)
+  if (error instanceof ModelSettingsError) return new HttpError(error.status, error.message, error.code)
+  if (error instanceof ModelError) return new HttpError(error.kind === 'auth' || error.kind === 'invalid_request' ? 400 : 502, error.message, `MODEL_${error.kind.toUpperCase()}`)
   if (error instanceof LogStoreError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof LoggingSettingsError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof DirectoryError) return new HttpError(error.status, error.message, error.code)

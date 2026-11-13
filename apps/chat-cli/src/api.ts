@@ -37,6 +37,7 @@ import { PostgresSettingsStore, SettingsService } from './settings.ts'
 import { PlanningStageRuntime } from './stage-runtime.ts'
 import { SemanticIndexService } from './semantic-index.ts'
 import { PostgresVectorStore } from './vector-store.ts'
+import { ModelService, PostgresModelCatalog, PostgresModelSettingsStore } from './models/index.ts'
 import { createObservabilityProvider } from './observability/registry/index.ts'
 import { CachedObservabilityReader, type ObservabilityProvider, type ObservabilityReader, type TraceRecorder } from './observability/index.ts'
 import { PostgresProjectWorkspace, type ProjectDocument } from './workspace.ts'
@@ -266,6 +267,8 @@ async function main(): Promise<void> {
   let semanticIndex: SemanticIndexService | undefined
   let observability: ObservabilityProvider | undefined
   let observabilityReader: ObservabilityReader | undefined
+  let modelCatalog: PostgresModelCatalog | undefined
+  let modelService: ModelService | undefined
   let projects: ProjectService | undefined
   let settings: SettingsService | undefined
   let maxActiveProjects = 0
@@ -396,6 +399,22 @@ async function main(): Promise<void> {
   })
   await loggingManager.init()
 
+  if (databaseUrl !== undefined && databaseUrl !== '' && projects !== undefined) {
+    modelCatalog = new PostgresModelCatalog(databaseUrl)
+    try {
+      await modelCatalog.migrate()
+      modelService = new ModelService({
+        catalog: modelCatalog,
+        store: new PostgresModelSettingsStore(databaseUrl),
+        env: process.env,
+      })
+    } catch (error) {
+      log.warn({ event: 'models.catalog_init_failed', err: error }, 'model catalogue unavailable')
+      await modelCatalog.close().catch(() => {})
+      modelCatalog = undefined
+    }
+  }
+
   const recoveryTimer = workspaceStore === undefined
     ? undefined
     : setInterval(() => {
@@ -422,6 +441,7 @@ async function main(): Promise<void> {
     ...(stageRuntime !== undefined ? { stageRuntime } : {}),
     ...(semanticIndex !== undefined ? { semanticIndex } : {}),
     ...(observabilityReader !== undefined ? { observability: observabilityReader } : {}),
+    ...(modelService !== undefined ? { models: modelService } : {}),
     ...(traces !== undefined ? { observabilityRecorder: traces } : {}),
     loggingManager,
     ...(logStore !== undefined ? { logStore } : {}),
@@ -451,8 +471,20 @@ async function main(): Promise<void> {
     if (stageRuntime !== undefined) process.stdout.write(`  stage role timeout ${stageRoleTimeoutMs}ms\n`)
     process.stdout.write(`  retrieval  ${semanticIndex === undefined ? 'disabled' : 'pgvector'}\n`)
     process.stdout.write(`  observability ${observability === undefined ? 'disabled' : observability.name}\n`)
+    process.stdout.write(`  models     ${modelService === undefined ? 'disabled' : 'catalogue'}\n`)
     process.stdout.write(`  cors      ${cors === '*' ? '*' : cors.join(', ')}\n`)
     process.stdout.write(`  auth      ${apiToken === undefined ? 'none' : 'bearer token required'}\n`)
+    if (modelService !== undefined) {
+      void modelService.resolveForRun().then((resolved) => {
+        log.info({
+          event: 'models.target',
+          source: resolved.source,
+          provider: resolved.target?.provider ?? null,
+          model: resolved.target?.model ?? null,
+          warnings: resolved.warnings.length,
+        })
+      }).catch(() => {})
+    }
     log.info({
       event: 'app.started',
       url: `http://${host}:${boundPort}`,
@@ -479,6 +511,7 @@ async function main(): Promise<void> {
       await vectorStore?.close().catch(() => {})
       await logStore?.close().catch(() => {})
       await loggingSettingsStore?.close().catch(() => {})
+      await modelService?.close().catch(() => {})
       await observability?.shutdown().catch(() => {})
       await logging.shutdown({ timeoutMs: 2000 })
       process.exit(0)

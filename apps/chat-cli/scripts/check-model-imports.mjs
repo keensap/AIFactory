@@ -25,9 +25,15 @@ function importsOf(file) {
 const modelsDirectory = join(root, 'src/models')
 const entries = readdirSync(modelsDirectory)
 
+// Top-level modules plus `catalog/` are contract/config code and stay vendor-free.
 const coreFiles = entries
   .filter((name) => name.endsWith('.ts'))
   .map((name) => join(modelsDirectory, name))
+if (entries.includes('catalog')) {
+  for (const name of readdirSync(join(modelsDirectory, 'catalog'))) {
+    if (name.endsWith('.ts')) coreFiles.push(join(modelsDirectory, 'catalog', name))
+  }
+}
 
 const violations = []
 for (const file of coreFiles) {
@@ -45,6 +51,7 @@ if (violations.length > 0) {
 // Adapters may use vendor code, but the HTTP server and stage runtime must not
 // import an adapter directly (they consume the neutral ports).
 const adapterDirectories = entries.filter((name) => {
+  if (name === 'catalog') return false
   try {
     return statSync(join(modelsDirectory, name)).isDirectory()
   } catch {

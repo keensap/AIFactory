@@ -1,0 +1,220 @@
+/**
+ * PostgreSQL-backed provider and model catalogue.
+ *
+ * The catalogue is deliberately static: discovery is an explicit action that
+ * writes rows, never something a request performs implicitly.
+ */
+
+import { Pool } from 'pg'
+import type { ModelCapabilities } from '../ports.ts'
+import { defaultCapabilities } from '../ports.ts'
+import {
+  SEED_PROVIDERS,
+  type ModelPrice,
+  type ModelRecord,
+  type ProviderDefaults,
+  type ProviderKind,
+  type ProviderRecord,
+} from './types.ts'
+
+const MIGRATION = `
+  CREATE TABLE IF NOT EXISTS model_providers (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    base_url TEXT,
+    api_key_env TEXT,
+    headers JSONB NOT NULL DEFAULT '{}'::jsonb,
+    defaults JSONB NOT NULL DEFAULT '{}'::jsonb,
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    local BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE IF NOT EXISTS model_catalog (
+    provider TEXT NOT NULL REFERENCES model_providers(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    display_name TEXT,
+    context_window INTEGER,
+    max_output INTEGER,
+    capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
+    price JSONB NOT NULL DEFAULT '{}'::jsonb,
+    discovered_at TIMESTAMPTZ,
+    PRIMARY KEY (provider, model)
+  );
+
+  CREATE INDEX IF NOT EXISTS model_catalog_provider_idx ON model_catalog (provider);
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+`
+
+export interface ModelCatalog {
+  listProviders(): Promise<ProviderRecord[]>
+  getProvider(id: string): Promise<ProviderRecord | undefined>
+  listModels(provider?: string): Promise<ModelRecord[]>
+  replaceModels(provider: string, models: Array<Omit<ModelRecord, 'provider' | 'discoveredAt'>>): Promise<ModelRecord[]>
+  close?(): Promise<void>
+}
+
+export class PostgresModelCatalog implements ModelCatalog {
+  private readonly pool: Pool
+
+  constructor(connectionString: string) {
+    this.pool = new Pool({ connectionString, max: 3 })
+    this.pool.on('error', () => {})
+  }
+
+  async migrate(): Promise<void> {
+    await this.pool.query(MIGRATION)
+    for (const provider of SEED_PROVIDERS) {
+      await this.pool.query(
+        `INSERT INTO model_providers (id, kind, display_name, base_url, api_key_env, headers, defaults, enabled, local)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, true, $8)
+         ON CONFLICT (id) DO NOTHING`,
+        [
+          provider.id,
+          provider.kind,
+          provider.displayName,
+          provider.baseUrl,
+          provider.apiKeyEnv,
+          JSON.stringify(provider.headers ?? {}),
+          JSON.stringify(provider.defaults ?? {}),
+          provider.local,
+        ],
+      )
+    }
+  }
+
+  async listProviders(): Promise<ProviderRecord[]> {
+    const result = await this.pool.query<ProviderRow>(
+      `SELECT ${PROVIDER_COLUMNS} FROM model_providers ORDER BY local ASC, id ASC`,
+    )
+    return result.rows.map(mapProvider)
+  }
+
+  async getProvider(id: string): Promise<ProviderRecord | undefined> {
+    const result = await this.pool.query<ProviderRow>(
+      `SELECT ${PROVIDER_COLUMNS} FROM model_providers WHERE id = $1`,
+      [id],
+    )
+    const row = result.rows[0]
+    return row === undefined ? undefined : mapProvider(row)
+  }
+
+  async listModels(provider?: string): Promise<ModelRecord[]> {
+    const result = await this.pool.query<ModelRow>(
+      `SELECT provider, model, display_name AS "displayName", context_window AS "contextWindow",
+              max_output AS "maxOutput", capabilities, price, discovered_at AS "discoveredAt"
+       FROM model_catalog
+       ${provider === undefined ? '' : 'WHERE provider = $1'}
+       ORDER BY provider ASC, model ASC`,
+      provider === undefined ? [] : [provider],
+    )
+    return result.rows.map(mapModel)
+  }
+
+  async replaceModels(
+    provider: string,
+    models: Array<Omit<ModelRecord, 'provider' | 'discoveredAt'>>,
+  ): Promise<ModelRecord[]> {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query('DELETE FROM model_catalog WHERE provider = $1', [provider])
+      for (const model of models) {
+        await client.query(
+          `INSERT INTO model_catalog
+             (provider, model, display_name, context_window, max_output, capabilities, price, discovered_at)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, now())`,
+          [
+            provider,
+            model.model,
+            model.displayName,
+            model.contextWindow,
+            model.maxOutput,
+            JSON.stringify(model.capabilities),
+            JSON.stringify(model.price),
+          ],
+        )
+      }
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      client.release()
+    }
+    return this.listModels(provider)
+  }
+
+  async close(): Promise<void> {
+    await this.pool.end().catch(() => {})
+  }
+}
+
+const PROVIDER_COLUMNS = `id, kind, display_name AS "displayName", base_url AS "baseUrl",
+  api_key_env AS "apiKeyEnv", headers, defaults, enabled, local,
+  created_at AS "createdAt", updated_at AS "updatedAt"`
+
+interface ProviderRow {
+  id: string
+  kind: ProviderKind
+  displayName: string
+  baseUrl: string | null
+  apiKeyEnv: string | null
+  headers: Record<string, string>
+  defaults: ProviderDefaults
+  enabled: boolean
+  local: boolean
+  createdAt: Date | string
+  updatedAt: Date | string
+}
+
+interface ModelRow {
+  provider: string
+  model: string
+  displayName: string | null
+  contextWindow: number | null
+  maxOutput: number | null
+  capabilities: Partial<ModelCapabilities>
+  price: ModelPrice
+  discoveredAt: Date | string | null
+}
+
+function mapProvider(row: ProviderRow): ProviderRecord {
+  return {
+    id: row.id,
+    kind: row.kind,
+    displayName: row.displayName,
+    baseUrl: row.baseUrl,
+    apiKeyEnv: row.apiKeyEnv,
+    headers: row.headers ?? {},
+    defaults: row.defaults ?? {},
+    enabled: row.enabled,
+    local: row.local,
+    createdAt: toIso(row.createdAt),
+    updatedAt: toIso(row.updatedAt),
+  }
+}
+
+function mapModel(row: ModelRow): ModelRecord {
+  return {
+    provider: row.provider,
+    model: row.model,
+    displayName: row.displayName,
+    contextWindow: row.contextWindow,
+    maxOutput: row.maxOutput,
+    capabilities: { ...defaultCapabilities(), ...(row.capabilities ?? {}) },
+    price: row.price ?? {},
+    discoveredAt: row.discoveredAt === null ? null : toIso(row.discoveredAt),
+  }
+}
+
+function toIso(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString()
+}

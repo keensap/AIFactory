@@ -17,6 +17,7 @@ tags:
   - name: sessions
   - name: chat
   - name: stage-runs
+  - name: models
   - name: stats
   - name: logs
   - name: observability
@@ -861,6 +862,145 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /api/models/providers:
+    get:
+      tags: [models]
+      summary: Configured model providers (no secrets)
+      responses:
+        '200':
+          description: Providers with credential presence and model counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  providers:
+                    type: array
+                    items: {$ref: '#/components/schemas/ModelProvider'}
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+
+  /api/models:
+    get:
+      tags: [models]
+      summary: Static model catalogue
+      parameters:
+        - {name: provider, in: query, schema: {type: string}}
+      responses:
+        '200':
+          description: Catalogue entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  models:
+                    type: array
+                    items: {$ref: '#/components/schemas/ModelEntry'}
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+
+  /api/models/providers/{id}/discover:
+    post:
+      tags: [models]
+      summary: Discover and store a provider's models
+      description: Requires the bearer token, or a loopback client when no token is configured.
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Discovery result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  discovery:
+                    type: object
+                    properties:
+                      provider: {type: string}
+                      discovered: {type: integer}
+                      models:
+                        type: array
+                        items: {$ref: '#/components/schemas/ModelEntry'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: PROVIDER_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: MODEL_AUTH / MODEL_NETWORK / MODEL_TIMEOUT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/models/providers/{id}/health:
+    post:
+      tags: [models]
+      summary: Probe a provider within a deadline
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Provider health
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  health: {$ref: '#/components/schemas/ProviderHealth'}
+        '404':
+          description: PROVIDER_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/settings/models:
+    get:
+      tags: [models]
+      summary: Global model target and its source
+      responses:
+        '200':
+          description: Resolved target
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelTargetView'
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+    patch:
+      tags: [models]
+      summary: Validate and persist the global target
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ModelTarget'}
+      responses:
+        '200':
+          description: Updated target
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelTargetView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    delete:
+      tags: [models]
+      summary: Remove the stored target and fall back to the environment
+      responses:
+        '200':
+          description: Resolved target after clearing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelTargetView'
 
   /api/settings/logging:
     get:
@@ -1713,6 +1853,72 @@ components:
         p50Ms: {type: integer}
         p95Ms: {type: integer}
         maxMs: {type: integer}
+    ModelProvider:
+      type: object
+      properties:
+        id: {type: string}
+        kind: {type: string, enum: [anthropic, openai, openai-compatible, azure-openai, google, bedrock]}
+        displayName: {type: string}
+        baseUrl: {type: [string, 'null']}
+        apiKeyEnv: {type: [string, 'null']}
+        local: {type: boolean}
+        enabled: {type: boolean}
+        credentialPresent: {type: boolean}
+        modelCount: {type: integer}
+    ModelEntry:
+      type: object
+      properties:
+        provider: {type: string}
+        model: {type: string}
+        displayName: {type: [string, 'null']}
+        contextWindow: {type: [integer, 'null']}
+        maxOutput: {type: [integer, 'null']}
+        capabilities: {type: object, additionalProperties: true}
+        price: {type: object, additionalProperties: true}
+        discoveredAt: {type: [string, 'null'], format: date-time}
+    ModelTarget:
+      type: object
+      required: [provider, model]
+      properties:
+        provider: {type: string}
+        model: {type: string}
+        temperature: {type: number, minimum: 0, maximum: 2}
+        maxTokens: {type: integer, minimum: 1, maximum: 200000}
+        reasoningEffort: {type: string}
+        fallback:
+          type: array
+          maxItems: 4
+          items:
+            type: object
+            required: [provider, model]
+            properties:
+              provider: {type: string}
+              model: {type: string}
+    ModelTargetView:
+      type: object
+      properties:
+        target:
+          oneOf:
+            - $ref: '#/components/schemas/ModelTarget'
+            - type: 'null'
+        source: {type: string, enum: [settings, environment, unconfigured]}
+        warnings:
+          type: array
+          items: {type: string}
+        updatedAt: {type: [string, 'null'], format: date-time}
+        providers:
+          type: array
+          items: {$ref: '#/components/schemas/ModelProvider'}
+    ProviderHealth:
+      type: object
+      properties:
+        provider: {type: string}
+        state: {type: string, enum: [healthy, degraded, unconfigured]}
+        credential: {type: boolean}
+        reachable: {type: [boolean, 'null']}
+        latencyMs: {type: [integer, 'null']}
+        models: {type: integer}
+        lastError: {type: [string, 'null']}
     ObservabilityHealth:
       type: object
       required: [provider, enabled, state, projects, exports, failures, droppedSpans]

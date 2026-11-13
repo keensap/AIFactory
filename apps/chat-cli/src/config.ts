@@ -8,6 +8,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 export const DEFAULT_TIMEOUT_MS = 120_000
 
@@ -83,9 +84,35 @@ export function resolveHarnessConfig(input: HarnessConfigInput = {}): HarnessCon
  * appears in a `.env` layer. Detect that early so both entrypoints can print a
  * one-line fix instead of a child-process stack trace.
  */
+/**
+ * Resolve the `.env` file to use.
+ *
+ * Order: an explicit `AIFACTORY_DOTENV` path, then `.env` in the working
+ * directory, then the nearest `.env` walking up to (and including) the workspace
+ * root — a directory containing `.git`. Walking stops there so an unrelated
+ * parent directory's file is never loaded.
+ */
+export function resolveDotEnvPath(cwd: string, env: Record<string, string | undefined> = process.env): string | undefined {
+  const explicit = env.AIFACTORY_DOTENV
+  if (explicit !== undefined && explicit.trim() !== '') {
+    const path = isAbsolute(explicit) ? explicit : resolve(cwd, explicit)
+    return existsSync(path) ? path : undefined
+  }
+  let directory = resolve(cwd)
+  for (let depth = 0; depth < 8; depth++) {
+    const candidate = join(directory, '.env')
+    if (existsSync(candidate)) return candidate
+    if (existsSync(join(directory, '.git'))) return undefined
+    const parent = dirname(directory)
+    if (parent === directory) return undefined
+    directory = parent
+  }
+  return undefined
+}
+
 export function findLaunchOnlyDotEnvKeys(cwd: string): string[] {
-  const path = `${cwd}/.env`
-  if (!existsSync(path)) return []
+  const path = resolveDotEnvPath(cwd)
+  if (path === undefined) return []
   let text = ''
   try {
     text = readFileSync(path, 'utf8')
@@ -106,13 +133,15 @@ export function findLaunchOnlyDotEnvKeys(cwd: string): string[] {
  * AIFACTORY_PERMISSION_MODE) available to both entrypoints.
  * Existing environment variables win, matching Node's loadEnvFile semantics.
  */
-export function loadDotEnv(cwd: string): void {
-  const path = `${cwd}/.env`
-  if (!existsSync(path)) return
+export function loadDotEnv(cwd: string): string | undefined {
+  const path = resolveDotEnvPath(cwd)
+  if (path === undefined) return undefined
   try {
     process.loadEnvFile(path)
+    return path
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     process.stderr.write(`warning: could not read ${path}: ${message}\n`)
+    return undefined
   }
 }
