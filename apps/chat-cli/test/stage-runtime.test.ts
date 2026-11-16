@@ -64,19 +64,23 @@ test('runs analyzer, author and reviewer, then waits for a human decision', asyn
     const started = await runtime.start({ projectId: project.id, stage: 'planning', brief: 'Build a portal' })
     const executed = await runtime.execute(started.id)
     assert.equal(executed.status, 'awaiting_human')
+    assert.equal(executed.pendingGate?.kind, 'final', 'the run waits at the final gate')
     assert.equal(executed.reviews.length, 1)
-    assert.equal(executed.documents.length, 1)
+    assert.equal(executed.documents.length, 0, 'no artifact is produced before approval')
     assert.deepEqual(calls, ['analyzer', 'author', 'reviewer'])
-    assert.match(executed.summaryMarkdown ?? '', /awaiting human decision/)
+    assert.match(executed.summaryMarkdown ?? '', /awaiting human/i)
     const workspaceEvents = (workspace as unknown as { events: StageRunEvent[] }).events
     assert.ok(workspaceEvents.some((event) => event.type === 'role_start' && event.role === 'analyzer'))
     assert.ok(workspaceEvents.some((event) => event.type === 'role_end' && event.role === 'reviewer'))
     assert.ok(workspaceEvents.some((event) => event.type === 'review_decision'))
-    assert.ok(workspaceEvents.some((event) => event.type === 'document_created'))
+    assert.ok(workspaceEvents.some((event) => event.type === 'final_gate'))
+    assert.equal(workspaceEvents.some((event) => event.type === 'document_created'), false)
 
     const decided = await runtime.decide(started.id, { decision: 'go', note: 'Approved by sponsor' })
     assert.equal(decided.status, 'completed')
+    assert.equal(decided.documents.length, 1, 'the document is stored on completion')
     assert.match(decided.summaryMarkdown ?? '', /Decision: \*\*go\*\*/)
+    assert.ok(workspaceEvents.some((event) => event.type === 'document_created'))
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -325,8 +329,12 @@ test('completing a stage writes the PDF outside .aifactory with the requested na
   const { runtime, workspace, project, root } = await runWithPrompt()
   try {
     const started = await runtime.start({ projectId: project.id, stage: 'planning', brief: 'Build a portal' })
-    const detail = await runtime.execute(started.id)
-    assert.equal(detail.status, 'awaiting_human')
+    const gated = await runtime.execute(started.id)
+    assert.equal(gated.status, 'awaiting_human')
+    assert.equal(existsSync(join(root, 'documents')), false, 'no PDF before approval')
+
+    const detail = await runtime.decide(started.id, { decision: 'go' })
+    assert.equal(detail.status, 'completed')
 
     const expected = join(root, 'documents', 'planning', 'TELOS Feasibility Report — ABCClothing.pdf')
     assert.ok(existsSync(expected), `expected ${expected}`)
@@ -358,8 +366,9 @@ test('a PDF rendering failure never fails the stage run', async () => {
   })
   try {
     const started = await runtime.start({ projectId: project.id, stage: 'planning', brief: 'Build a portal' })
-    const detail = await runtime.execute(started.id)
-    assert.equal(detail.status, 'awaiting_human', 'the run still completes')
+    await runtime.execute(started.id)
+    const detail = await runtime.decide(started.id, { decision: 'go' })
+    assert.equal(detail.status, 'completed', 'the run still completes')
     assert.equal(detail.documents.length, 1, 'the Markdown artifact is still stored')
     assert.ok(existsSync(join(root, 'documents')) === false, 'no partial PDF directory')
     const failure = extras(workspace).events.find((event) => event.type === 'document_export_failed')
@@ -375,6 +384,7 @@ test('exportRun re-renders and overwrites the canonical file', async () => {
   try {
     const started = await runtime.start({ projectId: project.id, stage: 'planning', brief: 'Build a portal' })
     await runtime.execute(started.id)
+    await runtime.decide(started.id, { decision: 'go' })
     const file = join(root, 'documents', 'planning', 'TELOS Feasibility Report — ABCClothing.pdf')
     const first = readFileSync(file)
     assert.equal(first.subarray(0, 5).toString(), '%PDF-')

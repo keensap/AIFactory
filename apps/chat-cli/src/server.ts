@@ -40,6 +40,7 @@ import type { HarnessEvent } from './protocol.ts'
 import { ProjectError, type ProjectService, type ProjectStatus } from './projects.ts'
 import { SDLC_STAGES, type ProjectStage } from './sdlc.ts'
 import { SettingsError, type SettingsService } from './settings.ts'
+import { StageSettingsError, type StageSettingsService } from './stage-settings.ts'
 import { SemanticIndexError, type SemanticIndexService } from './semantic-index.ts'
 import { VectorStoreError } from './vector-store.ts'
 import { PlanningStageRuntime, StageRuntimeError } from './stage-runtime.ts'
@@ -68,6 +69,8 @@ export interface ChatApiOptions {
   projects?: ProjectService
   /** Chat settings. When omitted, settings routes return 503. */
   settings?: SettingsService
+  /** Planning-stage review settings. When omitted, the settings routes return 503. */
+  stageSettings?: StageSettingsService
   /** PDF requirement review. When omitted, the PDF route returns 503. */
   pdfReview?: PdfReviewService
   /** SDLC stage, documents and checklist storage. */
@@ -235,6 +238,9 @@ async function route(
         stageEventStream: 'GET /api/stage-runs/:runId/events/stream',
         stageTelemetry: 'GET /api/stage-runs/:runId/telemetry',
         stageExport: 'POST /api/stage-runs/:runId/export',
+        stageGate: 'POST /api/stage-runs/:runId/gate',
+        stageSettings: 'GET/PATCH/DELETE /api/projects/:id/stages/planning/settings',
+        stageDefaults: 'GET/PATCH /api/settings/stage-defaults',
         attachments: 'GET/POST /api/projects/:id/attachments',
         semanticIndex: 'POST /api/projects/:id/index',
         semanticSearch: 'GET /api/projects/:id/search?q=...',
@@ -419,6 +425,22 @@ async function route(
       postgresEnabled: options.loggingManager?.view().postgresActive ?? false,
     })
     return
+  }
+
+  if (resource === 'settings' && rest.length === 1 && rest[0] === 'stage-defaults') {
+    const stageSettings = options.stageSettings
+    if (stageSettings === undefined) {
+      throw new HttpError(503, 'stage settings are disabled; set DATABASE_URL', 'STAGE_SETTINGS_NOT_CONFIGURED')
+    }
+    if (request.method === 'GET') {
+      sendJson(response, 200, { stageDefaults: await stageSettings.factoryDefaults() })
+      return
+    }
+    if (request.method === 'PATCH') {
+      sendJson(response, 200, { stageDefaults: await stageSettings.updateFactoryDefaults(await readJson(request)) })
+      return
+    }
+    throw new HttpError(405, 'method not allowed', 'METHOD_NOT_ALLOWED')
   }
 
   if (resource === 'settings') {
@@ -851,19 +873,33 @@ async function handleStageRuns(
     sendJson(response, 202, { run: await runtime.get(runId) })
     return
   }
+  if (rest.length === 2 && rest[1] === 'gate' && request.method === 'POST') {
+    const body = await readJson(request)
+    const record = body !== null && typeof body === 'object' ? body as Record<string, unknown> : {}
+    if (record.action !== 'apply' && record.action !== 'accept') {
+      throw new HttpError(400, 'action must be "apply" or "accept"', 'INVALID_GATE_ACTION')
+    }
+    sendJson(response, 200, { run: await runtime.answerGate(runId, record.action) })
+    return
+  }
   if (rest.length === 2 && rest[1] === 'decision' && request.method === 'POST') {
     const body = await readJson(request)
     const record = body !== null && typeof body === 'object' ? body as Record<string, unknown> : {}
-    const decision = record.decision
-    if (decision !== 'go' && decision !== 'conditional_go' && decision !== 'no_go') {
-      throw new HttpError(400, 'decision must be go, conditional_go or no_go', 'INVALID_HUMAN_DECISION')
+    const refine = record.refine === true
+    if (!refine) {
+      const decision = record.decision
+      if (decision !== 'go' && decision !== 'conditional_go' && decision !== 'no_go') {
+        throw new HttpError(400, 'decision must be go, conditional_go or no_go when refine is false', 'INVALID_HUMAN_DECISION')
+      }
+      sendJson(response, 200, {
+        run: await runtime.decide(runId, {
+          decision,
+          ...(typeof record.note === 'string' ? { note: record.note } : {}),
+        }),
+      })
+      return
     }
-    sendJson(response, 200, {
-      run: await runtime.decide(runId, {
-        decision,
-        ...(typeof record.note === 'string' ? { note: record.note } : {}),
-      }),
-    })
+    sendJson(response, 200, { run: await runtime.decide(runId, { refine: true }) })
     return
   }
   throw new HttpError(404, 'not found', 'NOT_FOUND')
@@ -1058,6 +1094,31 @@ async function handleProjects(
       sendJson(response, 200, { document: await workspace.updateDocumentStatus(id, documentId, status) })
       return
     }
+  }
+
+  if (id !== undefined && rest.length === 4 && rest[1] === 'stages' && rest[3] === 'settings') {
+    const stageSettings = options.stageSettings
+    if (stageSettings === undefined) {
+      throw new HttpError(503, 'stage settings are disabled; set DATABASE_URL', 'STAGE_SETTINGS_NOT_CONFIGURED')
+    }
+    const stage = decodeURIComponent(rest[2]!)
+    if (stage !== 'planning') {
+      throw new HttpError(501, 'settings exist only for the planning stage so far', 'STAGE_SETTINGS_NOT_IMPLEMENTED')
+    }
+    await projects.get(id)
+    if (request.method === 'GET') {
+      sendJson(response, 200, { settings: await stageSettings.resolve(id) })
+      return
+    }
+    if (request.method === 'PATCH') {
+      sendJson(response, 200, { settings: await stageSettings.setProject(id, await readJson(request)) })
+      return
+    }
+    if (request.method === 'DELETE') {
+      sendJson(response, 200, { settings: await stageSettings.setProject(id, null) })
+      return
+    }
+    throw new HttpError(405, 'method not allowed', 'METHOD_NOT_ALLOWED')
   }
 
   if (id !== undefined && rest.length === 2 && rest[1] === 'documents') {
@@ -1695,6 +1756,7 @@ function toHttpError(error: unknown): HttpError {
   if (error instanceof AttachmentError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof ExportError) return new HttpError(500, error.message, error.code)
   if (error instanceof ReportPdfError) return new HttpError(500, error.message, error.code)
+  if (error instanceof StageSettingsError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof ModelSettingsError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof ModelError) return new HttpError(modelErrorStatus(error), error.message, `MODEL_${error.kind.toUpperCase()}`)
   if (error instanceof LogStoreError) return new HttpError(error.status, error.message, error.code)

@@ -1,0 +1,236 @@
+/**
+ * Planning-stage review settings.
+ *
+ * Two knobs decide how much review happens before a human is asked:
+ *
+ *  - `gateAfterEachReview`: pause after **every** review and ask whether to
+ *    apply its changes. The operator controls each cycle.
+ *  - `maxReviewCycles`: how many revision cycles run automatically when gating
+ *    is off, counted *after* the first review.
+ *
+ * Whichever mode is used, the run ends at a final gate where a human decides
+ * whether to refine further; only then is the stage completed and the PDF
+ * produced.
+ *
+ * Values resolve **project override → Factory default**. A run snapshots the
+ * resolved values into its context, so changing settings mid-run cannot alter a
+ * run that is already in progress.
+ */
+
+import { Pool } from 'pg'
+
+export const MIN_REVIEW_CYCLES = 1
+export const MAX_REVIEW_CYCLES = 10
+
+export interface PlanningStageSettings {
+  gateAfterEachReview: boolean
+  maxReviewCycles: number
+}
+
+export const DEFAULT_PLANNING_STAGE_SETTINGS: PlanningStageSettings = {
+  gateAfterEachReview: false,
+  maxReviewCycles: 3,
+}
+
+export type SettingsSource = 'project' | 'factory'
+
+export interface ResolvedStageSettings extends PlanningStageSettings {
+  source: SettingsSource
+}
+
+export class StageSettingsError extends Error {
+  readonly status: number
+  readonly code: string
+
+  constructor(status: number, code: string, message: string) {
+    super(message)
+    this.name = 'StageSettingsError'
+    this.status = status
+    this.code = code
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** Validate a full or partial settings payload. Unknown keys are ignored. */
+export function parseStageSettings(input: unknown, options: { partial?: boolean } = {}): Partial<PlanningStageSettings> {
+  if (!isRecord(input)) throw new StageSettingsError(400, 'INVALID_BODY', 'request body must be a JSON object')
+  const out: Partial<PlanningStageSettings> = {}
+
+  if (input.gateAfterEachReview !== undefined) {
+    if (typeof input.gateAfterEachReview !== 'boolean') {
+      throw new StageSettingsError(400, 'INVALID_GATE_SETTING', 'gateAfterEachReview must be true or false')
+    }
+    out.gateAfterEachReview = input.gateAfterEachReview
+  }
+  if (input.maxReviewCycles !== undefined) {
+    const value = input.maxReviewCycles
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < MIN_REVIEW_CYCLES || value > MAX_REVIEW_CYCLES) {
+      throw new StageSettingsError(
+        400,
+        'INVALID_REVIEW_CYCLES',
+        `maxReviewCycles must be an integer between ${MIN_REVIEW_CYCLES} and ${MAX_REVIEW_CYCLES}`,
+      )
+    }
+    out.maxReviewCycles = value
+  }
+
+  if (options.partial !== true && (out.gateAfterEachReview === undefined || out.maxReviewCycles === undefined)) {
+    throw new StageSettingsError(400, 'INVALID_SETTINGS', 'gateAfterEachReview and maxReviewCycles are both required')
+  }
+  return out
+}
+
+/** The settings a run uses, read from its snapshotted context. */
+export function settingsFromContext(context: unknown): PlanningStageSettings {
+  const record = isRecord(context) ? context : {}
+  const constraints = isRecord(record.constraints) ? record.constraints : {}
+  const gate = typeof constraints.gateAfterEachReview === 'boolean'
+    ? constraints.gateAfterEachReview
+    : DEFAULT_PLANNING_STAGE_SETTINGS.gateAfterEachReview
+  const cycles = typeof constraints.maxReviewCycles === 'number' && Number.isInteger(constraints.maxReviewCycles)
+    ? Math.min(MAX_REVIEW_CYCLES, Math.max(MIN_REVIEW_CYCLES, constraints.maxReviewCycles))
+    : DEFAULT_PLANNING_STAGE_SETTINGS.maxReviewCycles
+  return { gateAfterEachReview: gate, maxReviewCycles: cycles }
+}
+
+export interface StageSettingsStore {
+  migrate?(): Promise<void>
+  loadDefaults(): Promise<PlanningStageSettings>
+  saveDefaults(settings: PlanningStageSettings): Promise<PlanningStageSettings>
+  getProject(projectId: string): Promise<PlanningStageSettings | undefined>
+  setProject(projectId: string, settings: PlanningStageSettings | null): Promise<void>
+  close?(): Promise<void>
+}
+
+export class PostgresStageSettingsStore implements StageSettingsStore {
+  private readonly pool: Pool
+
+  constructor(connectionString: string) {
+    this.pool = new Pool({ connectionString, max: 2 })
+    this.pool.on('error', () => {})
+  }
+
+  async migrate(): Promise<void> {
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE TABLE IF NOT EXISTS project_stage_settings (
+        project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        stage TEXT NOT NULL,
+        gate_after_each_review BOOLEAN NOT NULL,
+        max_review_cycles INTEGER NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (project_id, stage)
+      );
+    `)
+  }
+
+  async loadDefaults(): Promise<PlanningStageSettings> {
+    const result = await this.pool.query<{ value: unknown }>(`SELECT value FROM settings WHERE key = 'stage_defaults'`)
+    const value = result.rows[0]?.value
+    if (!isRecord(value) || !isRecord(value.planning)) return { ...DEFAULT_PLANNING_STAGE_SETTINGS }
+    try {
+      const parsed = parseStageSettings(value.planning)
+      return { ...DEFAULT_PLANNING_STAGE_SETTINGS, ...parsed }
+    } catch {
+      // Corrupt settings must not stop the Factory; defaults are safe.
+      return { ...DEFAULT_PLANNING_STAGE_SETTINGS }
+    }
+  }
+
+  async saveDefaults(settings: PlanningStageSettings): Promise<PlanningStageSettings> {
+    await this.pool.query(
+      `INSERT INTO settings (key, value, updated_at) VALUES ('stage_defaults', $1::jsonb, now())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+      [JSON.stringify({ planning: settings })],
+    )
+    return settings
+  }
+
+  async getProject(projectId: string): Promise<PlanningStageSettings | undefined> {
+    const result = await this.pool.query<{ gate: boolean; cycles: number }>(
+      `SELECT gate_after_each_review AS gate, max_review_cycles AS cycles
+       FROM project_stage_settings WHERE project_id = $1 AND stage = 'planning'`,
+      [projectId],
+    )
+    const row = result.rows[0]
+    return row === undefined ? undefined : { gateAfterEachReview: row.gate, maxReviewCycles: row.cycles }
+  }
+
+  async setProject(projectId: string, settings: PlanningStageSettings | null): Promise<void> {
+    if (settings === null) {
+      await this.pool.query(`DELETE FROM project_stage_settings WHERE project_id = $1 AND stage = 'planning'`, [projectId])
+      return
+    }
+    await this.pool.query(
+      `INSERT INTO project_stage_settings (project_id, stage, gate_after_each_review, max_review_cycles, updated_at)
+       VALUES ($1, 'planning', $2, $3, now())
+       ON CONFLICT (project_id, stage) DO UPDATE SET
+         gate_after_each_review = EXCLUDED.gate_after_each_review,
+         max_review_cycles = EXCLUDED.max_review_cycles,
+         updated_at = now()`,
+      [projectId, settings.gateAfterEachReview, settings.maxReviewCycles],
+    )
+  }
+
+  async close(): Promise<void> {
+    await this.pool.end().catch(() => {})
+  }
+}
+
+/** Resolve and edit planning-stage settings. */
+export class StageSettingsService {
+  private readonly store: StageSettingsStore
+
+  constructor(store: StageSettingsStore) {
+    this.store = store
+  }
+
+  async migrate(): Promise<void> {
+    await this.store.migrate?.()
+  }
+
+  async factoryDefaults(): Promise<PlanningStageSettings> {
+    return this.store.loadDefaults()
+  }
+
+  async updateFactoryDefaults(input: unknown): Promise<PlanningStageSettings> {
+    const patch = parseStageSettings(input, { partial: true })
+    if (Object.keys(patch).length === 0) {
+      throw new StageSettingsError(400, 'NO_FIELDS', 'no recognised settings were provided')
+    }
+    return this.store.saveDefaults({ ...(await this.store.loadDefaults()), ...patch })
+  }
+
+  /** Project override, or the Factory default when the project has none. */
+  async resolve(projectId: string): Promise<ResolvedStageSettings> {
+    const project = await this.store.getProject(projectId)
+    if (project !== undefined) return { ...project, source: 'project' }
+    return { ...(await this.store.loadDefaults()), source: 'factory' }
+  }
+
+  async setProject(projectId: string, input: unknown): Promise<ResolvedStageSettings> {
+    if (input === null) {
+      await this.store.setProject(projectId, null)
+    } else {
+      const patch = parseStageSettings(input, { partial: true })
+      if (Object.keys(patch).length === 0) {
+        throw new StageSettingsError(400, 'NO_FIELDS', 'no recognised settings were provided')
+      }
+      const current = (await this.store.getProject(projectId)) ?? (await this.store.loadDefaults())
+      const next: PlanningStageSettings = { ...current, ...patch }
+      await this.store.setProject(projectId, next)
+    }
+    return this.resolve(projectId)
+  }
+
+  async close(): Promise<void> {
+    await this.store.close?.()
+  }
+}

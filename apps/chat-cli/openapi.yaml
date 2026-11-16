@@ -1643,6 +1643,135 @@ paths:
                     items:
                       $ref: '#/components/schemas/StageReview'
 
+  /api/stage-runs/{runId}/gate:
+    post:
+      tags: [stage-runs]
+      summary: Answer a review gate (apply its findings or accept the draft)
+      parameters:
+        - {name: runId, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: {type: string, enum: [apply, accept]}
+      responses:
+        '200':
+          description: The run after applying the answer (it may pause at another gate)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run: {$ref: '#/components/schemas/StageRunDetail'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: STAGE_RUN_NOT_AT_REVIEW_GATE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/settings/stage-defaults:
+    get:
+      tags: [stage-runs]
+      summary: Factory defaults for planning-stage review settings
+      responses:
+        '200':
+          description: Defaults
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stageDefaults: {$ref: '#/components/schemas/PlanningStageSettings'}
+        '503':
+          description: STAGE_SETTINGS_NOT_CONFIGURED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      tags: [stage-runs]
+      summary: Update Factory defaults
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PlanningStageSettings'}
+      responses:
+        '200':
+          description: Updated defaults
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stageDefaults: {$ref: '#/components/schemas/PlanningStageSettings'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/projects/{id}/stages/planning/settings:
+    get:
+      tags: [stage-runs]
+      summary: Effective planning-stage settings for a project
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Settings with their source
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settings: {$ref: '#/components/schemas/ResolvedStageSettings'}
+        '501':
+          description: STAGE_SETTINGS_NOT_IMPLEMENTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      tags: [stage-runs]
+      summary: Set a project override
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PlanningStageSettings'}
+      responses:
+        '200':
+          description: Effective settings after the change
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settings: {$ref: '#/components/schemas/ResolvedStageSettings'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    delete:
+      tags: [stage-runs]
+      summary: Clear the project override (fall back to the Factory default)
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Effective settings after clearing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settings: {$ref: '#/components/schemas/ResolvedStageSettings'}
+
   /api/stage-runs/{runId}/export:
     post:
       tags: [stage-runs]
@@ -2301,6 +2430,31 @@ components:
         usd: {type: [number, 'null']}
         pricedTokens: {type: integer}
         unpricedTokens: {type: integer}
+    PlanningStageSettings:
+      type: object
+      properties:
+        gateAfterEachReview: {type: boolean, description: Pause after every review and ask before applying its changes}
+        maxReviewCycles: {type: integer, minimum: 1, maximum: 10, description: Revision cycles applied automatically when gating is off, counted after the first review}
+    ResolvedStageSettings:
+      allOf:
+        - $ref: '#/components/schemas/PlanningStageSettings'
+        - type: object
+          properties:
+            source: {type: string, enum: [project, factory]}
+    PendingGate:
+      type: object
+      description: The question a paused run is waiting on. The draft is in run.draftMarkdown; no document or PDF exists yet.
+      properties:
+        kind: {type: string, enum: [review_changes, final]}
+        question: {type: string}
+        cycle: {type: integer, description: Revision cycles completed when the gate was raised}
+        maxReviewCycles: {type: integer}
+        gateAfterEachReview: {type: boolean}
+        reviewDecision: {type: string, enum: [approved, needs_revision, rejected]}
+        findings:
+          type: array
+          items: {type: object, additionalProperties: true}
+        waitingSince: {type: string, format: date-time}
     RunTelemetry:
       type: object
       description: Everything a run status bar shows. Null means "cannot be computed", never zero.

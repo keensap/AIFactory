@@ -67,6 +67,7 @@ export function fakeWorkspace(): PostgresProjectWorkspace {
         sessionId: null, status: 'pending', contextHash: input.contextHash,
         context: input.context, inputText: input.inputText ?? null,
         analysisMarkdown: null, draftMarkdown: null, summaryMarkdown: null,
+        pendingGate: null, reviewCycles: 0,
         startedAt: null, completedAt: null, lockedBy: null, leaseExpiresAt: null,
         executionAttempts: 0, createdAt: now, updatedAt: now,
       }

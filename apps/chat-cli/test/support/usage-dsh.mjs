@@ -30,8 +30,14 @@ if (process.env.FAIL_ROLE === role) {
 }
 
 const usage = JSON.parse(process.env.USAGE ?? '{"inputTokens":1000,"outputTokens":500,"totalTokens":1500,"cacheReadTokens":0,"cacheWriteTokens":0}')
+const reviewDecision = process.env.REVIEW_DECISION ?? 'approved'
 const text = role === 'reviewer'
-  ? JSON.stringify({ decision: 'approved', findings: [] })
+  ? JSON.stringify({
+      decision: reviewDecision,
+      findings: reviewDecision === 'approved' ? [] : [
+        { id: 'F-001', severity: 'major', section: 'Economic', finding: 'Budget not evidenced', required_change: 'Add the budget' },
+      ],
+    })
   : role === 'author'
     ? '# TELOS Feasibility Report\n\n## 10. Recommendation\n\nDecision: **Go**\n'
     : '# Planning analysis\n\n- Business idea: portal.\n'

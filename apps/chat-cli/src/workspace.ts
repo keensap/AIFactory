@@ -121,6 +121,25 @@ export type StageRunStatus =
 
 export type StageReviewDecision = 'approved' | 'needs_revision' | 'rejected'
 
+/**
+ * A run waiting for a human answer between roles.
+ *
+ * `review_changes` asks whether to apply a review's findings; `final` asks
+ * whether to stop refining and complete the stage (with go / conditional go /
+ * no-go). Both pause the run: it releases its lease and resumes on the answer.
+ */
+export interface PendingGate {
+  kind: 'review_changes' | 'final'
+  question: string
+  /** Revision cycles completed when the gate was raised. */
+  cycle: number
+  maxReviewCycles: number
+  gateAfterEachReview: boolean
+  reviewDecision: string
+  findings: unknown[]
+  waitingSince: string
+}
+
 export interface StageRun {
   id: string
   projectId: string
@@ -134,6 +153,10 @@ export interface StageRun {
   analysisMarkdown: string | null
   draftMarkdown: string | null
   summaryMarkdown: string | null
+  /** The question a paused run is waiting on, or null when it is not paused. */
+  pendingGate: PendingGate | null
+  /** Revision cycles applied so far (counted after the first review). */
+  reviewCycles: number
   startedAt: string | null
   completedAt: string | null
   lockedBy: string | null
@@ -191,6 +214,8 @@ export interface StageRunDetail extends StageRun {
 }
 
 export interface StageRunPatch {
+  pendingGate?: PendingGate | null
+  reviewCycles?: number
   status?: StageRunStatus
   sessionId?: string | null
   summaryMarkdown?: string | null
@@ -272,6 +297,8 @@ export class PostgresProjectWorkspace {
             'pending', 'analyzing', 'drafting', 'reviewing', 'revising',
             'awaiting_human', 'completed', 'failed', 'cancelled'
           )),
+        pending_gate JSONB,
+        review_cycles INTEGER NOT NULL DEFAULT 0,
         context_hash TEXT,
         context_json JSONB,
         input_text TEXT,
@@ -447,6 +474,18 @@ export class PostgresProjectWorkspace {
         generated_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
 
+      -- Review gating columns are added by ensureColumn() below: an unconditional
+      -- ALTER takes an exclusive lock on every startup, which stalls parallel migrations.
+
+      CREATE TABLE IF NOT EXISTS project_stage_settings (
+        project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        stage TEXT NOT NULL,
+        gate_after_each_review BOOLEAN NOT NULL,
+        max_review_cycles INTEGER NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (project_id, stage)
+      );
+
       CREATE INDEX IF NOT EXISTS project_attachments_project_idx ON project_attachments (project_id, stage, created_at DESC);
       CREATE INDEX IF NOT EXISTS project_documents_project_idx ON project_documents (project_id, stage);
       CREATE INDEX IF NOT EXISTS project_checklist_project_idx ON project_checklist_items (project_id, stage);
@@ -456,6 +495,9 @@ export class PostgresProjectWorkspace {
       CREATE INDEX IF NOT EXISTS stage_reviews_run_idx ON stage_reviews (stage_run_id, created_at);
       CREATE INDEX IF NOT EXISTS stage_run_events_run_idx ON stage_run_events (stage_run_id, id);
     `)
+
+    await this.ensureColumn('project_stage_runs', 'pending_gate', 'JSONB')
+    await this.ensureColumn('project_stage_runs', 'review_cycles', 'INTEGER NOT NULL DEFAULT 0')
 
     for (const [position, stage] of SDLC_STAGES.entries()) {
       await this.pool.query(
@@ -552,6 +594,23 @@ export class PostgresProjectWorkspace {
     } finally {
       client.release()
     }
+  }
+
+  /**
+   * Add a column only when it is missing.
+   *
+   * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` still takes an ACCESS EXCLUSIVE
+   * lock even when the column exists, so running it on every startup serialises
+   * concurrent migrations. A catalog lookup is cheap and lock-free.
+   */
+  private async ensureColumn(table: string, column: string, definition: string): Promise<void> {
+    const existing = await this.pool.query(
+      `SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2`,
+      [table, column],
+    )
+    if ((existing.rowCount ?? 0) > 0) return
+    // Identifiers and the definition come from code, never from user input.
+    await this.pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${definition}`)
   }
 
   async getSnapshot(projectId: string): Promise<ProjectWorkspaceSnapshot> {
@@ -994,6 +1053,7 @@ export class PostgresProjectWorkspace {
                  status, context_hash AS "contextHash", context_json AS "context",
                  input_text AS "inputText", analysis_markdown AS "analysisMarkdown",
                  draft_markdown AS "draftMarkdown", summary_markdown AS "summaryMarkdown",
+              pending_gate AS "pendingGate", review_cycles AS "reviewCycles",
                  started_at AS "startedAt", completed_at AS "completedAt",
                  locked_by AS "lockedBy", lease_expires_at AS "leaseExpiresAt",
                  execution_attempts AS "executionAttempts",
@@ -1016,6 +1076,7 @@ export class PostgresProjectWorkspace {
               status, context_hash AS "contextHash", context_json AS "context",
               input_text AS "inputText", analysis_markdown AS "analysisMarkdown",
               draft_markdown AS "draftMarkdown", summary_markdown AS "summaryMarkdown",
+              pending_gate AS "pendingGate", review_cycles AS "reviewCycles",
               started_at AS "startedAt", completed_at AS "completedAt",
               locked_by AS "lockedBy", lease_expires_at AS "leaseExpiresAt",
               execution_attempts AS "executionAttempts",
@@ -1032,6 +1093,7 @@ export class PostgresProjectWorkspace {
               status, context_hash AS "contextHash", context_json AS "context",
               input_text AS "inputText", analysis_markdown AS "analysisMarkdown",
               draft_markdown AS "draftMarkdown", summary_markdown AS "summaryMarkdown",
+              pending_gate AS "pendingGate", review_cycles AS "reviewCycles",
               started_at AS "startedAt", completed_at AS "completedAt",
               locked_by AS "lockedBy", lease_expires_at AS "leaseExpiresAt",
               execution_attempts AS "executionAttempts",
@@ -1056,12 +1118,15 @@ export class PostgresProjectWorkspace {
            execution_attempts = execution_attempts + 1,
            updated_at = now()
        WHERE id = $2
-         AND status NOT IN ('completed', 'failed', 'cancelled', 'awaiting_human')
+         -- awaiting_human is claimable: a run pauses at a review/final gate and
+         -- resumes when the answer arrives (the runtime decides which endpoint may resume it).
+         AND status NOT IN ('completed', 'failed', 'cancelled')
          AND (locked_by IS NULL OR lease_expires_at IS NULL OR lease_expires_at < now())
        RETURNING id, project_id AS "projectId", stage, attempt, session_id AS "sessionId",
                  status, context_hash AS "contextHash", context_json AS "context",
                  input_text AS "inputText", analysis_markdown AS "analysisMarkdown",
                  draft_markdown AS "draftMarkdown", summary_markdown AS "summaryMarkdown",
+              pending_gate AS "pendingGate", review_cycles AS "reviewCycles",
                  started_at AS "startedAt", completed_at AS "completedAt",
                  locked_by AS "lockedBy", lease_expires_at AS "leaseExpiresAt",
                  execution_attempts AS "executionAttempts",
@@ -1197,6 +1262,14 @@ ${message}`
       values.push(patch.draftMarkdown)
       fields.push(`draft_markdown = $${values.length}`)
     }
+    if (patch.pendingGate !== undefined) {
+      values.push(patch.pendingGate === null ? null : JSON.stringify(patch.pendingGate))
+      fields.push(`pending_gate = $${values.length}::jsonb`)
+    }
+    if (patch.reviewCycles !== undefined) {
+      values.push(patch.reviewCycles)
+      fields.push(`review_cycles = $${values.length}`)
+    }
     if (patch.contextHash !== undefined) {
       values.push(patch.contextHash)
       fields.push(`context_hash = $${values.length}`)
@@ -1209,6 +1282,7 @@ ${message}`
                  status, context_hash AS "contextHash", context_json AS "context",
                  input_text AS "inputText", analysis_markdown AS "analysisMarkdown",
                  draft_markdown AS "draftMarkdown", summary_markdown AS "summaryMarkdown",
+              pending_gate AS "pendingGate", review_cycles AS "reviewCycles",
                  started_at AS "startedAt", completed_at AS "completedAt",
                  locked_by AS "lockedBy", lease_expires_at AS "leaseExpiresAt",
                  execution_attempts AS "executionAttempts",
@@ -1742,6 +1816,8 @@ interface StageRunRow {
   analysisMarkdown: string | null
   draftMarkdown: string | null
   summaryMarkdown: string | null
+  pendingGate: PendingGate | null
+  reviewCycles: number
   startedAt: Date | string | null
   completedAt: Date | string | null
   lockedBy: string | null
@@ -1873,6 +1949,8 @@ function mapStageRun(row: StageRunRow): StageRun {
     analysisMarkdown: row.analysisMarkdown,
     draftMarkdown: row.draftMarkdown,
     summaryMarkdown: row.summaryMarkdown,
+    pendingGate: row.pendingGate ?? null,
+    reviewCycles: row.reviewCycles ?? 0,
     startedAt: toIsoOrNull(row.startedAt),
     completedAt: toIsoOrNull(row.completedAt),
     lockedBy: row.lockedBy,

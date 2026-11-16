@@ -117,6 +117,15 @@ test('a run consumes its attachments and exports the PDF into the project docume
 
     const executed = await fetch(`${base}/api/stage-runs/${runId}/execute?wait=1`, { method: 'POST' })
     assert.equal(executed.status, 200)
+    const gated = await executed.json() as { run: { pendingGate: { kind: string } | null } }
+    assert.equal(gated.run.pendingGate?.kind, 'final')
+
+    const decided = await fetch(`${base}/api/stage-runs/${runId}/decision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision: 'go' }),
+    })
+    assert.equal(decided.status, 200)
 
     const expected = join(root, 'documents', 'planning', 'TELOS Feasibility Report — ABCClothing.pdf')
     assert.ok(existsSync(expected), `expected ${expected}`)

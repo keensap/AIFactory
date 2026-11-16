@@ -19,6 +19,11 @@ import type { ProjectStage } from './sdlc.ts'
 import { SDLC_STAGES, STAGE_LABELS } from './sdlc.ts'
 import { MAX_ATTACHMENTS_PER_RUN, PROMPT_CHARS_PER_ATTACHMENT, renderAttachmentPrompt, type ProjectAttachment } from './attachments.ts'
 import { renderReportPdf } from './report/pdf.ts'
+import {
+  DEFAULT_PLANNING_STAGE_SETTINGS,
+  settingsFromContext,
+  type PlanningStageSettings,
+} from './stage-settings.ts'
 import { exportTarget, writeExport } from './report/export.ts'
 import { TELOS_DOCUMENT_KIND, TELOS_TEMPLATE } from './telos.ts'
 import {
@@ -30,6 +35,8 @@ import {
   type StageRun,
   type StageRunDetail,
   type StageReviewDecision,
+  type PendingGate,
+  type StageRunPatch,
 } from './workspace.ts'
 
 const PLANNING_STAGE: ProjectStage = 'planning'
@@ -64,6 +71,8 @@ export interface StageRuntimeDeps {
   pinModel?: () => ModelPin | undefined
   /** Test seam: replace PDF rendering (e.g. to simulate a failure). */
   renderPdf?: typeof renderReportPdf
+  /** Resolves the project's planning-stage review settings (gate + cycles). */
+  stageSettings?: { resolve(projectId: string): Promise<PlanningStageSettings> }
 }
 
 export type StageRole = 'analyzer' | 'author' | 'reviewer'
@@ -102,6 +111,8 @@ export interface StageContextPacket {
   input: string | null
   constraints: {
     maxReviewCycles: number
+    /** Pause after every review and ask before applying its changes. */
+    gateAfterEachReview: boolean
     documentKind: string
     cardinality: 'one'
   }
@@ -140,12 +151,14 @@ export class PlanningStageRuntime {
   private readonly activeRuns = new Set<string>()
   private readonly pinModel?: () => ModelPin | undefined
   private readonly renderPdf: typeof renderReportPdf
+  private readonly stageSettings?: { resolve(projectId: string): Promise<PlanningStageSettings> }
   /** Model pins of runs currently executing, by run id. */
   private readonly pins = new Map<string, ModelPin>()
 
   constructor(deps: StageRuntimeDeps) {
     if (deps.pinModel !== undefined) this.pinModel = deps.pinModel
     this.renderPdf = deps.renderPdf ?? renderReportPdf
+    if (deps.stageSettings !== undefined) this.stageSettings = deps.stageSettings
     this.projects = deps.projects
     this.workspace = deps.workspace
     this.harnessFactory = deps.harnessFactory
@@ -173,13 +186,15 @@ export class PlanningStageRuntime {
     const snapshot = await this.workspace.getSnapshot(project.id)
     const priorStages = await this.workspace.getPriorStageSummaries(project.id, PLANNING_STAGE)
     const attachments = await this.loadAttachments(project, input.attachmentIds ?? [])
+    const settings = await this.resolveSettings(project.id)
     const context = buildContextPacket(
       project,
       snapshot,
       priorStages,
       input.brief ?? null,
-      DEFAULT_MAX_REVIEW_CYCLES,
+      settings.maxReviewCycles,
       attachments,
+      settings.gateAfterEachReview,
     )
     const run = await this.workspace.createStageRun({
       projectId: project.id,
@@ -224,6 +239,24 @@ export class PlanningStageRuntime {
     return attachments
   }
 
+  /** The settings a run starts with: project override, else Factory default. */
+  private async resolveSettings(projectId: string): Promise<PlanningStageSettings> {
+    if (this.stageSettings === undefined) {
+      return { gateAfterEachReview: false, maxReviewCycles: this.maxReviewCycles }
+    }
+    try {
+      const resolved = await this.stageSettings.resolve(projectId)
+      return {
+        gateAfterEachReview: resolved.gateAfterEachReview,
+        maxReviewCycles: resolved.maxReviewCycles,
+      }
+    } catch (error) {
+      // Settings must never stop a run; fall back to the built-in defaults.
+      this.log.warn({ event: 'stage.settings.unavailable', err: error })
+      return { ...DEFAULT_PLANNING_STAGE_SETTINGS }
+    }
+  }
+
   async list(projectId: string, stage: string): Promise<StageRun[]> {
     this.assertPlanning(stage)
     await this.projects.get(projectId)
@@ -237,28 +270,102 @@ export class PlanningStageRuntime {
   }
 
   async execute(runId: string): Promise<StageRunDetail> {
-    const run = await this.workspace.getStageRun(runId)
-    if (run === undefined) throw new StageRuntimeError(404, 'STAGE_RUN_NOT_FOUND', 'stage run not found')
-    return runWithLogContext(
-      { projectId: run.projectId, stageRunId: run.id, stage: run.stage },
-      () => this.executeRun(run),
-    )
-  }
-
-  private async executeRun(run: StageRun): Promise<StageRunDetail> {
-    if (run.stage !== PLANNING_STAGE) {
-      throw new StageRuntimeError(501, 'STAGE_RUNTIME_NOT_IMPLEMENTED', 'only planning stage execution is implemented')
-    }
+    const run = await this.requireRun(runId)
     if (['completed', 'failed', 'cancelled'].includes(run.status)) {
       throw new StageRuntimeError(409, 'STAGE_RUN_TERMINAL', `stage run is already ${run.status}`)
     }
     if (run.status === 'awaiting_human') {
-      throw new StageRuntimeError(409, 'STAGE_RUN_AWAITING_HUMAN', 'stage run is waiting for a human decision')
+      throw new StageRuntimeError(409, 'STAGE_RUN_AWAITING_HUMAN', 'stage run is waiting for a human answer')
     }
+    return runWithLogContext(
+      { projectId: run.projectId, stageRunId: run.id, stage: run.stage },
+      () => this.withLease(run.id, (ctx) => this.advance(ctx)),
+    )
+  }
+
+  /**
+   * Answer a review gate: apply its findings (revise, then review again) or
+   * accept the draft as it is (skip to the final gate).
+   */
+  async answerGate(runId: string, action: 'apply' | 'accept'): Promise<StageRunDetail> {
+    if (action !== 'apply' && action !== 'accept') {
+      throw new StageRuntimeError(400, 'INVALID_GATE_ACTION', 'action must be "apply" or "accept"')
+    }
+    const run = await this.requireRun(runId)
+    const gate = run.pendingGate
+    if (run.status !== 'awaiting_human' || gate === null || gate.kind !== 'review_changes') {
+      throw new StageRuntimeError(409, 'STAGE_RUN_NOT_AT_REVIEW_GATE', 'this run is not waiting on a review gate')
+    }
+    return runWithLogContext(
+      { projectId: run.projectId, stageRunId: run.id, stage: run.stage },
+      () => this.withLease(run.id, async (ctx) => {
+        const settings = settingsFromContext(ctx.context)
+        const review: StageReviewResult = { decision: gate.reviewDecision as StageReviewDecision, findings: gate.findings }
+        await this.appendRunEvent(ctx.project.id, ctx.run.id, 'gate_decision', { gate: 'review_changes', action }, 'info')
+        this.log.info({ event: 'stage.gate.answered', gate: 'review_changes', action })
+
+        if (action === 'accept') {
+          // The operator overrides the reviewer: skip straight to the final gate.
+          return this.pauseAtFinalGate(ctx, ctx.run.draftMarkdown ?? '', safeCycle(ctx.run.reviewCycles), review, settings)
+        }
+        const cycle = safeCycle(ctx.run.reviewCycles) + 1
+        const draft = await this.reviseOnce(ctx, ctx.run.draftMarkdown ?? '', ctx.run.analysisMarkdown ?? '', gate.findings)
+        await ctx.update({ reviewCycles: cycle, draftMarkdown: draft, pendingGate: null })
+        return this.reviewAndContinue(ctx, draft, ctx.run.analysisMarkdown ?? '', cycle, settings)
+      }),
+    )
+  }
+
+  /**
+   * The final gate: stop refining and complete the stage (with the go /
+   * conditional-go / no-go decision), or ask for one more refinement pass.
+   * Completion is the only point where the document and its PDF are produced.
+   */
+  async decide(runId: string, input: {
+    decision?: HumanDecision
+    refine?: boolean
+    note?: string
+  }): Promise<StageRunDetail> {
+    const run = await this.requireRun(runId)
+    const gate = run.pendingGate
+    if (run.status !== 'awaiting_human' || gate === null || gate.kind !== 'final') {
+      throw new StageRuntimeError(409, 'STAGE_RUN_NOT_AWAITING_DECISION', 'this run is not waiting on a final decision')
+    }
+    const refine = input.refine === true
+    if (!refine && !['go', 'conditional_go', 'no_go'].includes(input.decision ?? '')) {
+      throw new StageRuntimeError(400, 'INVALID_HUMAN_DECISION', 'decision must be go, conditional_go or no_go')
+    }
+
+    return runWithLogContext(
+      { projectId: run.projectId, stageRunId: run.id, stage: run.stage },
+      () => this.withLease(run.id, async (ctx) => {
+        const settings = settingsFromContext(ctx.context)
+        const review: StageReviewResult = { decision: gate.reviewDecision as StageReviewDecision, findings: gate.findings }
+        if (refine) {
+          await this.appendRunEvent(ctx.project.id, ctx.run.id, 'gate_decision', { gate: 'final', refine: true }, 'info')
+          return this.refineOnce(ctx, review, settings)
+        }
+        return this.completeRun(ctx, input.decision as HumanDecision, input.note, review)
+      }),
+    )
+  }
+
+  private async requireRun(runId: string): Promise<StageRun> {
+    const run = await this.workspace.getStageRun(runId)
+    if (run === undefined) throw new StageRuntimeError(404, 'STAGE_RUN_NOT_FOUND', 'stage run not found')
+    if (run.stage !== PLANNING_STAGE) {
+      throw new StageRuntimeError(501, 'STAGE_RUNTIME_NOT_IMPLEMENTED', 'only planning stage execution is implemented')
+    }
+    return run
+  }
+
+  // ---- lease, tracing and failure handling ------------------------------
+
+  private async withLease<T>(runId: string, fn: (ctx: LeaseContext) => Promise<T>): Promise<T> {
+    const run = await this.requireRun(runId)
     if (this.activeRuns.has(run.id)) {
       throw new StageRuntimeError(409, 'STAGE_RUN_RUNNING', 'stage run is already executing')
     }
-
     this.activeRuns.add(run.id)
     let claimed: StageRun | undefined
     try {
@@ -290,12 +397,6 @@ export class PlanningStageRuntime {
     }, this.heartbeatMs)
     heartbeat.unref()
 
-    const assertLease = (): void => {
-      if (leaseLost) {
-        throw new StageRuntimeError(409, 'STAGE_RUN_LEASE_LOST', 'worker lease was lost; another worker may own the run')
-      }
-    }
-
     let runSpan: TraceSpan | undefined
     try {
       const project = await this.projects.get(run.projectId)
@@ -322,116 +423,25 @@ export class PlanningStageRuntime {
       })
       if (runSpan !== undefined) addLogContext({ traceId: runSpan.traceId, spanId: runSpan.spanId })
       this.log.info({ event: 'stage.run.started', attempt: run.attempt, contextHash: run.contextHash })
-      const context = (run.context ?? {}) as StageContextPacket
-      let analysis = ''
-      let draft = ''
-      let review: StageReviewResult | undefined
 
-      await this.workspace.updateStageRun(run.id, { status: 'analyzing' })
-      assertLease()
-      analysis = await this.runRole('analyzer', buildAnalyzerPrompt(project, context), project.rootPath, run.id, project.id, runSpan)
-      await this.workspace.updateStageRun(run.id, { analysisMarkdown: analysis })
-
-      await this.workspace.updateStageRun(run.id, { status: 'drafting' })
-      assertLease()
-      draft = cleanMarkdown(await this.runRole('author', buildAuthorPrompt(project, context, analysis), project.rootPath, run.id, project.id, runSpan))
-      await this.workspace.updateStageRun(run.id, { draftMarkdown: draft })
-
-      let cycle = 0
-      for (;;) {
-        assertLease()
-        await this.workspace.updateStageRun(run.id, { status: 'reviewing' })
-        const rawReview = await this.runRole('reviewer', buildReviewerPrompt(project, context, draft), project.rootPath, run.id, project.id, runSpan)
-        review = parseStageReview(rawReview)
-        await this.workspace.addStageReview({
-          stageRunId: run.id,
-          reviewerRole: 'planning_reviewer',
-          decision: review.decision,
-          findings: review.findings,
-        })
-        await this.appendRunEvent(project.id, run.id, 'review_decision', {
-          decision: review.decision,
-          findings: review.findings,
-        }, review.decision === 'approved' ? 'info' : 'warn')
-        this.traces.recordReview(runSpan, review.decision, review.findings.length)
-
-        if (review.decision === 'approved') break
-        if (cycle >= this.maxReviewCycles) {
-          throw new StageRuntimeError(
-            409,
-            'REVIEW_CYCLE_LIMIT',
-            `review did not approve after ${this.maxReviewCycles} revision cycles`,
-          )
-        }
-
-        cycle += 1
-        assertLease()
-        await this.workspace.updateStageRun(run.id, { status: 'revising' })
-        draft = cleanMarkdown(await this.runRole(
-          'author',
-          buildRevisionPrompt(project, context, analysis, draft, review.findings),
-          project.rootPath,
-          run.id,
-          project.id,
-          runSpan,
-        ))
-        await this.workspace.updateStageRun(run.id, { draftMarkdown: draft })
+      const context = (claimed.context ?? {}) as StageContextPacket
+      const ctx: LeaseContext = {
+        run: claimed,
+        project,
+        context,
+        ...(runSpan !== undefined ? { span: runSpan } : {}),
+        assertLease: () => {
+          if (leaseLost) {
+            throw new StageRuntimeError(409, 'STAGE_RUN_LEASE_LOST', 'worker lease was lost; another worker may own the run')
+          }
+        },
+        update: async (patch: StageRunPatch) => {
+          const next = await this.workspace.updateStageRun(run.id, patch)
+          ctx.run = next
+          return next
+        },
       }
-
-      assertLease()
-      let document: ProjectDocument
-      try {
-        document = await this.workspace.addDocument({
-          project,
-          stage: PLANNING_STAGE,
-          kind: TELOS_DOCUMENT_KIND,
-          title: 'TELOS feasibility report',
-          filename: `telos-${run.id}.md`,
-          mimeType: 'text/markdown',
-          buffer: Buffer.from(draft, 'utf8'),
-          stageRunId: run.id,
-        })
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        throw new StageRuntimeError(
-          409,
-          'DOCUMENT_WRITE_FAILED',
-          `could not store the TELOS document under ${project.rootPath}: ${message}`,
-        )
-      }
-      await this.workspace.updateDocumentStatus(project.id, document.id, 'approved')
-      await this.markPlanningEvidence(project.id, document)
-      await this.appendRunEvent(project.id, run.id, 'document_created', {
-        documentId: document.id,
-        kind: document.kind,
-        storagePath: document.storagePath,
-      })
-      this.traces.recordDocument(runSpan, document.kind, document.storagePath)
-      // The PDF is the deliverable; a rendering failure must not fail the run.
-      try {
-        const exported = await this.exportDocument(project, run.stage, project.name, document, draft, 'Awaiting human decision')
-        await this.appendRunEvent(project.id, run.id, 'document_exported', exported)
-        this.log.info({ event: 'stage.document.exported', ...exported })
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        this.log.warn({ event: 'stage.document.export_failed', err: error })
-        await this.appendRunEvent(project.id, run.id, 'document_export_failed', { message }, 'warn')
-      }
-      if (this.indexDocument !== undefined) {
-        void this.indexDocument(project, document).catch((error: unknown) => {
-          this.log.warn({ event: 'stage.run.document_index_failed', documentId: document.id, err: error })
-        })
-      }
-
-      const summary = buildStageSummary(analysis, review, document)
-      assertLease()
-      await this.workspace.updateStageRun(run.id, {
-        status: 'awaiting_human',
-        summaryMarkdown: summary,
-      })
-      runSpan?.setAttribute('status', 'awaiting_human')
-      this.log.info({ event: 'stage.run.awaiting_human', documentId: document.id })
-      return (await this.workspace.getStageRunDetail(run.id))!
+      return await fn(ctx)
     } catch (error) {
       if (leaseLost) {
         runSpan?.recordException(error instanceof Error ? error : new Error(String(error)))
@@ -460,39 +470,269 @@ export class PlanningStageRuntime {
     }
   }
 
-  async decide(runId: string, input: {
-    decision: HumanDecision
-    note?: string
-  }): Promise<StageRunDetail> {
-    const detail = await this.get(runId)
-    if (detail.status !== 'awaiting_human') {
-      throw new StageRuntimeError(409, 'STAGE_RUN_NOT_AWAITING_HUMAN', 'stage run is not awaiting a human decision')
+  // ---- the review loop --------------------------------------------------
+
+  private async advance(ctx: LeaseContext): Promise<StageRunDetail> {
+    const settings = settingsFromContext(ctx.context)
+    let analysis = ctx.run.analysisMarkdown ?? ''
+    let draft = ctx.run.draftMarkdown ?? ''
+
+    if (analysis.trim() === '') {
+      await ctx.update({ status: 'analyzing' })
+      ctx.assertLease()
+      analysis = await this.runRole('analyzer', buildAnalyzerPrompt(ctx.project, ctx.context), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span)
+      await ctx.update({ analysisMarkdown: analysis })
     }
-    if (!['go', 'conditional_go', 'no_go'].includes(input.decision)) {
-      throw new StageRuntimeError(400, 'INVALID_HUMAN_DECISION', 'decision must be go, conditional_go or no_go')
+    if (draft.trim() === '') {
+      await ctx.update({ status: 'drafting' })
+      ctx.assertLease()
+      draft = cleanMarkdown(await this.runRole('author', buildAuthorPrompt(ctx.project, ctx.context, analysis), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span))
+      await ctx.update({ draftMarkdown: draft })
+    }
+    return this.reviewAndContinue(ctx, draft, analysis, safeCycle(ctx.run.reviewCycles), settings)
+  }
+
+  private async reviewAndContinue(
+    ctx: LeaseContext,
+    draft: string,
+    analysis: string,
+    cycle: number,
+    settings: PlanningStageSettings,
+  ): Promise<StageRunDetail> {
+    const review = await this.reviewOnce(ctx, draft)
+    return this.afterReview(ctx, draft, analysis, cycle, settings, review)
+  }
+
+  private async afterReview(
+    ctx: LeaseContext,
+    draft: string,
+    analysis: string,
+    cycle: number,
+    settings: PlanningStageSettings,
+    review: StageReviewResult,
+  ): Promise<StageRunDetail> {
+    if (review.decision === 'approved') {
+      return this.pauseAtFinalGate(ctx, draft, cycle, review, settings)
+    }
+    if (settings.gateAfterEachReview) {
+      return this.pauseAtReviewGate(ctx, draft, cycle, review, settings)
+    }
+    if (cycle >= settings.maxReviewCycles) {
+      // The automatic budget is spent; the operator decides whether to continue.
+      return this.pauseAtFinalGate(ctx, draft, cycle, review, settings)
+    }
+    const next = cycle + 1
+    const revised = await this.reviseOnce(ctx, draft, analysis, review.findings)
+    await ctx.update({ reviewCycles: next, draftMarkdown: revised })
+    return this.reviewAndContinue(ctx, revised, analysis, next, settings)
+  }
+
+  /** One more pass after the operator asked to refine: review, revise once, then the final gate. */
+  private async refineOnce(ctx: LeaseContext, _previous: StageReviewResult, settings: PlanningStageSettings): Promise<StageRunDetail> {
+    let draft = ctx.run.draftMarkdown ?? ''
+    let cycle = safeCycle(ctx.run.reviewCycles)
+    const review = await this.reviewOnce(ctx, draft)
+    if (review.decision !== 'approved') {
+      cycle += 1
+      draft = await this.reviseOnce(ctx, draft, ctx.run.analysisMarkdown ?? '', review.findings)
+      await ctx.update({ reviewCycles: cycle, draftMarkdown: draft })
+    }
+    return this.pauseAtFinalGate(ctx, draft, cycle, review, settings)
+  }
+
+  private async reviewOnce(ctx: LeaseContext, draft: string): Promise<StageReviewResult> {
+    await ctx.update({ status: 'reviewing' })
+    ctx.assertLease()
+    const rawReview = await this.runRole('reviewer', buildReviewerPrompt(ctx.project, ctx.context, draft), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span)
+    const review = parseStageReview(rawReview)
+    await this.workspace.addStageReview({
+      stageRunId: ctx.run.id,
+      reviewerRole: 'planning_reviewer',
+      decision: review.decision,
+      findings: review.findings,
+    })
+    await this.appendRunEvent(ctx.project.id, ctx.run.id, 'review_decision', {
+      decision: review.decision,
+      findings: review.findings,
+    }, review.decision === 'approved' ? 'info' : 'warn')
+    this.traces.recordReview(ctx.span, review.decision, review.findings.length)
+    return review
+  }
+
+  private async reviseOnce(ctx: LeaseContext, draft: string, analysis: string, findings: unknown[]): Promise<string> {
+    await ctx.update({ status: 'revising' })
+    ctx.assertLease()
+    const revised = cleanMarkdown(await this.runRole(
+      'author',
+      buildRevisionPrompt(ctx.project, ctx.context, analysis, draft, findings),
+      ctx.project.rootPath,
+      ctx.run.id,
+      ctx.project.id,
+      ctx.span,
+    ))
+    await ctx.update({ draftMarkdown: revised })
+    return revised
+  }
+
+  // ---- gates ------------------------------------------------------------
+
+  private async pauseAtReviewGate(
+    ctx: LeaseContext,
+    draft: string,
+    cycle: number,
+    review: StageReviewResult,
+    settings: PlanningStageSettings,
+  ): Promise<StageRunDetail> {
+    const gate: PendingGate = {
+      kind: 'review_changes',
+      question: 'Apply the reviewer findings, or accept the draft as it is?',
+      cycle,
+      maxReviewCycles: settings.maxReviewCycles,
+      gateAfterEachReview: settings.gateAfterEachReview,
+      reviewDecision: review.decision,
+      findings: review.findings,
+      waitingSince: new Date().toISOString(),
+    }
+    await this.workspace.updateStageRun(ctx.run.id, {
+      status: 'awaiting_human',
+      pendingGate: gate,
+      summaryMarkdown: buildGateSummary(ctx.run.analysisMarkdown ?? '', review, cycle, settings.maxReviewCycles, 'review'),
+    })
+    await this.appendRunEvent(ctx.project.id, ctx.run.id, 'review_gate', {
+      cycle,
+      decision: review.decision,
+      findings: review.findings.length,
+    })
+    this.log.info({ event: 'stage.gate.review', cycle, decision: review.decision })
+    return (await this.workspace.getStageRunDetail(ctx.run.id))!
+  }
+
+  private async pauseAtFinalGate(
+    ctx: LeaseContext,
+    draft: string,
+    cycle: number,
+    review: StageReviewResult,
+    settings: PlanningStageSettings,
+  ): Promise<StageRunDetail> {
+    const gate: PendingGate = {
+      kind: 'final',
+      question: 'Complete the stage with this document, or refine it further?',
+      cycle,
+      maxReviewCycles: settings.maxReviewCycles,
+      gateAfterEachReview: settings.gateAfterEachReview,
+      reviewDecision: review.decision,
+      findings: review.findings,
+      waitingSince: new Date().toISOString(),
+    }
+    await this.workspace.updateStageRun(ctx.run.id, {
+      status: 'awaiting_human',
+      pendingGate: gate,
+      summaryMarkdown: buildGateSummary(ctx.run.analysisMarkdown ?? '', review, cycle, settings.maxReviewCycles, 'final'),
+    })
+    await this.appendRunEvent(ctx.project.id, ctx.run.id, 'final_gate', { cycle, decision: review.decision })
+    this.log.info({ event: 'stage.gate.final', cycle, decision: review.decision })
+    return (await this.workspace.getStageRunDetail(ctx.run.id))!
+  }
+
+  // ---- completion -------------------------------------------------------
+
+  /**
+   * The only place a stage document and its PDF are produced: on approval.
+   * A PDF failure never fails the run (the Markdown artifact is kept).
+   */
+  private async completeRun(
+    ctx: LeaseContext,
+    decision: HumanDecision,
+    note: string | undefined,
+    review: StageReviewResult,
+  ): Promise<StageRunDetail> {
+    const project = ctx.project
+    const draft = ctx.run.draftMarkdown ?? ''
+    if (draft.trim() === '') {
+      throw new StageRuntimeError(409, 'DOCUMENT_EMPTY', 'the stage document is empty; nothing to complete with')
     }
 
-    const document = detail.documents.find((item) => item.kind === TELOS_DOCUMENT_KIND)
-    await this.workspace.updateChecklistItem(
-      detail.projectId,
-      PLANNING_STAGE,
-      'feasibility_decision',
-      'done',
-      document?.id ?? null,
-    )
-    const decisionLine = input.decision.replace('_', '-')
-    const note = input.note?.trim()
-    const summary = `${detail.summaryMarkdown ?? ''}\n\n## Human decision\n\nDecision: **${decisionLine}**\n${note ? `\n${note}\n` : ''}`
-    await this.workspace.updateStageRun(runId, {
-      status: 'completed',
-      summaryMarkdown: summary,
+    let document: ProjectDocument
+    try {
+      document = await this.workspace.addDocument({
+        project,
+        stage: PLANNING_STAGE,
+        kind: TELOS_DOCUMENT_KIND,
+        title: 'TELOS feasibility report',
+        filename: `telos-${ctx.run.id}.md`,
+        mimeType: 'text/markdown',
+        buffer: Buffer.from(draft, 'utf8'),
+        stageRunId: ctx.run.id,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new StageRuntimeError(
+        409,
+        'DOCUMENT_WRITE_FAILED',
+        `could not store the TELOS document under ${project.rootPath}: ${message}`,
+      )
+    }
+    await this.workspace.updateDocumentStatus(project.id, document.id, 'approved')
+    await this.markPlanningEvidence(project.id, document)
+    await this.appendRunEvent(project.id, ctx.run.id, 'document_created', {
+      documentId: document.id,
+      kind: document.kind,
+      storagePath: document.storagePath,
     })
-    await this.appendRunEvent(detail.projectId, runId, 'human_decision', {
-      decision: input.decision,
-      note: note ?? null,
+    this.traces.recordDocument(ctx.span, document.kind, document.storagePath)
+
+    try {
+      const exported = await this.exportDocument(project, ctx.run.stage, project.name, document, draft, `Approved — ${decision.replace('_', '-')}`)
+      await this.appendRunEvent(project.id, ctx.run.id, 'document_exported', exported)
+      this.log.info({ event: 'stage.document.exported', ...exported })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.log.warn({ event: 'stage.document.export_failed', err: error })
+      await this.appendRunEvent(project.id, ctx.run.id, 'document_export_failed', { message }, 'warn')
+    }
+
+    if (this.indexDocument !== undefined) {
+      void this.indexDocument(project, document).catch((error: unknown) => {
+        this.log.warn({ event: 'stage.run.document_index_failed', documentId: document.id, err: error })
+      })
+    }
+
+    await this.workspace.updateChecklistItem(project.id, PLANNING_STAGE, 'feasibility_decision', 'done', document.id)
+    const decisionLine = decision.replace('_', '-')
+    const trimmedNote = note?.trim()
+    const summary = `# Planning & Feasibility — stage summary
+
+Status: completed
+
+## Analysis
+
+${(ctx.run.analysisMarkdown ?? '').trim()}
+
+## Review
+
+Decision: ${review.decision}
+
+Findings:
+${review.findings.length === 0 ? '- none' : review.findings.map((item) => `- ${JSON.stringify(item)}`).join('\n')}
+
+## Artifact
+
+- ${document.title}: \`${document.storagePath}\`
+
+## Human decision
+
+Decision: **${decisionLine}**
+${trimmedNote !== undefined && trimmedNote !== '' ? `\n${trimmedNote}\n` : ''}
+`
+    ctx.assertLease()
+    await ctx.update({ status: 'completed', pendingGate: null, summaryMarkdown: summary })
+    await this.appendRunEvent(project.id, ctx.run.id, 'human_decision', {
+      decision,
+      note: trimmedNote ?? null,
     })
-    this.traces.recordHumanDecision(detail.projectId, runId, input.decision)
-    return (await this.workspace.getStageRunDetail(runId))!
+    this.traces.recordHumanDecision(project.id, ctx.run.id, decision)
+    this.log.info({ event: 'stage.run.completed', decision, documentId: document.id })
+    return (await this.workspace.getStageRunDetail(ctx.run.id))!
   }
 
   private async runRole(
@@ -677,6 +917,7 @@ export function buildContextPacket(
   input: string | null,
   maxReviewCycles = DEFAULT_MAX_REVIEW_CYCLES,
   attachments: ContextAttachment[] = [],
+  gateAfterEachReview = false,
 ): StageContextPacket {
   return {
     schemaVersion: 1,
@@ -700,6 +941,7 @@ export function buildContextPacket(
     input,
     constraints: {
       maxReviewCycles,
+      gateAfterEachReview,
       documentKind: TELOS_DOCUMENT_KIND,
       cardinality: 'one',
     },
@@ -895,6 +1137,49 @@ export function cleanMarkdown(text: string): string {
   const trimmed = text.trim()
   const fenced = trimmed.match(/^```(?:markdown|md)?\s*([\s\S]*?)\s*```$/i)
   return (fenced?.[1] ?? trimmed).trim()
+}
+
+function safeCycle(value: number | undefined): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0
+}
+
+export interface LeaseContext {
+  run: StageRun
+  project: Project
+  context: StageContextPacket
+  span?: TraceSpan
+  assertLease(): void
+  update(patch: StageRunPatch): Promise<StageRun>
+}
+
+/** Summary shown while a run waits at a gate. */
+export function buildGateSummary(
+  analysis: string,
+  review: StageReviewResult | undefined,
+  cycle: number,
+  maxCycles: number,
+  kind: 'review' | 'final',
+): string {
+  const findings = review === undefined || review.findings.length === 0
+    ? '- none'
+    : review.findings.map((item) => `- ${JSON.stringify(item)}`).join('\n')
+  return `# Planning & Feasibility — awaiting human
+
+${kind === 'review'
+  ? `The reviewer requested changes (cycle ${cycle} of up to ${maxCycles}). Apply them or accept the draft as it is.`
+  : `The draft is ready. Complete the stage, or refine it further.`}
+
+## Analysis
+
+${analysis.trim()}
+
+## Review
+
+Decision: ${review?.decision ?? 'unknown'}
+
+Findings:
+${findings}
+`
 }
 
 export function buildStageSummary(

@@ -406,7 +406,7 @@ Attachments must belong to the project (`404 ATTACHMENT_NOT_FOUND` otherwise) an
 
 ### The exported PDF
 
-When a run reaches `awaiting_human`, the deliverable is rendered to PDF and written **outside** `.aifactory`, into the project's own tree:
+When the operator **approves** the document at the final gate (the stage becomes `completed`), the deliverable is rendered to PDF and written **outside** `.aifactory`, into the project's own tree:
 
 ```
 <project-root>/documents/<stage>/<Document Title> — <Project Name>.pdf
@@ -489,6 +489,72 @@ curl -s -X POST http://127.0.0.1:8787/api/stage-runs/<runId>/decision \
 The decision completes the `feasibility_decision` checklist item and the run. Advancing the project to Requirements remains a separate `PATCH /api/projects/:id/stage` action.
 
 Only `planning` is executable today; other stages return `501 STAGE_RUNTIME_NOT_IMPLEMENTED`. Stage-scoped chat is not implemented yet.
+
+### Review gates and the final decision
+
+A planning run does **not** complete on its own. It pauses at a **gate** with status `awaiting_human` and a `pendingGate`, releases its lease, and resumes when a human answers. Two gates exist:
+
+| `pendingGate.kind` | When | Asked | Answered with |
+|---|---|---|---|
+| `review_changes` | after a review that is not `approved`, **when gating is on** | "Apply the reviewer findings, or accept the draft as it is?" | `POST …/gate {action:"apply"\|"accept"}` |
+| `final` | an approved review, or the automatic cycle budget is spent | "Complete the stage, or refine it further?" | `POST …/decision {decision, refine}` |
+
+```json
+{ "run": { "status": "awaiting_human",
+  "pendingGate": { "kind": "review_changes", "cycle": 0, "maxReviewCycles": 3,
+    "gateAfterEachReview": true, "reviewDecision": "needs_revision",
+    "findings": [ { "id": "F-001", "severity": "major" } ],
+    "question": "Apply the reviewer findings, or accept the draft as it is?",
+    "waitingSince": "2026-11-16T17:00:00.000Z" } } }
+```
+
+**Applying or accepting a review**
+
+```bash
+curl -X POST /api/stage-runs/<runId>/gate -d '{"action":"apply"}'   # revise, then review again
+curl -X POST /api/stage-runs/<runId>/gate -d '{"action":"accept"}'  # skip changes, go to the final gate
+```
+
+`apply` runs the author with the findings, then reviews again (another review gate if gating is on). `accept` overrides the reviewer and moves straight to the final gate, recording the override.
+
+**The final gate**
+
+```bash
+curl -X POST /api/stage-runs/<runId>/decision -d '{"decision":"go","note":"Approved by sponsor"}'
+curl -X POST /api/stage-runs/<runId>/decision -d '{"refine":true}'
+```
+
+- `decision` (`go` / `conditional_go` / `no_go`) is required unless `refine` is true.
+- `refine: true` runs one more review plus a revision if needed, then returns to the final gate. Nothing is completed.
+- Without `refine`, the stage becomes `completed`: the Markdown document is stored, the PDF is produced, and the `feasibility_decision` checklist item is marked done.
+
+**Neither the document nor the PDF exists before approval.** While a run is paused, the draft is available as `run.draftMarkdown`.
+
+Errors: `409 STAGE_RUN_NOT_AT_REVIEW_GATE` (wrong gate kind for `/gate`), `409 STAGE_RUN_NOT_AWAITING_DECISION` (wrong gate kind for `/decision`), `400 INVALID_GATE_ACTION`, `400 INVALID_HUMAN_DECISION`.
+
+### Planning-stage settings
+
+How much review happens before a human is asked. Values resolve **project override → Factory default**; a run snapshots them at start, so changing them mid-run affects later runs only.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/settings/stage-defaults` | Factory defaults |
+| `PATCH` | `/api/settings/stage-defaults` | Update defaults |
+| `GET` | `/api/projects/:id/stages/planning/settings` | Effective settings and their source |
+| `PATCH` | `/api/projects/:id/stages/planning/settings` | Set a project override |
+| `DELETE` | `/api/projects/:id/stages/planning/settings` | Clear the override (back to the Factory default) |
+
+```json
+{ "stageDefaults": { "gateAfterEachReview": false, "maxReviewCycles": 3 } }
+{ "settings": { "gateAfterEachReview": true, "maxReviewCycles": 3, "source": "project" } }
+```
+
+| Field | Meaning |
+|---|---|
+| `gateAfterEachReview` | `true`: pause after **every** review and ask before applying its changes. `false`: apply changes automatically. |
+| `maxReviewCycles` | Revision cycles run automatically when gating is off, counted **after** the first review (1–10). When the budget is spent, the run stops at the final gate instead of failing. |
+
+Validation: `400 INVALID_GATE_SETTING`, `400 INVALID_REVIEW_CYCLES` (integer 1–10), `400 NO_FIELDS`. Settings exist only for `planning` so far (`501 STAGE_SETTINGS_NOT_IMPLEMENTED` otherwise). A corrupt stored value falls back to the defaults rather than blocking runs.
 
 ### Stage event log
 

@@ -38,6 +38,7 @@ import { PlanningStageRuntime } from './stage-runtime.ts'
 import { SemanticIndexService } from './semantic-index.ts'
 import { PostgresVectorStore } from './vector-store.ts'
 import { ModelRuntime, ModelService, PostgresModelCatalog, PostgresModelSettingsStore } from './models/index.ts'
+import { PostgresStageSettingsStore, StageSettingsService } from './stage-settings.ts'
 import { createObservabilityProvider } from './observability/registry/index.ts'
 import { CachedObservabilityReader, type ObservabilityProvider, type ObservabilityReader, type TraceRecorder } from './observability/index.ts'
 import { PostgresProjectWorkspace, type ProjectDocument } from './workspace.ts'
@@ -340,8 +341,19 @@ async function main(): Promise<void> {
     warn: (message) => log.warn({ event: 'session_store.warning' }, message),
   })
   let modelRuntime: ModelRuntime | undefined
+  let stageSettings: StageSettingsService | undefined
   // Every harness run goes through the runtime, so the global model target
   // applies to stage roles, chat and briefings alike.
+  if (databaseUrl !== undefined && databaseUrl !== '') {
+    try {
+      stageSettings = new StageSettingsService(new PostgresStageSettingsStore(databaseUrl))
+      await stageSettings.migrate()
+    } catch (error) {
+      log.warn({ event: 'stage.settings.init_failed', err: error })
+      stageSettings = undefined
+    }
+  }
+
   const harnessFactory = (projectCwd?: string, timeoutMs?: number): DshHarness => modelRuntime !== undefined
     ? modelRuntime.harness(projectCwd, timeoutMs)
     : new DshHarness({
@@ -380,6 +392,7 @@ async function main(): Promise<void> {
         workspace: workspaceStore,
         harnessFactory,
         roleTimeoutMs: stageRoleTimeoutMs,
+        ...(stageSettings !== undefined ? { stageSettings } : {}),
         // Late-bound: the model runtime is created after the stage runtime.
         pinModel: () => modelRuntime?.pin(),
         ...(semanticIndex !== undefined
@@ -496,6 +509,7 @@ async function main(): Promise<void> {
     includeThinking: parsed.values['show-thinking'] === true,
     ...(projects !== undefined ? { projects } : {}),
     ...(settings !== undefined ? { settings } : {}),
+    ...(stageSettings !== undefined ? { stageSettings } : {}),
     ...(pdfReview !== undefined ? { pdfReview } : {}),
     ...(workspaceStore !== undefined ? { workspace: workspaceStore } : {}),
     ...(briefing !== undefined ? { briefing } : {}),
@@ -580,6 +594,7 @@ async function main(): Promise<void> {
       await vectorStore?.close().catch(() => {})
       await logStore?.close().catch(() => {})
       await loggingSettingsStore?.close().catch(() => {})
+      await stageSettings?.close().catch(() => {})
       await modelRuntime?.shutdown().catch(() => {})
       await modelService?.close().catch(() => {})
       await observability?.shutdown().catch(() => {})

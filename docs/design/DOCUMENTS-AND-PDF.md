@@ -9,7 +9,7 @@
 ## 1. What this adds
 
 1. **PDF input.** A requester can attach several PDFs to a stage run, alongside the text brief. Their text becomes first-class evidence for every role (analyzer, author, reviewer, revision).
-2. **PDF output.** When a run reaches `awaiting_human`, the Markdown deliverable is rendered to a professionally formatted PDF **outside** `.aifactory`, at:
+2. **PDF output.** When the operator approves the document at the final gate (see `STAGE-GATES.md`), the Markdown deliverable is rendered to a professionally formatted PDF **outside** `.aifactory`, at:
 
 ```
 <project-root>/documents/<stage>/<Document Title> — <Project Name>.pdf
@@ -27,7 +27,7 @@ Re-running a stage overwrites that canonical file; the Markdown source and the r
 | PDF renderer | **pure JavaScript (`pdf-lib`)** with a purpose-built A4 layout engine | No browser, no LibreOffice, no Python: generation is deterministic and available wherever the API runs. WeasyPrint was unavailable in this environment (broken shim) and LibreOffice needs a writable profile, which is fragile in containers. |
 | Input formats | **PDF only**, multiple per request | The harness consumes text, so PDF text extraction is reliable. |
 | Images | **Rejected at upload with an explicit message** | The harness has no image input and the model layer has no vision path. Accepting an image would imply an influence on the analysis that does not exist. |
-| When the PDF is written | At **`awaiting_human`**, plus `POST /api/stage-runs/:id/export` | The operator can read the deliverable before deciding; the endpoint re-renders after any fix. |
+| When the PDF is written | On **approval** (stage completion), plus `POST /api/stage-runs/:id/export` | The PDF is the final artifact of an approved stage, as required; while a run is paused the draft is readable from the run itself. |
 | Export failure | **Never fails the run** | Same isolation rule as logging and Phoenix: the Markdown artifact and the run survive, the failure is logged and recorded as `document_export_failed`. |
 | Filename | `<title> — <project>.pdf`, sanitized | Matches the requested convention; path separators and reserved characters are removed, the em dash and accents are kept. |
 | Overwrite | Yes, canonical path | Predictable location per stage; history lives in `.aifactory`. |
@@ -52,7 +52,8 @@ prompts ──► every role gets an "INPUT DOCUMENTS" section
              per-document cap 20k chars, 60k total, truncation stated inline
              JSON context carries metadata only (no duplicated text)
 
-finish  ──► render Markdown → PDF (pdf-lib)
+approve ──► (human answers the final gate: decision + no further refinement)
+             render Markdown → PDF (pdf-lib)
              write <root>/documents/<stage>/<title> — <project>.pdf
              record stage_document_exports + `document_exported` run event
 ```
