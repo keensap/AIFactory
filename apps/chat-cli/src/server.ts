@@ -28,14 +28,17 @@ import { BriefingError, ProjectBriefingService } from './briefing.ts'
 import { createProjectTools } from './project-tools.ts'
 import { DirectoryError, listDirectories } from './directories.ts'
 import { EmbeddingError } from './embeddings.ts'
-import { readMultipart, UploadError } from './multipart.ts'
+import { readMultipart, readMultipartFiles, UploadError } from './multipart.ts'
+import { AttachmentError, MAX_ATTACHMENTS_PER_UPLOAD, assertSupportedUpload } from './attachments.ts'
+import { ExportError } from './report/export.ts'
+import { ReportPdfError } from './report/pdf.ts'
 import { PdfError } from './pdf.ts'
 import { PdfReviewError, type PdfReviewService } from './pdf-review.ts'
 import { ObservabilityError, type ObservabilityReader, type TraceRecorder } from './observability/index.ts'
 import { ModelError, ModelSettingsError, type ModelService } from './models/index.ts'
 import type { HarnessEvent } from './protocol.ts'
 import { ProjectError, type ProjectService, type ProjectStatus } from './projects.ts'
-import type { ProjectStage } from './sdlc.ts'
+import { SDLC_STAGES, type ProjectStage } from './sdlc.ts'
 import { SettingsError, type SettingsService } from './settings.ts'
 import { SemanticIndexError, type SemanticIndexService } from './semantic-index.ts'
 import { VectorStoreError } from './vector-store.ts'
@@ -231,6 +234,8 @@ async function route(
         stageEvents: 'GET /api/stage-runs/:runId/events',
         stageEventStream: 'GET /api/stage-runs/:runId/events/stream',
         stageTelemetry: 'GET /api/stage-runs/:runId/telemetry',
+        stageExport: 'POST /api/stage-runs/:runId/export',
+        attachments: 'GET/POST /api/projects/:id/attachments',
         semanticIndex: 'POST /api/projects/:id/index',
         semanticSearch: 'GET /api/projects/:id/search?q=...',
         observability: 'GET /api/projects/:id/observability?hours=24',
@@ -833,6 +838,10 @@ async function handleStageRuns(
     await streamStageEvents(request, response, url, runId, options.workspace)
     return
   }
+  if (rest.length === 2 && rest[1] === 'export' && request.method === 'POST') {
+    sendJson(response, 200, { export: await runtime.exportRun(runId) })
+    return
+  }
   if (rest.length === 2 && rest[1] === 'execute' && request.method === 'POST') {
     if (url.searchParams.get('wait') === '1') {
       sendJson(response, 200, { run: await runtime.execute(runId) })
@@ -988,13 +997,26 @@ async function handleProjects(
     }
     if (request.method === 'POST') {
       const body = await readJson(request).catch(() => ({}))
+      const attachmentIds = body !== null && typeof body === 'object'
+        ? (body as Record<string, unknown>).attachmentIds
+        : undefined
+      if (attachmentIds !== undefined && (!Array.isArray(attachmentIds) || attachmentIds.some((entry) => typeof entry !== 'string'))) {
+        throw new HttpError(400, '"attachmentIds" must be an array of attachment ids', 'INVALID_ATTACHMENTS')
+      }
       const brief = body !== null && typeof body === 'object'
         ? (body as Record<string, unknown>).brief
         : undefined
       if (brief !== undefined && typeof brief !== 'string') {
         throw new HttpError(400, '"brief" must be a string', 'INVALID_BRIEF')
       }
-      sendJson(response, 201, { run: await options.stageRuntime.start({ projectId: id, stage, brief }) })
+      sendJson(response, 201, {
+        run: await options.stageRuntime.start({
+          projectId: id,
+          stage,
+          brief,
+          ...(attachmentIds !== undefined ? { attachmentIds: attachmentIds as string[] } : {}),
+        }),
+      })
       return
     }
   }
@@ -1060,6 +1082,74 @@ async function handleProjects(
       sendJson(response, 201, { document })
       return
     }
+  }
+
+  if (id !== undefined && rest[1] === 'attachments') {
+    const workspace = requireWorkspace(options)
+    const project = await projects.get(id)
+
+    // POST /api/projects/:id/attachments — one or more PDFs in a single request.
+    if (rest.length === 2 && request.method === 'POST') {
+      const upload = await readMultipartFiles(request, { maxFiles: MAX_ATTACHMENTS_PER_UPLOAD })
+      const stage = upload.fields.stage
+      if (stage !== undefined && !SDLC_STAGES.includes(stage as never)) {
+        throw new HttpError(400, `unknown SDLC stage ${stage}`, 'INVALID_STAGE')
+      }
+      const created = []
+      for (const file of upload.files) {
+        assertSupportedUpload({ filename: file.filename, mimeType: file.mimeType, size: file.buffer.length })
+        created.push(await workspace.addAttachment({
+          project,
+          stage: (stage ?? project.currentStage) as ProjectStage,
+          ...(upload.fields.title !== undefined && upload.files.length === 1 ? { title: upload.fields.title } : {}),
+          filename: file.filename,
+          mimeType: file.mimeType,
+          buffer: file.buffer,
+        }))
+      }
+      sendJson(response, 201, { attachments: created })
+      return
+    }
+
+    if (rest.length === 2 && request.method === 'GET') {
+      const stage = url.searchParams.get('stage')
+      if (stage !== null && !SDLC_STAGES.includes(stage as never)) {
+        throw new HttpError(400, `unknown SDLC stage ${stage}`, 'INVALID_STAGE')
+      }
+      sendJson(response, 200, {
+        attachments: await workspace.listAttachments(id, stage === null ? undefined : stage as ProjectStage),
+      })
+      return
+    }
+
+    // rest includes the project id, so the attachment id is rest[2].
+    if (rest.length === 4 && rest[3] === 'content' && request.method === 'GET') {
+      const attachment = await workspace.getAttachment(id, decodeURIComponent(rest[2]!))
+      if (attachment === undefined) throw new HttpError(404, 'attachment not found', 'ATTACHMENT_NOT_FOUND')
+      const stored = resolve(project.rootPath, attachment.storagePath)
+      let bytes: Buffer
+      try {
+        bytes = await readFile(stored)
+      } catch {
+        throw new HttpError(410, 'the stored attachment file is missing', 'ATTACHMENT_CONTENT_MISSING')
+      }
+      response.writeHead(200, {
+        'Content-Type': attachment.mimeType,
+        'Content-Length': String(bytes.byteLength),
+        'Content-Disposition': `inline; filename="${basename(attachment.filename).replace(/[^\w.-]/g, '_')}"`,
+      })
+      response.end(bytes)
+      return
+    }
+
+    if (rest.length === 3 && request.method === 'DELETE') {
+      const removed = await workspace.deleteAttachment(id, decodeURIComponent(rest[2]!), project.rootPath)
+      if (!removed) throw new HttpError(404, 'attachment not found', 'ATTACHMENT_NOT_FOUND')
+      response.writeHead(204).end()
+      return
+    }
+
+    throw new HttpError(404, 'not found', 'NOT_FOUND')
   }
 
   if (id !== undefined && rest.length === 2 && rest[1] === 'briefing') {
@@ -1602,6 +1692,9 @@ function toHttpError(error: unknown): HttpError {
   if (error instanceof SemanticIndexError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof VectorStoreError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof ObservabilityError) return new HttpError(error.status, error.message, error.code)
+  if (error instanceof AttachmentError) return new HttpError(error.status, error.message, error.code)
+  if (error instanceof ExportError) return new HttpError(500, error.message, error.code)
+  if (error instanceof ReportPdfError) return new HttpError(500, error.message, error.code)
   if (error instanceof ModelSettingsError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof ModelError) return new HttpError(modelErrorStatus(error), error.message, `MODEL_${error.kind.toUpperCase()}`)
   if (error instanceof LogStoreError) return new HttpError(error.status, error.message, error.code)

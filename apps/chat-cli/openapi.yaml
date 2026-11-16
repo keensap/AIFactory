@@ -525,6 +525,119 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/projects/{id}/attachments:
+    get:
+      tags: [projects]
+      summary: List stage input documents
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: stage, in: query, schema: {$ref: '#/components/schemas/ProjectStage'}}
+      responses:
+        '200':
+          description: Attachments, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  attachments:
+                    type: array
+                    items: {$ref: '#/components/schemas/StageAttachment'}
+        '503':
+          $ref: '#/components/responses/DatabaseUnavailable'
+    post:
+      tags: [projects]
+      summary: Upload one or more PDFs for stage analysis
+      description: multipart/form-data. Only PDFs are accepted; images are rejected because the stage analysis consumes text only.
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                files:
+                  type: array
+                  items: {type: string, format: binary}
+                stage: {type: string, description: Defaults to the project's current stage}
+                title: {type: string, description: Only honoured for a single file}
+      responses:
+        '201':
+          description: Created attachments
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  attachments:
+                    type: array
+                    items: {$ref: '#/components/schemas/StageAttachment'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          description: ATTACHMENT_TOO_LARGE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: UNSUPPORTED_FILE_TYPE (images, non-PDF files)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: PDF_HAS_NO_TEXT (scanned document without a text layer)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/projects/{id}/attachments/{attachmentId}/content:
+    get:
+      tags: [projects]
+      summary: Download the original attachment
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: attachmentId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: The stored PDF
+          content:
+            application/pdf:
+              schema: {type: string, format: binary}
+        '404':
+          description: ATTACHMENT_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '410':
+          description: ATTACHMENT_CONTENT_MISSING
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/projects/{id}/attachments/{attachmentId}:
+    delete:
+      tags: [projects]
+      summary: Delete an attachment and its stored files
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: attachmentId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          description: ATTACHMENT_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/projects/{id}/documents:
     parameters:
       - $ref: '#/components/parameters/ProjectId'
@@ -1530,6 +1643,46 @@ paths:
                     items:
                       $ref: '#/components/schemas/StageReview'
 
+  /api/stage-runs/{runId}/export:
+    post:
+      tags: [stage-runs]
+      summary: Re-render the stage deliverable PDF
+      description: Writes <project-root>/documents/<stage>/<Document Title> — <Project Name>.pdf, overwriting the canonical file.
+      parameters:
+        - {name: runId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Where the PDF was written
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  export:
+                    type: object
+                    properties:
+                      path: {type: string, description: Relative to the project root}
+                      bytes: {type: integer}
+                      documentId: {type: string, format: uuid}
+        '404':
+          description: STAGE_RUN_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: DOCUMENT_NOT_READY
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: PDF_EXPORT_FAILED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/stage-runs/{runId}/telemetry:
     get:
       tags: [stage-runs]
@@ -2122,6 +2275,25 @@ components:
         providers:
           type: array
           items: {$ref: '#/components/schemas/ModelProvider'}
+    StageAttachment:
+      type: object
+      description: A requester-supplied PDF input; text is extracted once at upload.
+      properties:
+        id: {type: string, format: uuid}
+        projectId: {type: string, format: uuid}
+        stage: {$ref: '#/components/schemas/ProjectStage'}
+        kind: {type: string, enum: [input]}
+        title: {type: string}
+        filename: {type: string}
+        storagePath: {type: string, description: Relative to the project root, under .aifactory}
+        textPath: {type: string}
+        mimeType: {type: string}
+        sizeBytes: {type: integer}
+        sha256: {type: string}
+        pages: {type: integer}
+        characters: {type: integer}
+        truncated: {type: boolean}
+        createdAt: {type: string, format: date-time}
     CostSummary:
       type: object
       description: usd is null when nothing was priced; unpricedTokens > 0 means the figure is partial.

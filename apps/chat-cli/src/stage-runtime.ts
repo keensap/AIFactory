@@ -16,7 +16,10 @@ import { addLogContext, noopLogger, runWithLogContext, type Logger } from './log
 import { noopProvider, type TraceRecorder, type TraceSpan } from './observability/index.ts'
 import type { Project, ProjectService } from './projects.ts'
 import type { ProjectStage } from './sdlc.ts'
-import { SDLC_STAGES } from './sdlc.ts'
+import { SDLC_STAGES, STAGE_LABELS } from './sdlc.ts'
+import { MAX_ATTACHMENTS_PER_RUN, PROMPT_CHARS_PER_ATTACHMENT, renderAttachmentPrompt, type ProjectAttachment } from './attachments.ts'
+import { renderReportPdf } from './report/pdf.ts'
+import { exportTarget, writeExport } from './report/export.ts'
 import { TELOS_DOCUMENT_KIND, TELOS_TEMPLATE } from './telos.ts'
 import {
   PostgresProjectWorkspace,
@@ -31,6 +34,7 @@ import {
 
 const PLANNING_STAGE: ProjectStage = 'planning'
 const DEFAULT_MAX_REVIEW_CYCLES = 3
+const TELOS_REPORT_TITLE = 'TELOS Feasibility Report'
 
 export type HumanDecision = 'go' | 'conditional_go' | 'no_go'
 
@@ -58,9 +62,22 @@ export interface StageRuntimeDeps {
    * `harnessFactory` unchanged (no attribution).
    */
   pinModel?: () => ModelPin | undefined
+  /** Test seam: replace PDF rendering (e.g. to simulate a failure). */
+  renderPdf?: typeof renderReportPdf
 }
 
 export type StageRole = 'analyzer' | 'author' | 'reviewer'
+
+/** A stage input with its extracted text, as it travels to the model. */
+export interface ContextAttachment {
+  id: string
+  title: string
+  filename: string
+  pages: number
+  characters: number
+  truncated: boolean
+  text: string
+}
 
 export interface StageContextPacket {
   schemaVersion: 1
@@ -80,6 +97,8 @@ export interface StageContextPacket {
   }
   priorStages: Array<{ stage: ProjectStage; summary: string; completedAt: string | null }>
   documents: ProjectWorkspaceSnapshot['documents']
+  /** Requester-supplied PDFs and their extracted text. */
+  attachments: ContextAttachment[]
   input: string | null
   constraints: {
     maxReviewCycles: number
@@ -120,11 +139,13 @@ export class PlanningStageRuntime {
   private readonly traces: TraceRecorder
   private readonly activeRuns = new Set<string>()
   private readonly pinModel?: () => ModelPin | undefined
+  private readonly renderPdf: typeof renderReportPdf
   /** Model pins of runs currently executing, by run id. */
   private readonly pins = new Map<string, ModelPin>()
 
   constructor(deps: StageRuntimeDeps) {
     if (deps.pinModel !== undefined) this.pinModel = deps.pinModel
+    this.renderPdf = deps.renderPdf ?? renderReportPdf
     this.projects = deps.projects
     this.workspace = deps.workspace
     this.harnessFactory = deps.harnessFactory
@@ -143,13 +164,23 @@ export class PlanningStageRuntime {
     projectId: string
     stage: string
     brief?: string | null
+    /** Requester-supplied PDFs to analyse alongside the brief. */
+    attachmentIds?: string[]
   }): Promise<StageRunDetail> {
     this.assertPlanning(input.stage)
     const project = await this.projects.get(input.projectId)
     await assertProjectRoot(project)
     const snapshot = await this.workspace.getSnapshot(project.id)
     const priorStages = await this.workspace.getPriorStageSummaries(project.id, PLANNING_STAGE)
-    const context = buildContextPacket(project, snapshot, priorStages, input.brief ?? null)
+    const attachments = await this.loadAttachments(project, input.attachmentIds ?? [])
+    const context = buildContextPacket(
+      project,
+      snapshot,
+      priorStages,
+      input.brief ?? null,
+      DEFAULT_MAX_REVIEW_CYCLES,
+      attachments,
+    )
     const run = await this.workspace.createStageRun({
       projectId: project.id,
       stage: PLANNING_STAGE,
@@ -157,7 +188,40 @@ export class PlanningStageRuntime {
       context,
       contextHash: hashContext(context),
     })
+    if (attachments.length > 0) {
+      await this.workspace.linkRunAttachments(run.id, attachments.map((attachment) => attachment.id))
+    }
     return (await this.workspace.getStageRunDetail(run.id))!
+  }
+
+  /**
+   * Load and validate the run's inputs. Attachments belong to the project, so an
+   * id from another project is rejected rather than silently ignored.
+   */
+  private async loadAttachments(project: Project, ids: string[]): Promise<ContextAttachment[]> {
+    const unique = [...new Set(ids.filter((id) => id.trim() !== ''))]
+    if (unique.length === 0) return []
+    if (unique.length > MAX_ATTACHMENTS_PER_RUN) {
+      throw new StageRuntimeError(400, 'TOO_MANY_ATTACHMENTS', `a stage run accepts at most ${MAX_ATTACHMENTS_PER_RUN} input documents`)
+    }
+    const attachments: ContextAttachment[] = []
+    for (const id of unique) {
+      const attachment = await this.workspace.getAttachment(project.id, id)
+      if (attachment === undefined) {
+        throw new StageRuntimeError(404, 'ATTACHMENT_NOT_FOUND', `input document ${id} was not found for this project`)
+      }
+      const text = await this.workspace.readAttachmentText(attachment, project.rootPath)
+      attachments.push({
+        id: attachment.id,
+        title: attachment.title,
+        filename: attachment.filename,
+        pages: attachment.pages,
+        characters: attachment.characters,
+        truncated: attachment.truncated,
+        text: text.slice(0, PROMPT_CHARS_PER_ATTACHMENT),
+      })
+    }
+    return attachments
   }
 
   async list(projectId: string, stage: string): Promise<StageRun[]> {
@@ -343,6 +407,16 @@ export class PlanningStageRuntime {
         storagePath: document.storagePath,
       })
       this.traces.recordDocument(runSpan, document.kind, document.storagePath)
+      // The PDF is the deliverable; a rendering failure must not fail the run.
+      try {
+        const exported = await this.exportDocument(project, run.stage, project.name, document, draft, 'Awaiting human decision')
+        await this.appendRunEvent(project.id, run.id, 'document_exported', exported)
+        this.log.info({ event: 'stage.document.exported', ...exported })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.log.warn({ event: 'stage.document.export_failed', err: error })
+        await this.appendRunEvent(project.id, run.id, 'document_export_failed', { message }, 'warn')
+      }
       if (this.indexDocument !== undefined) {
         void this.indexDocument(project, document).catch((error: unknown) => {
           this.log.warn({ event: 'stage.run.document_index_failed', documentId: document.id, err: error })
@@ -491,6 +565,64 @@ export class PlanningStageRuntime {
     }
   }
 
+  /**
+   * Render the stage document to PDF and write it into the project's documents
+   * tree. Throws on failure; callers decide whether that is fatal.
+   */
+  private async exportDocument(
+    project: Project,
+    stage: ProjectStage,
+    projectName: string,
+    document: ProjectDocument,
+    markdown: string,
+    statusNote?: string,
+  ): Promise<{ path: string; bytes: number; documentId: string }> {
+    if (markdown.trim() === '') {
+      throw new StageRuntimeError(409, 'DOCUMENT_EMPTY', 'the stage document is empty; nothing to export')
+    }
+    const target = exportTarget({ projectRoot: project.rootPath, stage, title: TELOS_REPORT_TITLE, projectName })
+    const bytes = await this.renderPdf({
+      title: TELOS_REPORT_TITLE,
+      projectName,
+      stageLabel: STAGE_LABELS[stage],
+      generatedAt: new Date().toISOString(),
+      markdown,
+      ...(statusNote !== undefined ? { statusNote } : {}),
+    })
+    const written = await writeExport(target, bytes)
+    await this.workspace.recordDocumentExport({
+      documentId: document.id,
+      projectId: project.id,
+      path: written.relativePath,
+      bytes: written.bytes,
+    })
+    return { path: written.relativePath, bytes: written.bytes, documentId: document.id }
+  }
+
+  /** Re-render and overwrite the exported PDF for a finished stage run. */
+  async exportRun(runId: string): Promise<{ path: string; bytes: number; documentId: string }> {
+    const detail = await this.get(runId)
+    const project = await this.projects.get(detail.projectId)
+    const document = detail.documents.find((item) => item.kind === TELOS_DOCUMENT_KIND)
+    if (document === undefined) {
+      throw new StageRuntimeError(409, 'DOCUMENT_NOT_READY', 'the stage has not produced its document yet')
+    }
+    const markdown = detail.draftMarkdown ?? ''
+    if (markdown.trim() === '') {
+      throw new StageRuntimeError(409, 'DOCUMENT_NOT_READY', 'the stage document is empty; nothing to export')
+    }
+    try {
+      return await this.exportDocument(project, detail.stage, project.name, document, markdown)
+    } catch (error) {
+      if (error instanceof StageRuntimeError) throw error
+      throw new StageRuntimeError(
+        500,
+        'PDF_EXPORT_FAILED',
+        `could not produce the PDF: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+
   private async appendRunEvent(
     projectId: string,
     runId: string,
@@ -544,6 +676,7 @@ export function buildContextPacket(
   priorStages: Array<{ stage: ProjectStage; summary: string; completedAt: string | null }>,
   input: string | null,
   maxReviewCycles = DEFAULT_MAX_REVIEW_CYCLES,
+  attachments: ContextAttachment[] = [],
 ): StageContextPacket {
   return {
     schemaVersion: 1,
@@ -563,6 +696,7 @@ export function buildContextPacket(
     },
     priorStages,
     documents: snapshot.documents,
+    attachments,
     input,
     constraints: {
       maxReviewCycles,
@@ -574,6 +708,25 @@ export function buildContextPacket(
 
 export function hashContext(context: StageContextPacket): string {
   return createHash('sha256').update(JSON.stringify(context)).digest('hex')
+}
+
+/**
+ * The context with attachment text removed, for prompts that carry the documents
+ * in a readable section instead. Avoids sending the same text twice.
+ */
+export function contextWithoutAttachmentText(context: StageContextPacket): Omit<StageContextPacket, 'attachments'> & {
+  attachments: Array<Omit<ContextAttachment, 'text'>>
+} {
+  return {
+    ...context,
+    attachments: context.attachments.map(({ text: _text, ...meta }) => meta),
+  }
+}
+
+/** The stage inputs, or an explicit note when there are none. */
+export function attachmentSection(context: StageContextPacket): string {
+  const rendered = renderAttachmentPrompt(context.attachments)
+  return rendered === '' ? 'INPUT DOCUMENTS\nThe requester attached no documents for this stage.' : rendered
 }
 
 export function buildAnalyzerPrompt(project: Project, context: StageContextPacket): string {
@@ -590,8 +743,11 @@ Use only the facts below. Mark missing evidence as a gap; do not invent budgets,
 Return concise Markdown with headings for the five TELOS dimensions.
 
 PROJECT: ${project.name}
+
+${attachmentSection(context)}
+
 CONTEXT:
-${JSON.stringify(context, null, 2)}`
+${JSON.stringify(contextWithoutAttachmentText(context), null, 2)}`
 }
 
 export function buildAuthorPrompt(
@@ -612,8 +768,10 @@ ${analysis}
 TEMPLATE:
 ${TELOS_TEMPLATE}
 
+${attachmentSection(context)}
+
 CONTEXT:
-${JSON.stringify(context, null, 2)}`
+${JSON.stringify(contextWithoutAttachmentText(context), null, 2)}`
 }
 
 export function buildReviewerPrompt(
@@ -640,6 +798,7 @@ export function buildReviewerPrompt(
       storagePath: document.storagePath,
       status: document.status,
     })),
+    attachments: context.attachments.map(({ text: _text, ...meta }) => meta),
   }
 
   return `STAGE_ROLE: reviewer
@@ -671,6 +830,8 @@ Approve only if there are no blocker or major findings. If not approved, include
 DRAFT:
 ${draft}
 
+${attachmentSection(context)}
+
 REVIEW CONTEXT:
 ${JSON.stringify(reviewContext, null, 2)}`
 }
@@ -696,8 +857,10 @@ ${draft}
 ANALYSIS:
 ${analysis}
 
+${attachmentSection(context)}
+
 CONTEXT:
-${JSON.stringify(context, null, 2)}`
+${JSON.stringify(contextWithoutAttachmentText(context), null, 2)}`
 }
 
 export function parseStageReview(raw: string): StageReviewResult {

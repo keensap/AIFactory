@@ -7,10 +7,15 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises'
 import { basename, join, relative, resolve } from 'node:path'
 import { Pool } from 'pg'
 import type { Project } from './projects.ts'
+import {
+  AttachmentError,
+  type ProjectAttachment,
+} from './attachments.ts'
+import { extractPdfText, MAX_PDF_PAGES } from './pdf.ts'
 import { STAGE_DOCUMENT_REQUIREMENTS } from './telos.ts'
 import {
   buildFactoryUsage,
@@ -58,6 +63,8 @@ export interface ProjectDocument {
   sha256: string
   status: DocumentStatus
   version: number
+  /** Where the PDF export was written, relative to the project root. */
+  exportPath?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -405,6 +412,42 @@ export class PostgresProjectWorkspace {
         PRIMARY KEY (project_id, role)
       );
 
+      -- Requester-supplied stage inputs (PDF only). Text is extracted at upload.
+      CREATE TABLE IF NOT EXISTS project_attachments (
+        id UUID PRIMARY KEY,
+        project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        stage TEXT,
+        kind TEXT NOT NULL DEFAULT 'input',
+        title TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        storage_path TEXT NOT NULL,
+        text_path TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size_bytes BIGINT NOT NULL,
+        sha256 TEXT NOT NULL,
+        pages INTEGER NOT NULL DEFAULT 0,
+        characters INTEGER NOT NULL DEFAULT 0,
+        truncated BOOLEAN NOT NULL DEFAULT false,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      -- Which inputs a stage run consumed, so a re-run can reuse the same set.
+      CREATE TABLE IF NOT EXISTS stage_run_attachments (
+        stage_run_id UUID NOT NULL REFERENCES project_stage_runs(id) ON DELETE CASCADE,
+        attachment_id UUID NOT NULL REFERENCES project_attachments(id) ON DELETE CASCADE,
+        PRIMARY KEY (stage_run_id, attachment_id)
+      );
+
+      -- Exported PDFs live outside .aifactory, in the project's own documents tree.
+      CREATE TABLE IF NOT EXISTS stage_document_exports (
+        document_id UUID PRIMARY KEY REFERENCES project_documents(id) ON DELETE CASCADE,
+        project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        bytes BIGINT NOT NULL,
+        generated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS project_attachments_project_idx ON project_attachments (project_id, stage, created_at DESC);
       CREATE INDEX IF NOT EXISTS project_documents_project_idx ON project_documents (project_id, stage);
       CREATE INDEX IF NOT EXISTS project_checklist_project_idx ON project_checklist_items (project_id, stage);
       CREATE INDEX IF NOT EXISTS project_stage_runs_project_stage_idx ON project_stage_runs (project_id, stage, created_at DESC);
@@ -591,6 +634,148 @@ export class PostgresProjectWorkspace {
       [projectId, documentId],
     )
     return result.rows[0] === undefined ? undefined : mapDocument(result.rows[0])
+  }
+
+  /**
+   * Store a requester-supplied PDF and extract its text once.
+   *
+   * The original file and the extracted text are kept together under
+   * `.aifactory/attachments/<id>/`, so a stage run reads text without paying for
+   * extraction again and the same input can be re-used by a later run.
+   */
+  async addAttachment(input: {
+    project: Project
+    stage?: ProjectStage | null
+    title?: string
+    filename: string
+    mimeType: string
+    buffer: Uint8Array
+  }): Promise<ProjectAttachment> {
+    if (input.stage !== undefined && input.stage !== null && !isProjectStage(input.stage)) {
+      throw new AttachmentError(400, 'INVALID_STAGE', `unknown SDLC stage ${input.stage}`)
+    }
+
+    const id = randomUUID()
+    const safeName = basename(input.filename).replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 120) || 'attachment.pdf'
+    const directory = join('.aifactory', 'attachments', id)
+    const storagePath = join(directory, safeName)
+    const textPath = join(directory, 'text.txt')
+    const root = resolve(input.project.rootPath)
+    const absolute = resolve(root, storagePath)
+    if (!absolute.startsWith(`${root}/`)) {
+      throw new AttachmentError(400, 'INVALID_ATTACHMENT_PATH', 'attachment path escapes the project root')
+    }
+
+    const extracted = await extractPdfText(input.buffer, { maxPages: MAX_PDF_PAGES })
+    await mkdir(resolve(root, directory), { recursive: true })
+    await writeFile(absolute, input.buffer, { flag: 'wx' })
+    await writeFile(resolve(root, textPath), extracted.text, { encoding: 'utf8', flag: 'wx' })
+    const sha256 = createHash('sha256').update(input.buffer).digest('hex')
+
+    const result = await this.pool.query<AttachmentRow>(
+      `INSERT INTO project_attachments
+         (id, project_id, stage, kind, title, filename, storage_path, text_path, mime_type,
+          size_bytes, sha256, pages, characters, truncated)
+       VALUES ($1, $2, $3, 'input', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       RETURNING ${ATTACHMENT_COLUMNS}`,
+      [
+        id,
+        input.project.id,
+        input.stage ?? null,
+        input.title ?? input.filename.replace(/\.pdf$/i, ''),
+        input.filename,
+        storagePath,
+        textPath,
+        input.mimeType,
+        input.buffer.byteLength,
+        sha256,
+        extracted.pages,
+        extracted.characters,
+        extracted.truncated,
+      ],
+    )
+    return mapAttachment(result.rows[0]!)
+  }
+
+  async listAttachments(projectId: string, stage?: ProjectStage): Promise<ProjectAttachment[]> {
+    const result = await this.pool.query<AttachmentRow>(
+      `SELECT ${ATTACHMENT_COLUMNS} FROM project_attachments
+       WHERE project_id = $1 ${stage === undefined ? '' : 'AND (stage = $2 OR stage IS NULL)'}
+       ORDER BY created_at DESC`,
+      stage === undefined ? [projectId] : [projectId, stage],
+    )
+    return result.rows.map(mapAttachment)
+  }
+
+  async getAttachment(projectId: string, id: string): Promise<ProjectAttachment | undefined> {
+    const result = await this.pool.query<AttachmentRow>(
+      `SELECT ${ATTACHMENT_COLUMNS} FROM project_attachments WHERE project_id = $1 AND id = $2`,
+      [projectId, id],
+    )
+    const row = result.rows[0]
+    return row === undefined ? undefined : mapAttachment(row)
+  }
+
+  async deleteAttachment(projectId: string, id: string, rootPath: string): Promise<boolean> {
+    const result = await this.pool.query('DELETE FROM project_attachments WHERE project_id = $1 AND id = $2', [projectId, id])
+    if ((result.rowCount ?? 0) === 0) return false
+    await rm(resolve(rootPath, '.aifactory', 'attachments', id), { recursive: true, force: true }).catch(() => {})
+    return true
+  }
+
+  /** Read an attachment's extracted text (empty when the file is gone). */
+  async readAttachmentText(attachment: ProjectAttachment, rootPath: string): Promise<string> {
+    try {
+      return await readFile(resolve(rootPath, attachment.textPath), 'utf8')
+    } catch {
+      return ''
+    }
+  }
+
+  /** Attach inputs to a stage run; ignores ids already linked. */
+  async linkRunAttachments(stageRunId: string, attachmentIds: string[]): Promise<void> {
+    for (const attachmentId of attachmentIds) {
+      await this.pool.query(
+        `INSERT INTO stage_run_attachments (stage_run_id, attachment_id) VALUES ($1, $2)
+         ON CONFLICT DO NOTHING`,
+        [stageRunId, attachmentId],
+      )
+    }
+  }
+
+  async listRunAttachments(stageRunId: string): Promise<ProjectAttachment[]> {
+    const result = await this.pool.query<AttachmentRow>(
+      `SELECT ${ATTACHMENT_COLUMNS} FROM project_attachments a
+       JOIN stage_run_attachments l ON l.attachment_id = a.id
+       WHERE l.stage_run_id = $1
+       ORDER BY a.created_at ASC`,
+      [stageRunId],
+    )
+    return result.rows.map(mapAttachment)
+  }
+
+  /** Record where a stage document was exported, for the API and re-export. */
+  async recordDocumentExport(input: { documentId: string; projectId: string; path: string; bytes: number }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO stage_document_exports (document_id, project_id, path, bytes, generated_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (document_id) DO UPDATE SET path = EXCLUDED.path, bytes = EXCLUDED.bytes, generated_at = now()`,
+      [input.documentId, input.projectId, input.path, input.bytes],
+    )
+  }
+
+  async listDocumentExports(documentIds: string[]): Promise<Map<string, { path: string; bytes: number; generatedAt: string }>> {
+    const out = new Map<string, { path: string; bytes: number; generatedAt: string }>()
+    if (documentIds.length === 0) return out
+    const result = await this.pool.query<{ documentId: string; path: string; bytes: string; generatedAt: Date | string }>(
+      `SELECT document_id AS "documentId", path, bytes, generated_at AS "generatedAt"
+       FROM stage_document_exports WHERE document_id = ANY($1::uuid[])`,
+      [documentIds],
+    )
+    for (const row of result.rows) {
+      out.set(row.documentId, { path: row.path, bytes: Number(row.bytes), generatedAt: toIso(row.generatedAt) })
+    }
+    return out
   }
 
   async addDocument(input: {
@@ -1070,7 +1255,15 @@ ${message}`
       this.listStageReviews(runId),
       this.listStageRunDocuments(run.projectId, runId),
     ])
-    return { ...run, reviews, documents }
+    const exported = await this.listDocumentExports(documents.map((document) => document.id))
+    return {
+      ...run,
+      reviews,
+      documents: documents.map((document) => {
+        const entry = exported.get(document.id)
+        return entry === undefined ? document : { ...document, exportPath: entry.path }
+      }),
+    }
   }
 
   async listStageRunDocuments(projectId: string, runId: string): Promise<ProjectDocument[]> {
@@ -1586,6 +1779,48 @@ interface StageRow {
   startedAt: Date | string | null
   completedAt: Date | string | null
   notes: string | null
+}
+
+interface AttachmentRow {
+  id: string
+  projectId: string
+  stage: ProjectStage | null
+  kind: 'input'
+  title: string
+  filename: string
+  storagePath: string
+  textPath: string
+  mimeType: string
+  sizeBytes: string
+  sha256: string
+  pages: number
+  characters: number
+  truncated: boolean
+  createdAt: Date | string
+}
+
+const ATTACHMENT_COLUMNS = `id, project_id AS "projectId", stage, kind, title, filename,
+  storage_path AS "storagePath", text_path AS "textPath", mime_type AS "mimeType",
+  size_bytes AS "sizeBytes", sha256, pages, characters, truncated, created_at AS "createdAt"`
+
+function mapAttachment(row: AttachmentRow): ProjectAttachment {
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    stage: row.stage,
+    kind: 'input',
+    title: row.title,
+    filename: row.filename,
+    storagePath: row.storagePath,
+    textPath: row.textPath,
+    mimeType: row.mimeType,
+    sizeBytes: Number(row.sizeBytes),
+    sha256: row.sha256,
+    pages: row.pages,
+    characters: row.characters,
+    truncated: row.truncated,
+    createdAt: toIso(row.createdAt),
+  }
 }
 
 interface DocumentRow {

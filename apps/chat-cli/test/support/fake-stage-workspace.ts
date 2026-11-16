@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { ProjectAttachment } from '../../src/attachments.ts'
 import type {
   PostgresProjectWorkspace,
   ProjectDocument,
@@ -15,6 +16,9 @@ export function fakeWorkspace(): PostgresProjectWorkspace {
   const reviews: StageReview[] = []
   const documents: ProjectDocument[] = []
   const checklistUpdates: Array<{ key: string; status: unknown; evidence: string | null | undefined }> = []
+  const attachments = new Map<string, ProjectAttachment & { text: string }>()
+  const runAttachments = new Map<string, string[]>()
+  const documentExports = new Map<string, { path: string; bytes: number }>()
   const events: StageRunEvent[] = []
 
   const snapshot = (): ProjectWorkspaceSnapshot => ({
@@ -110,6 +114,56 @@ export function fakeWorkspace(): PostgresProjectWorkspace {
       return doc
     },
     async updateDocumentStatus() { return documents[0]! },
+    async addTestAttachment(input: { id?: string; projectId?: string; title: string; filename: string; text: string; pages?: number }) {
+      const id = input.id ?? randomUUID()
+      const attachment: ProjectAttachment & { text: string } = {
+        id,
+        projectId: input.projectId ?? 'p',
+        stage: null,
+        kind: 'input',
+        title: input.title,
+        filename: input.filename,
+        storagePath: `.aifactory/attachments/${id}/${input.filename}`,
+        textPath: `.aifactory/attachments/${id}/text.txt`,
+        mimeType: 'application/pdf',
+        sizeBytes: input.text.length,
+        sha256: 'sha',
+        pages: input.pages ?? 1,
+        characters: input.text.length,
+        truncated: false,
+        createdAt: new Date().toISOString(),
+        text: input.text,
+      }
+      attachments.set(id, attachment)
+      return attachment
+    },
+    async getAttachment(projectId: string, id: string) {
+      const attachment = attachments.get(id)
+      if (attachment === undefined || attachment.projectId !== projectId) return undefined
+      const { text: _text, ...rest } = attachment
+      return rest
+    },
+    async readAttachmentText(attachment: { id: string }) {
+      return attachments.get(attachment.id)?.text ?? ''
+    },
+    async linkRunAttachments(stageRunId: string, ids: string[]) {
+      runAttachments.set(stageRunId, [...new Set([...(runAttachments.get(stageRunId) ?? []), ...ids])])
+    },
+    async listRunAttachments(stageRunId: string) {
+      return (runAttachments.get(stageRunId) ?? [])
+        .map((id) => attachments.get(id))
+        .filter((entry): entry is ProjectAttachment & { text: string } => entry !== undefined)
+        .map(({ text: _text, ...rest }) => rest)
+    },
+    async recordDocumentExport(input: { documentId: string; path: string; bytes: number }) {
+      documentExports.set(input.documentId, { path: input.path, bytes: input.bytes })
+    },
+    async listDocumentExports(ids: string[]) {
+      return new Map(ids.filter((id) => documentExports.has(id)).map((id) => {
+        const entry = documentExports.get(id)!
+        return [id, { ...entry, generatedAt: new Date().toISOString() }] as const
+      }))
+    },
     async listStageRunEvents(stageRunId: string, after = '0', limit = 200) {
       const cursor = Number.parseInt(after, 10) || 0
       return events
@@ -123,6 +177,9 @@ export function fakeWorkspace(): PostgresProjectWorkspace {
     },
     checklistUpdates,
     events,
+    attachments,
+    runAttachments,
+    documentExports,
   }
   return fake as unknown as PostgresProjectWorkspace
 }

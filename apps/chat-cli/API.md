@@ -367,6 +367,68 @@ curl -s -X POST http://127.0.0.1:8787/api/projects/<id>/briefing \
 
 The briefing is cached by an input hash. `GET` returns `404 BRIEFING_NOT_FOUND` until one is generated; a cached briefing includes `stale: true` when the project changed after generation. `POST` with `{"refresh":true}` forces regeneration. The narrative is AI-written; `nextActions`, stages, checklist and documents remain deterministic server data.
 
+### Stage input documents (PDF)
+
+Requester-supplied PDFs that a stage run should analyse alongside the text brief. Images are rejected: the harness consumes text only, so an image would not influence the analysis and accepting one would be misleading.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/projects/:id/attachments` | Upload 1–10 PDFs in one multipart request (field `files`; optional `stage`, `title` for single files) |
+| `GET` | `/api/projects/:id/attachments?stage=` | List attachments |
+| `GET` | `/api/projects/:id/attachments/:attachmentId/content` | Download the original PDF |
+| `DELETE` | `/api/projects/:id/attachments/:attachmentId` | Remove an attachment and its stored files |
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/api/projects/<id>/attachments \
+  -F 'files=@requirements.pdf' -F 'files=@constraints.pdf' -F 'stage=planning'
+```
+
+```json
+{ "attachments": [
+  { "id": "…", "title": "requirements", "filename": "requirements.pdf", "pages": 4,
+    "characters": 18400, "truncated": false, "sizeBytes": 91234,
+    "storagePath": ".aifactory/attachments/…/requirements.pdf",
+    "textPath": ".aifactory/attachments/…/text.txt", "createdAt": "2026-11-16T10:00:00.000Z" } ] }
+```
+
+Text is extracted once at upload and cached, so runs never pay extraction cost and a re-run sees identical input. Limits: 20 MB per file, 300 pages, 20 000 extracted characters per document.
+
+Errors: `415 UNSUPPORTED_FILE_TYPE` (images and non-PDF files), `413 ATTACHMENT_TOO_LARGE`, `422 PDF_HAS_NO_TEXT` (a scanned PDF with no text layer — OCR is required first), `400 INVALID_PDF`.
+
+Pass the ids when starting a run:
+
+```json
+POST /api/projects/:id/stages/planning/runs
+{ "brief": "Build a customer portal", "attachmentIds": ["…", "…"] }
+```
+
+Attachments must belong to the project (`404 ATTACHMENT_NOT_FOUND` otherwise) and a run accepts at most 20. Every role prompt receives an `INPUT DOCUMENTS` section with the extracted text (20 000 characters per document, 60 000 in total, truncation stated inline).
+
+### The exported PDF
+
+When a run reaches `awaiting_human`, the deliverable is rendered to PDF and written **outside** `.aifactory`, into the project's own tree:
+
+```
+<project-root>/documents/<stage>/<Document Title> — <Project Name>.pdf
+e.g. documents/planning/TELOS Feasibility Report — ABCClothing.pdf
+```
+
+Re-running the stage overwrites that file; the Markdown source and version history stay in `.aifactory`. `POST /api/stage-runs/:runId/export` re-renders on demand.
+
+```json
+{ "export": { "path": "documents/planning/TELOS Feasibility Report — ABCClothing.pdf", "bytes": 48213, "documentId": "…" } }
+```
+
+The run detail exposes it on the document:
+
+```json
+{ "run": { "documents": [ { "kind": "telos_report", "exportPath": "documents/planning/TELOS Feasibility Report — ABCClothing.pdf" } ] } }
+```
+
+A rendering failure **never fails the stage run**: the Markdown artifact is already stored, the run continues to `awaiting_human`, and the failure appears as a `document_export_failed` event plus a warning log. `POST …/export` is the way to retry, and reports `500 PDF_EXPORT_FAILED` when it still cannot produce the file.
+
+The renderer is pure JavaScript (`pdf-lib`): no LibreOffice, browser or Python needed. Markdown support covers headings, paragraphs, lists, tables, fenced code, quotes and rules; standard fonts are used, so characters outside their repertoire are mapped (for example `✓ → x`, `→ → ->`) rather than dropped.
+
 ### Stage runs
 
 The stage controller is implemented for **Planning & Feasibility** first. A stage run has its own context hash, session, review history and TELOS document.

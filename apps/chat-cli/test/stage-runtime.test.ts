@@ -9,7 +9,8 @@ import { ProjectService } from '../src/projects.ts'
 import { SettingsService } from '../src/settings.ts'
 import { DshHarness } from '../src/harness.ts'
 import type { ModelPin } from '../src/models/index.ts'
-import { PlanningStageRuntime, buildAnalyzerPrompt, buildContextPacket, cleanMarkdown, parseStageReview } from '../src/stage-runtime.ts'
+import type { renderReportPdf } from '../src/report/pdf.ts'
+import { PlanningStageRuntime, StageRuntimeError, buildAnalyzerPrompt, buildContextPacket, cleanMarkdown, parseStageReview } from '../src/stage-runtime.ts'
 import type { ProjectWorkspaceSnapshot, ProjectDocument, StageReview, StageRun, StageRunDetail, StageRunEvent, StageRunEventInput } from '../src/workspace.ts'
 import type { PostgresProjectWorkspace } from '../src/workspace.ts'
 import { fakeWorkspace } from './support/fake-stage-workspace.ts'
@@ -227,6 +228,162 @@ test('every role of a run uses the pinned harness, not the factory one', async (
     // harnessFactory would fail the analyzer; the pin's harness does not.
     const detail = await runtime.execute(started.id)
     assert.equal(detail.status, 'awaiting_human')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// PDF inputs and the exported deliverable
+// ---------------------------------------------------------------------------
+
+interface FakeWorkspaceExtras {
+  events: StageRunEvent[]
+  attachments: Map<string, { id: string; title: string; text: string }>
+  runAttachments: Map<string, string[]>
+  documentExports: Map<string, { path: string; bytes: number }>
+  addTestAttachment(input: { id?: string; projectId?: string; title: string; filename: string; text: string; pages?: number }): Promise<{ id: string }>
+}
+
+function extras(workspace: PostgresProjectWorkspace): FakeWorkspaceExtras {
+  return workspace as unknown as FakeWorkspaceExtras
+}
+
+async function runWithPrompt(options: { renderPdf?: typeof renderReportPdf } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'aifactory-pdf-'))
+  const projects = new ProjectService(new MemoryProjectStore(), new SettingsService(new MemorySettingsStore()))
+  const project = await projects.create({ name: 'ABCClothing', rootPath: root, organization: null, ownerEmail: null, status: 'active' })
+  const workspace = fakeWorkspace()
+  const prompts: Array<{ role: string; prompt: string }> = []
+  const runtime = new PlanningStageRuntime({
+    projects,
+    workspace,
+    harnessFactory: () => { throw new Error('not used') },
+    runPrompt: async (role, prompt) => {
+      prompts.push({ role, prompt })
+      if (role === 'analyzer') return '# Analysis\n\nFeasible.'
+      if (role === 'author') return '# TELOS Feasibility Report\n\n## 10. Recommendation\n\nDecision: **Go**\n'
+      return '{"decision":"approved","findings":[]}'
+    },
+    ...(options.renderPdf !== undefined ? { renderPdf: options.renderPdf } : {}),
+  })
+  return { runtime, workspace, project, root, prompts }
+}
+
+test('attached PDFs reach every role prompt and are linked to the run', async () => {
+  const { runtime, workspace, project, prompts, root } = await runWithPrompt()
+  try {
+    const attachment = await extras(workspace).addTestAttachment({
+      projectId: project.id, title: 'Requirements brief', filename: 'brief.pdf',
+      text: 'The portal must show invoices and accept card payments.',
+    })
+    const started = await runtime.start({ projectId: project.id, stage: 'planning', brief: 'Build a portal', attachmentIds: [attachment.id] })
+    assert.deepEqual(extras(workspace).runAttachments.get(started.id), [attachment.id])
+
+    await runtime.execute(started.id)
+    for (const role of ['analyzer', 'author', 'reviewer']) {
+      const prompt = prompts.find((entry) => entry.role === role)?.prompt ?? ''
+      assert.ok(prompt.includes('INPUT DOCUMENTS'), `${role} prompt has a documents section`)
+      assert.ok(prompt.includes('Requirements brief'), `${role} prompt names the document`)
+      assert.ok(prompt.includes('The portal must show invoices'), `${role} prompt contains the text`)
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a run without attachments says so explicitly instead of omitting the section', async () => {
+  const { runtime, project, prompts, root } = await runWithPrompt()
+  try {
+    const started = await runtime.start({ projectId: project.id, stage: 'planning', brief: 'no docs' })
+    await runtime.execute(started.id)
+    assert.match(prompts[0]!.prompt, /INPUT DOCUMENTS\nThe requester attached no documents/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('unknown and excessive attachment ids are rejected before a run is created', async () => {
+  const { runtime, workspace, project, root } = await runWithPrompt()
+  try {
+    await assert.rejects(
+      () => runtime.start({ projectId: project.id, stage: 'planning', brief: 'x', attachmentIds: ['00000000-0000-0000-0000-000000000000'] }),
+      (error: unknown) => error instanceof StageRuntimeError && error.status === 404 && error.code === 'ATTACHMENT_NOT_FOUND',
+    )
+    const ids = Array.from({ length: 21 }, (_, index) => `id-${index}`)
+    await assert.rejects(
+      () => runtime.start({ projectId: project.id, stage: 'planning', brief: 'x', attachmentIds: ids }),
+      (error: unknown) => error instanceof StageRuntimeError && error.status === 400 && error.code === 'TOO_MANY_ATTACHMENTS',
+    )
+    assert.equal(extras(workspace).events.filter((event) => event.type === 'role_start').length, 0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('completing a stage writes the PDF outside .aifactory with the requested name', async () => {
+  const { runtime, workspace, project, root } = await runWithPrompt()
+  try {
+    const started = await runtime.start({ projectId: project.id, stage: 'planning', brief: 'Build a portal' })
+    const detail = await runtime.execute(started.id)
+    assert.equal(detail.status, 'awaiting_human')
+
+    const expected = join(root, 'documents', 'planning', 'TELOS Feasibility Report — ABCClothing.pdf')
+    assert.ok(existsSync(expected), `expected ${expected}`)
+    assert.ok(!expected.includes('.aifactory'))
+
+    const exported = extras(workspace).documentExports
+    assert.equal(exported.size, 1)
+    const entry = [...exported.values()][0]!
+    assert.equal(entry.path, 'documents/planning/TELOS Feasibility Report — ABCClothing.pdf')
+    assert.ok(entry.bytes > 1000)
+    assert.ok(extras(workspace).events.some((event) => event.type === 'document_exported'))
+
+    // The PDF really contains the report.
+    const { extractText } = await import('unpdf')
+    const pdf = await extractText(new Uint8Array(readFileSync(expected)), { mergePages: false })
+    const text = (Array.isArray(pdf.text) ? pdf.text : [pdf.text]).join('\n')
+    // The file name carries the project; the title page names the report and the project.
+    assert.ok(text.includes('TELOS Feasibility Report'))
+    assert.ok(text.includes('ABCClothing'))
+    assert.ok(text.includes('Decision: Go'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a PDF rendering failure never fails the stage run', async () => {
+  const { runtime, workspace, project, root } = await runWithPrompt({
+    renderPdf: async () => { throw new Error('renderer exploded') },
+  })
+  try {
+    const started = await runtime.start({ projectId: project.id, stage: 'planning', brief: 'Build a portal' })
+    const detail = await runtime.execute(started.id)
+    assert.equal(detail.status, 'awaiting_human', 'the run still completes')
+    assert.equal(detail.documents.length, 1, 'the Markdown artifact is still stored')
+    assert.ok(existsSync(join(root, 'documents')) === false, 'no partial PDF directory')
+    const failure = extras(workspace).events.find((event) => event.type === 'document_export_failed')
+    assert.ok(failure, 'the failure is recorded on the run')
+    assert.match(JSON.stringify(failure!.payload), /renderer exploded/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('exportRun re-renders and overwrites the canonical file', async () => {
+  const { runtime, project, root } = await runWithPrompt()
+  try {
+    const started = await runtime.start({ projectId: project.id, stage: 'planning', brief: 'Build a portal' })
+    await runtime.execute(started.id)
+    const file = join(root, 'documents', 'planning', 'TELOS Feasibility Report — ABCClothing.pdf')
+    const first = readFileSync(file)
+    assert.equal(first.subarray(0, 5).toString(), '%PDF-')
+    const again = await runtime.exportRun(started.id)
+    assert.equal(again.path, 'documents/planning/TELOS Feasibility Report — ABCClothing.pdf')
+    // The title page carries a generation timestamp, so bytes differ; the document does not.
+    const second = readFileSync(file)
+    assert.equal(second.subarray(0, 5).toString(), '%PDF-')
+    assert.ok(second.byteLength > 1000)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

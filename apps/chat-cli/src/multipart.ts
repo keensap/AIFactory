@@ -132,3 +132,125 @@ function safeFilename(value: string): string {
 function messageOf(error: unknown): string {
   return error instanceof Error && error.message !== '' ? error.message : 'invalid upload'
 }
+
+export interface MultipartFile {
+  field: string
+  buffer: Buffer
+  filename: string
+  mimeType: string
+}
+
+export interface MultipartUpload {
+  files: MultipartFile[]
+  fields: Record<string, string>
+}
+
+export interface ReadFilesOptions {
+  /** Accepted form-field name for files; every other file field is ignored. */
+  field?: string
+  maxFiles?: number
+  maxFileBytes?: number
+}
+
+/**
+ * Read several files from one multipart request.
+ *
+ * Unlike `readMultipart` (one PDF for the review flow), stage inputs can arrive
+ * as a batch: the browser sends every selected file in a single request, so the
+ * user gets one result and one error instead of N round trips.
+ */
+export async function readMultipartFiles(request: IncomingMessage, options: ReadFilesOptions = {}): Promise<MultipartUpload> {
+  const field = options.field ?? 'files'
+  const maxFiles = options.maxFiles ?? 10
+  const maxFileBytes = options.maxFileBytes ?? MAX_PDF_BYTES
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const fail = (error: Error): void => {
+      if (settled) return
+      settled = true
+      reject(error)
+    }
+    const succeed = (upload: MultipartUpload): void => {
+      if (settled) return
+      settled = true
+      resolve(upload)
+    }
+
+    let busboy
+    try {
+      busboy = Busboy({
+        headers: request.headers,
+        limits: { files: maxFiles, fileSize: maxFileBytes, fields: 10, fieldSize: MAX_FIELD_BYTES },
+      })
+    } catch (error) {
+      fail(new UploadError(400, 'INVALID_MULTIPART', messageOf(error)))
+      return
+    }
+
+    const files: MultipartFile[] = []
+    const fields: Record<string, string> = {}
+    let tooLarge: string | undefined
+    let tooMany = false
+
+    busboy.on('file', (name, stream, info) => {
+      const filename = safeFilename(info.filename ?? 'file')
+      const mimeType = info.mimeType || 'application/octet-stream'
+      if (name !== field) {
+        stream.resume()
+        return
+      }
+      const chunks: Buffer[] = []
+      let size = 0
+      let skipped = false
+      stream.on('data', (chunk: Buffer) => {
+        size += chunk.length
+        if (size > maxFileBytes) {
+          tooLarge ??= filename
+          skipped = true
+          return
+        }
+        chunks.push(chunk)
+      })
+      stream.on('limit', () => {
+        tooLarge ??= filename
+        skipped = true
+      })
+      stream.on('end', () => {
+        if (!skipped) files.push({ field: name, buffer: Buffer.concat(chunks), filename, mimeType })
+      })
+      stream.on('error', (error) => fail(new UploadError(400, 'INVALID_UPLOAD', messageOf(error))))
+    })
+
+    busboy.on('field', (name, value) => {
+      fields[name] = value
+    })
+    busboy.on('filesLimit', () => {
+      tooMany = true
+    })
+    busboy.on('fieldsLimit', () => {
+      fail(new UploadError(400, 'TOO_MANY_FIELDS', 'too many multipart fields'))
+    })
+    busboy.on('error', (error) => {
+      fail(new UploadError(400, 'INVALID_MULTIPART', messageOf(error)))
+    })
+    busboy.on('close', () => {
+      if (tooMany) {
+        fail(new UploadError(400, 'TOO_MANY_FILES', `at most ${maxFiles} files may be uploaded per request`))
+        return
+      }
+      if (tooLarge !== undefined) {
+        fail(new UploadError(413, 'ATTACHMENT_TOO_LARGE', `"${tooLarge}" exceeds ${Math.round(maxFileBytes / 1024 / 1024)} MB`))
+        return
+      }
+      if (files.length === 0) {
+        fail(new UploadError(400, 'FILES_REQUIRED', `at least one file is required in the "${field}" field`))
+        return
+      }
+      succeed({ files, fields })
+    })
+
+    request.on('aborted', () => fail(new UploadError(400, 'UPLOAD_ABORTED', 'upload was aborted')))
+    request.pipe(busboy)
+  })
+}
