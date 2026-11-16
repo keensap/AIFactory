@@ -1530,6 +1530,35 @@ paths:
                     items:
                       $ref: '#/components/schemas/StageReview'
 
+  /api/stage-runs/{runId}/telemetry:
+    get:
+      tags: [stage-runs]
+      summary: Live run telemetry for a status bar
+      description: Folded from the run's stored events using the same logic as the SSE stream. Null fields mean the figure cannot be computed yet, never zero.
+      parameters:
+        - {name: runId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Telemetry snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  telemetry: {$ref: '#/components/schemas/RunTelemetry'}
+        '404':
+          description: STAGE_RUN_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: STAGE_RUNTIME_DISABLED or WORKSPACE_NOT_CONFIGURED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/stage-runs/{runId}/events:
     parameters:
       - $ref: '#/components/parameters/RunId'
@@ -2100,6 +2129,44 @@ components:
         usd: {type: [number, 'null']}
         pricedTokens: {type: integer}
         unpricedTokens: {type: integer}
+    RunTelemetry:
+      type: object
+      description: Everything a run status bar shows. Null means "cannot be computed", never zero.
+      properties:
+        turns: {type: integer, description: Highest turn number seen}
+        steps: {type: integer, description: Completed steps}
+        phase: {type: [string, 'null']}
+        usage: {$ref: '#/components/schemas/TelemetryUsage'}
+        lastStep:
+          allOf:
+            - $ref: '#/components/schemas/TelemetryUsage'
+            - type: object
+              properties:
+                durationMs: {type: [integer, 'null']}
+                tokensPerSecond: {type: [number, 'null']}
+        tokensPerSecond: {type: [number, 'null'], description: Output tokens per second of the last step}
+        averageTokensPerSecond: {type: [number, 'null']}
+        cacheHitPercent: {type: [number, 'null'], description: cacheRead / (input + cacheRead + cacheWrite) * 100}
+        contextUsedTokens: {type: [integer, 'null'], description: Prompt tokens of the last step}
+        contextWindow: {type: [integer, 'null']}
+        contextUsedPercent: {type: [number, 'null']}
+        model:
+          oneOf:
+            - type: object
+              properties:
+                provider: {type: string}
+                model: {type: string}
+            - type: 'null'
+        startedAt: {type: [string, 'null'], format: date-time}
+        updatedAt: {type: [string, 'null'], format: date-time}
+    TelemetryUsage:
+      type: object
+      properties:
+        input: {type: integer, description: Excludes cached tokens}
+        output: {type: integer}
+        total: {type: integer, description: Includes cache read and write}
+        cacheRead: {type: integer}
+        cacheWrite: {type: integer}
     ModelUsageRow:
       type: object
       description: provider and model are both null for usage recorded before model attribution existed (unattributed).

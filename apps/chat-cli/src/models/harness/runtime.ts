@@ -42,6 +42,8 @@ export interface ModelRuntimeStatus {
   applied: boolean
   provider: string | null
   model: string | null
+  /** Context window of the applied model, when the catalogue knows it. */
+  contextWindow: number | null
   source: string | null
   patchPath: string | null
   warnings: string[]
@@ -64,6 +66,12 @@ export interface ModelPin {
   harness(cwd?: string, timeoutMs?: number): DshHarness
   /** Idempotent. */
   release(): void
+}
+
+function contextWindowFor(models: readonly ModelRecord[], provider: string, model: string): number | null {
+  const entry = models.find((candidate) => candidate.provider === provider && candidate.model === model)
+  const window = entry?.contextWindow ?? entry?.capabilities.contextWindow ?? 0
+  return window > 0 ? window : null
 }
 
 function priceFor(models: readonly ModelRecord[], provider: string, model: string): ModelPrice | null {
@@ -94,6 +102,8 @@ export class ModelRuntime {
   private attribution: ModelAttribution | null = null
   /** Patch files held by in-flight runs; never pruned while leased. */
   private readonly leases = new Map<string, number>()
+  /** Makes patch file names unique even when two refreshes land in one millisecond. */
+  private patchSequence = 0
 
   constructor(options: ModelRuntimeOptions) {
     this.service = options.service
@@ -114,6 +124,7 @@ export class ModelRuntime {
       applied: this.patchPath !== null,
       provider: this.resolved?.target?.provider ?? null,
       model: this.resolved?.target?.model ?? null,
+      contextWindow: this.attribution?.contextWindow ?? null,
       source: this.resolved?.source ?? null,
       patchPath: this.patchPath,
       warnings: [...this.warnings],
@@ -144,6 +155,7 @@ export class ModelRuntime {
         model: patch.model,
         source: resolved.source,
         price: priceFor(models, patch.provider, patch.model),
+        contextWindow: contextWindowFor(models, patch.provider, patch.model),
       }
       this.lastError = null
       if (this.validate) {
@@ -225,7 +237,10 @@ export class ModelRuntime {
 
   private async writePatch(content: string): Promise<string> {
     await mkdir(this.patchDir, { recursive: true, mode: 0o700 })
-    const finalPath = join(this.patchDir, `model-target-${this.now()}.json`)
+    // Timestamp plus a sequence: two refreshes in the same millisecond must not
+    // produce the same name, or a new patch would overwrite one a run holds.
+    this.patchSequence += 1
+    const finalPath = join(this.patchDir, `model-target-${this.now()}-${String(this.patchSequence).padStart(4, '0')}.json`)
     const tempPath = `${finalPath}.tmp`
     await writeFile(tempPath, content, { encoding: 'utf8', mode: 0o600 })
     await chmod(tempPath, 0o600).catch(() => {})

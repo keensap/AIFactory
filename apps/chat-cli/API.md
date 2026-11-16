@@ -795,6 +795,54 @@ Limits: `prompt` ≤ 2000 characters (default `Reply with the single word: ok`),
 
 An entry with `provider: null, model: null` is **unattributed** usage (recorded before attribution existed); it is never guessed. `calls` is the number of usage events.
 
+### Run telemetry (status bar)
+
+Live numbers for a run come from one place, so the status bar and a reloaded page always agree.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/stage-runs/:runId/telemetry` | Current telemetry folded from stored events |
+| `GET` | `/api/stage-runs/:runId/events/stream` | SSE: now also emits `event: telemetry` on connect and after changes |
+| `POST` | `/api/chat/stream` | SSE: now also emits `event: telemetry`, and `status` events carry `usage` |
+
+```json
+{ "telemetry": {
+    "turns": 1, "steps": 2, "phase": "step_end",
+    "usage": { "input": 4000, "output": 1500, "total": 5500, "cacheRead": 8000, "cacheWrite": 0 },
+    "lastStep": { "input": 2000, "output": 1000, "total": 3000, "cacheRead": 8000, "cacheWrite": 0,
+                  "durationMs": 4000, "tokensPerSecond": 250 },
+    "tokensPerSecond": 250,
+    "averageTokensPerSecond": 187.5,
+    "cacheHitPercent": 66.7,
+    "contextUsedTokens": 10000,
+    "contextWindow": 200000,
+    "contextUsedPercent": 5,
+    "model": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
+    "startedAt": "2026-11-16T09:00:00.000Z",
+    "updatedAt": "2026-11-16T09:00:04.000Z" } }
+```
+
+| Field | Meaning |
+|---|---|
+| `turns` | Highest turn number seen |
+| `steps` | Completed steps (`step_end` events) |
+| `phase` | Phase of the last status event |
+| `usage` | Cumulative tokens for the run |
+| `lastStep` | Tokens and duration of the most recent step that reported usage |
+| `tokensPerSecond` | Output tokens ÷ last-step duration; **the live figure** for a status bar |
+| `averageTokensPerSecond` | Output tokens ÷ time across all timed steps |
+| `cacheHitPercent` | `cacheRead ÷ (input + cacheRead + cacheWrite) × 100` |
+| `contextUsedTokens` | Prompt size of the last step (input + cache reads + cache writes) |
+| `contextWindow` | The model's context window, from the catalogue when the run started |
+| `contextUsedPercent` | `contextUsedTokens ÷ contextWindow × 100` |
+| `model` | Provider/model stamped by the run's pin; `null` with the harness default |
+
+**Null means "cannot be computed", never zero.** `tokensPerSecond` is `null` until a step with both start and end is seen; `cacheHitPercent` is `null` with no prompt tokens; `contextUsedPercent` is `null` without a known window. Render them as "—".
+
+**Why the numbers are trustworthy:** the run pins its model, price and context window when it starts, and those are stamped onto every usage event, so a reload or a later catalogue change cannot change a finished run's telemetry.
+
+**A step without usage still counts** toward `steps` but contributes no tokens — the harness omits usage when an attempt failed to report it, and inventing a number would be worse.
+
 ### Factory-wide usage report
 
 `GET /api/models/usage?days=30` (or `from=` / `to=`) — **admin only**, because it spans every project. `days` must be digits only, 1–365 (`1.5` and `7abc` are rejected). It reads stored events, so it works without the model catalogue and returns `503 WORKSPACE_NOT_CONFIGURED` only when there is no database.

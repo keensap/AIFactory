@@ -7,6 +7,7 @@ import test from 'node:test'
 import { Pool } from 'pg'
 import { PostgresProjectStore } from '../src/projects.ts'
 import { PostgresProjectWorkspace } from '../src/workspace.ts'
+import { telemetryFromEvents } from '../src/telemetry.ts'
 
 const url = process.env.AIFACTORY_TEST_DATABASE_URL
 const skip = url === undefined || url === '' ? 'AIFACTORY_TEST_DATABASE_URL is not set' : false
@@ -31,7 +32,8 @@ async function setup() {
   }
   const status = async (ids: { project: { id: string }; run: { id: string } }, role: string, payload: Record<string, unknown>) => {
     const event = await workspace.appendStageRunEvent({
-      projectId: ids.project.id, stageRunId: ids.run.id, role, type: 'status', level: 'debug', payload: { phase: 'step_end', ...payload },
+      // The sink stores the whole harness event, so the payload carries `type` too.
+      projectId: ids.project.id, stageRunId: ids.run.id, role, type: 'status', level: 'debug', payload: { type: 'status', phase: 'step_end', ...payload },
     })
     return event.id
   }
@@ -130,8 +132,10 @@ test('factory usage aggregates across projects with names, days and coverage', {
       await t.status(p1, 'author', { usage: usage(2000, 1000), model: cloud, costUsd: 0.02 }),
       await t.status(p2, 'analyzer', { usage: usage(400, 100), model: local }),
     ]
-    // Move my events into a private window so other tests' data cannot interfere.
-    const moment = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000)
+    // Move my events into a private window so neither other tests nor earlier
+    // runs of this file can interfere. The offset differs on every run.
+    const offsetMs = (40 + Math.floor(Math.random() * 300)) * 24 * 60 * 60 * 1000 + Math.floor(Math.random() * 3_600_000)
+    const moment = new Date(Date.now() - offsetMs)
     await t.pool.query('UPDATE stage_run_events SET created_at = $2 WHERE id = ANY($1::bigint[])', [ids, moment.toISOString()])
     const window = { from: new Date(moment.getTime() - 60_000).toISOString(), to: new Date(moment.getTime() + 60_000).toISOString() }
 
@@ -175,6 +179,38 @@ test('factory usage validates its range like project stats does', { skip }, asyn
     // The project endpoint keeps the same rules after sharing the helper.
     const a = await t.makeProject(`Range ${randomUUID().slice(0, 8)}`)
     await assert.rejects(() => t.workspace.projectStats({ projectId: a.project.id, days: 0 }), /days must be an integer/)
+  } finally {
+    await t.cleanup()
+  }
+})
+
+test('stored events fold into run telemetry', { skip }, async () => {
+  const t = await setup()
+  try {
+    const a = await t.makeProject(`Telemetry ${randomUUID().slice(0, 8)}`)
+    const start = await t.status(a, 'analyzer', { phase: 'step_start', turn: 1, step: 1 })
+    const end = await t.status(a, 'analyzer', {
+      turn: 1, step: 1,
+      usage: { inputTokens: 2_000, outputTokens: 1_000, totalTokens: 3_000, cacheReadTokens: 8_000, cacheWriteTokens: 0 },
+      model: { provider: 'anthropic', model: 'claude-sonnet-4-5' },
+      contextWindow: 20_000,
+    })
+    // Exactly 4 seconds apart, so throughput is exactly 250 tok/s.
+    const endAt = new Date('2026-01-01T10:00:04.000Z')
+    const startAt = new Date(endAt.getTime() - 4_000)
+    await t.pool.query('UPDATE stage_run_events SET created_at = $2 WHERE id = $1', [start, startAt.toISOString()])
+    await t.pool.query('UPDATE stage_run_events SET created_at = $2 WHERE id = $1', [end, endAt.toISOString()])
+
+    const events = await t.workspace.listStageRunEvents(a.run.id, '0', 1000)
+    const snapshot = telemetryFromEvents(events)
+    assert.equal(snapshot.steps, 1)
+    assert.equal(snapshot.turns, 1)
+    assert.equal(snapshot.tokensPerSecond, 250, '1000 output tokens over 4s')
+    assert.equal(snapshot.cacheHitPercent, 80)
+    assert.equal(snapshot.contextUsedTokens, 10_000)
+    assert.equal(snapshot.contextUsedPercent, 50)
+    assert.deepEqual(snapshot.model, { provider: 'anthropic', model: 'claude-sonnet-4-5' })
+    assert.equal(snapshot.usage.total, 3_000)
   } finally {
     await t.cleanup()
   }

@@ -22,6 +22,12 @@ export interface ModelAttribution {
   source: string
   /** Price in force when the run started; null when the model has none. */
   price: ModelPrice | null
+  /**
+   * The model's context window when the run started, stamped onto usage events
+   * so a run's context percentage stays computable even if the catalogue entry
+   * changes later.
+   */
+  contextWindow: number | null
 }
 
 /** What `role_start` records. `null` means the harness profile default was used. */
@@ -41,7 +47,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Add `model` and `costUsd` to a harness `status` event that carries usage.
+ * Add `model`, `costUsd` and `contextWindow` to a harness `status` event that
+ * carries usage.
  * Every other event, and every event when no attribution is known, is returned
  * unchanged. The input is never mutated.
  */
@@ -53,5 +60,8 @@ export function attributeUsage(event: unknown, attribution: ModelAttribution | n
     ...event,
     model: { provider: attribution.provider, model: attribution.model },
     ...(cost !== undefined ? { costUsd: cost } : {}),
+    ...(attribution.contextWindow !== null && attribution.contextWindow > 0
+      ? { contextWindow: attribution.contextWindow }
+      : {}),
   }
 }

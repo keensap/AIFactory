@@ -36,6 +36,9 @@ const text = role === 'reviewer'
     ? '# TELOS Feasibility Report\n\n## 10. Recommendation\n\nDecision: **Go**\n'
     : '# Planning analysis\n\n- Business idea: portal.\n'
 emit({ type: 'status', phase: 'step_start', turn: 1, step: 1 })
+// Optional dwell so a live demo has a measurable step duration.
+const delay = Number(process.env.STEP_DELAY_MS ?? 0)
+if (Number.isFinite(delay) && delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
 emit({ type: 'text', text })
 emit({ type: 'status', phase: 'step_end', turn: 1, step: 1, usage })
 emit({ type: 'final', sessionId: `s-${role}`, reason: { kind: 'completed' }, text })

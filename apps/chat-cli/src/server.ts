@@ -41,7 +41,8 @@ import { SemanticIndexError, type SemanticIndexService } from './semantic-index.
 import { VectorStoreError } from './vector-store.ts'
 import { PlanningStageRuntime, StageRuntimeError } from './stage-runtime.ts'
 import { SessionBusyError, SessionNotFoundError, SessionProjectMismatchError, type ChatSession, type SessionStore } from './store.ts'
-import { PostgresProjectWorkspace, WorkspaceError } from './workspace.ts'
+import { PostgresProjectWorkspace, WorkspaceError, type StageRunEvent } from './workspace.ts'
+import { RunTelemetryFolder, telemetryFromEvents, type TelemetryModel } from './telemetry.ts'
 
 const MAX_BODY_BYTES = 1024 * 1024
 const MAX_MESSAGE_BYTES = 64 * 1024
@@ -91,7 +92,12 @@ export interface ChatApiOptions {
 }
 
 export interface ModelRuntimeLike {
-  status(): unknown
+  status(): {
+    provider?: string | null
+    model?: string | null
+    contextWindow?: number | null
+    [key: string]: unknown
+  }
 }
 
 export function createChatServer(options: ChatApiOptions): Server {
@@ -224,6 +230,7 @@ async function route(
         stageDecision: 'POST /api/stage-runs/:runId/decision',
         stageEvents: 'GET /api/stage-runs/:runId/events',
         stageEventStream: 'GET /api/stage-runs/:runId/events/stream',
+        stageTelemetry: 'GET /api/stage-runs/:runId/telemetry',
         semanticIndex: 'POST /api/projects/:id/index',
         semanticSearch: 'GET /api/projects/:id/search?q=...',
         observability: 'GET /api/projects/:id/observability?hours=24',
@@ -633,6 +640,46 @@ async function projectLogs(projectId: string, url: URL, options: ChatApiOptions)
   }
 }
 
+/** Seed for a chat run: the model the harness will use, and its window. */
+function telemetrySeed(runtime?: ModelRuntimeLike): { model?: TelemetryModel; contextWindow?: number } {
+  const status = runtime?.status()
+  if (status === undefined) return {}
+  const provider = typeof status.provider === 'string' ? status.provider : null
+  const model = typeof status.model === 'string' ? status.model : null
+  return {
+    ...(provider !== null && model !== null ? { model: { provider, model } } : {}),
+    ...(typeof status.contextWindow === 'number' && status.contextWindow > 0 ? { contextWindow: status.contextWindow } : {}),
+  }
+}
+
+/**
+ * Page through a run's stored events.
+ *
+ * `upTo` stops at an id (used to seed a reconnecting stream with exactly the
+ * events it has already seen); `maxEvents` bounds memory for very long runs.
+ */
+async function readRunEvents(
+  workspace: PostgresProjectWorkspace,
+  runId: string,
+  options: { upTo?: string; maxEvents?: number } = {},
+): Promise<StageRunEvent[]> {
+  const maxEvents = options.maxEvents ?? 20_000
+  const upTo = options.upTo === undefined || options.upTo === '0' ? undefined : Number(options.upTo)
+  const events: StageRunEvent[] = []
+  let cursor = '0'
+  while (events.length < maxEvents) {
+    const page = await workspace.listStageRunEvents(runId, cursor, 1000)
+    if (page.length === 0) break
+    for (const event of page) {
+      if (upTo !== undefined && Number(event.id) > upTo) return events
+      events.push(event)
+    }
+    cursor = page[page.length - 1]!.id
+    if (page.length < 1000) break
+  }
+  return events
+}
+
 async function streamStageEvents(
   request: IncomingMessage,
   response: ServerResponse,
@@ -673,15 +720,34 @@ async function streamStageEvents(
     after = event.id
   }
 
+  // Telemetry is folded from the same events the client receives, seeded with
+  // whatever it has already seen, so live and reloaded numbers always agree.
+  const folder = new RunTelemetryFolder()
+  try {
+    for (const event of await readRunEvents(workspace, runId, { upTo: after })) {
+      folder.add(event.payload, Date.parse(event.createdAt) || undefined)
+    }
+  } catch {
+    // A seed failure only means the bar starts from zero; streaming continues.
+  }
+  const sendTelemetry = (): void => {
+    if (closed) return
+    response.write(`event: telemetry\ndata: ${JSON.stringify(folder.snapshot())}\n\n`)
+  }
+  sendTelemetry()
+
   const poll = async (): Promise<void> => {
     if (closed || polling) return
     polling = true
+    let changed = false
     try {
       const events = await workspace.listStageRunEvents(runId, after, 1000)
       for (const event of events) {
         if (closed) return
         writeEvent(event)
+        if (folder.add(event.payload, Date.parse(event.createdAt) || undefined)) changed = true
       }
+      if (changed) sendTelemetry()
       const run = await workspace.getStageRun(runId)
       if (run !== undefined && ['completed', 'failed', 'cancelled'].includes(run.status) && events.length === 0) {
         if (!closed) {
@@ -747,6 +813,17 @@ async function handleStageRuns(
       events,
       nextAfter: events.at(-1)?.id ?? after,
     })
+    return
+  }
+  if (rest.length === 2 && rest[1] === 'telemetry' && request.method === 'GET') {
+    if (options.workspace === undefined) {
+      throw new HttpError(503, 'project workspace is disabled', 'WORKSPACE_NOT_CONFIGURED')
+    }
+    if (await options.workspace.getStageRun(runId) === undefined) {
+      throw new HttpError(404, 'stage run not found', 'STAGE_RUN_NOT_FOUND')
+    }
+    const events = await readRunEvents(options.workspace, runId)
+    sendJson(response, 200, { telemetry: telemetryFromEvents(events) })
     return
   }
   if (rest.length === 3 && rest[1] === 'events' && rest[2] === 'stream' && request.method === 'GET') {
@@ -1201,6 +1278,7 @@ async function handleChatStream(
   const scope = await resolveChatScope(input, options)
   const release = acquire(options.store, input.sessionId)
   const harness = options.harnessFactory(scope.cwd)
+  const telemetry = new RunTelemetryFolder(telemetrySeed(options.modelRuntime))
   const started = Date.now()
   let clientGone = false
 
@@ -1237,7 +1315,9 @@ async function handleChatStream(
               phase: event.phase,
               ...(event.turn !== undefined ? { turn: event.turn } : {}),
               ...(event.step !== undefined ? { step: event.step } : {}),
+              ...(event.usage !== undefined ? { usage: event.usage } : {}),
             })
+            if (telemetry.add(event)) send('telemetry', telemetry.snapshot())
             break
           case 'text':
             if (typeof event.text === 'string' && event.text !== '') send('text', { text: event.text })

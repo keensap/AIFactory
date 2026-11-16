@@ -128,7 +128,7 @@ async function runWith(options: { pin?: ModelPin | undefined; harnessEnv?: Recor
 const events = (workspace: PostgresProjectWorkspace): StageRunEvent[] => (workspace as unknown as { events: StageRunEvent[] }).events
 
 test('role_start records the pinned model and usage events carry model and cost', async () => {
-  const pin = fakePin({ provider: 'anthropic', model: 'claude-sonnet-4-5', source: 'settings', price: { input: 3, output: 15 } })
+  const pin = fakePin({ provider: 'anthropic', model: 'claude-sonnet-4-5', source: 'settings', price: { input: 3, output: 15 }, contextWindow: 200_000 })
   const { runtime, workspace, started, root } = await runWith({ pin })
   try {
     await runtime.execute(started.id)
@@ -140,8 +140,9 @@ test('role_start records the pinned model and usage events carry model and cost'
     const usage = events(workspace).filter((event) => event.type === 'status' && (event.payload as { usage?: unknown }).usage !== undefined)
     assert.equal(usage.length, 3, 'one step_end per role')
     for (const event of usage) {
-      const payload = event.payload as { model: unknown; costUsd: number; usage: { inputTokens: number } }
+      const payload = event.payload as { model: unknown; costUsd: number; contextWindow: number; usage: { inputTokens: number } }
       assert.deepEqual(payload.model, { provider: 'anthropic', model: 'claude-sonnet-4-5' })
+      assert.equal(payload.contextWindow, 200_000, 'the window is stamped so context % stays computable later')
       // 1000 * 3 + 500 * 15 = 10500 per million
       assert.equal(payload.costUsd, 0.0105)
       assert.equal(payload.usage.inputTokens, 1000, 'the original usage is preserved')
@@ -155,7 +156,7 @@ test('role_start records the pinned model and usage events carry model and cost'
 })
 
 test('a model without a price is attributed but has no cost (unknown, not free)', async () => {
-  const pin = fakePin({ provider: 'llamacpp', model: 'qwen3-8b', source: 'environment', price: null })
+  const pin = fakePin({ provider: 'llamacpp', model: 'qwen3-8b', source: 'environment', price: null, contextWindow: 32_768 })
   const { runtime, workspace, started, root } = await runWith({ pin })
   try {
     await runtime.execute(started.id)
@@ -171,7 +172,7 @@ test('a model without a price is attributed but has no cost (unknown, not free)'
 })
 
 test('a free local model (price 0) records a cost of 0', async () => {
-  const pin = fakePin({ provider: 'llamacpp', model: 'qwen3-8b', source: 'settings', price: { input: 0, output: 0 } })
+  const pin = fakePin({ provider: 'llamacpp', model: 'qwen3-8b', source: 'settings', price: { input: 0, output: 0 }, contextWindow: 32_768 })
   const { runtime, workspace, started, root } = await runWith({ pin })
   try {
     await runtime.execute(started.id)
@@ -209,7 +210,7 @@ test('an unconfigured pin (null attribution) is recorded as the harness default'
 })
 
 test('the pin is released even when a role fails', async () => {
-  const pin = fakePin({ provider: 'openai', model: 'gpt-4o', source: 'settings', price: { input: 1, output: 1 } }, { FAIL_ROLE: 'author' })
+  const pin = fakePin({ provider: 'openai', model: 'gpt-4o', source: 'settings', price: { input: 1, output: 1 }, contextWindow: 128_000 }, { FAIL_ROLE: 'author' })
   const { runtime, started, root } = await runWith({ pin })
   try {
     await assert.rejects(() => runtime.execute(started.id), /author failed/)
@@ -220,7 +221,7 @@ test('the pin is released even when a role fails', async () => {
 })
 
 test('every role of a run uses the pinned harness, not the factory one', async () => {
-  const pin = fakePin({ provider: 'openai', model: 'gpt-4o', source: 'settings', price: null })
+  const pin = fakePin({ provider: 'openai', model: 'gpt-4o', source: 'settings', price: null, contextWindow: 128_000 })
   const { runtime, started, root } = await runWith({ pin, harnessEnv: { FAIL_ROLE: 'analyzer' } })
   try {
     // harnessFactory would fail the analyzer; the pin's harness does not.

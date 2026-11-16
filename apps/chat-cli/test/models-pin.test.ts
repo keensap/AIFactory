@@ -16,7 +16,10 @@ import { fakeWorkspace } from './support/fake-stage-workspace.ts'
 
 const USAGE_SCRIPT = fileURLToPath(new URL('./support/usage-dsh.mjs', import.meta.url))
 
-function build(initial: ModelTarget | null = { provider: 'openai', model: 'gpt-4o', fallback: [] }) {
+function build(
+  initial: ModelTarget | null = { provider: 'openai', model: 'gpt-4o', fallback: [] },
+  options: { now?: () => number } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), 'aifactory-pin-'))
   const catalog = new MemoryCatalog(
     [
@@ -35,6 +38,7 @@ function build(initial: ModelTarget | null = { provider: 'openai', model: 'gpt-4
     patchDir: join(dir, 'patches'),
     env: { OPENAI_API_KEY: 'sk-test-key-for-pin-tests-0123456789' },
     validate: false,
+    ...(options.now !== undefined ? { now: options.now } : {}),
   })
   service.setTargetChangeHandler(async () => { await runtime.refresh() })
   const patchFiles = (): string[] => (existsSync(join(dir, 'patches')) ? readdirSync(join(dir, 'patches')).filter((name) => name.endsWith('.json')) : [])
@@ -48,12 +52,12 @@ test('a pin freezes attribution and price; later changes affect only new pins', 
   try {
     await runtime.refresh()
     const first = runtime.pin()
-    assert.deepEqual(first.attribution, { provider: 'openai', model: 'gpt-4o', source: 'settings', price: { input: 2.5, output: 10 } })
+    assert.deepEqual(first.attribution, { provider: 'openai', model: 'gpt-4o', source: 'settings', price: { input: 2.5, output: 10 }, contextWindow: 128_000 })
 
     await service.setPrice('openai', 'gpt-4o', { input: 5, output: 20 })
     await service.updateTarget({ provider: 'llamacpp', model: 'qwen3-8b' })
     const second = runtime.pin()
-    assert.deepEqual(second.attribution, { provider: 'llamacpp', model: 'qwen3-8b', source: 'settings', price: { input: 0, output: 0 } })
+    assert.deepEqual(second.attribution, { provider: 'llamacpp', model: 'qwen3-8b', source: 'settings', price: { input: 0, output: 0 }, contextWindow: 32_768 })
     assert.deepEqual(first.attribution?.price, { input: 2.5, output: 10 }, 'the first pin keeps the price in force when it was taken')
     assert.equal(first.attribution?.provider, 'openai')
     first.release()
@@ -261,6 +265,27 @@ test('changing or clearing the target mid-run does not change the model of later
       else process.env[key] = value
     }
     rmSync(root, { recursive: true, force: true })
+    cleanup()
+  }
+})
+
+test('two refreshes in the same millisecond never share a patch file', async () => {
+  // Frozen clock: without unique names these two writes would hit the same path
+  // and overwrite a patch that a running stage run is still using.
+  const { runtime, service, patchFiles, cleanup } = build(undefined, { now: () => 1_700_000_000_000 })
+  try {
+    await runtime.refresh()
+    const pinned = runtime.pin()
+    const held = runtime.status().patchPath!
+    await service.updateTarget({ provider: 'llamacpp', model: 'qwen3-8b' })
+    const next = runtime.status().patchPath!
+    assert.notEqual(next, held, 'the frozen clock did not hide the collision')
+    assert.ok(existsSync(held), 'the leased patch is intact')
+    assert.deepEqual(JSON.parse(readFileSync(held, 'utf8'))[1].config.provider, 'openai')
+    assert.deepEqual(JSON.parse(readFileSync(next, 'utf8'))[1].config.provider, 'llamacpp')
+    assert.equal(new Set(patchFiles()).size, patchFiles().length, 'file names are unique')
+    pinned.release()
+  } finally {
     cleanup()
   }
 })

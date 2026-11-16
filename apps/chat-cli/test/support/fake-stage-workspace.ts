@@ -110,6 +110,13 @@ export function fakeWorkspace(): PostgresProjectWorkspace {
       return doc
     },
     async updateDocumentStatus() { return documents[0]! },
+    async listStageRunEvents(stageRunId: string, after = '0', limit = 200) {
+      const cursor = Number.parseInt(after, 10) || 0
+      return events
+        .filter((event) => event.stageRunId === stageRunId && Number(event.id) > cursor)
+        .sort((a, b) => Number(a.id) - Number(b.id))
+        .slice(0, Math.min(Math.max(limit, 1), 1000))
+    },
     async updateChecklistItem(_projectId: string, _stage: string, key: string, status: unknown, evidence?: string | null) {
       checklistUpdates.push({ key, status, evidence })
       return snapshot().checklist[0]!

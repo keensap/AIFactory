@@ -608,6 +608,33 @@ Two problems surfaced before any stats code could be written.
 - **Retries inside the harness are not visible.** `dsh` retries internally and reports one usage figure per step; a failed attempt's tokens are included only if the harness reports them.
 - A per-run **budget or alert** on cost, and exporting the report (CSV), are not implemented.
 
+## 10.6 Run telemetry / status bar (2026-11-16)
+
+Goal: the numbers the operator sees while a run is happening — turns, steps, tokens per second, tokens consumed, cache-hit %, context consumed % — like the harness UI status bar.
+
+**Everything was already in the event stream.** The harness emits `status` events with `turn`, `step`, `phase` and `usage`; Phase 4 already stamped `model`, `costUsd` and (from this change) `contextWindow` onto usage events. Three things were missing:
+
+| Gap | Fix |
+|---|---|
+| The chat SSE projection dropped `usage` (it forwarded only phase/turn/step) | Forwards `usage`; both streams now emit a `telemetry` event |
+| Nothing computed t/s, cache-hit or context % | `src/telemetry.ts`: one pure, incremental `RunTelemetryFolder` |
+| The context window was not attached to a run | Stamped onto usage events by the pin, so a finished run keeps its percentage even if the catalogue changes |
+
+**Design decisions**
+
+- **One folder, three consumers** (chat SSE, stage SSE, history endpoint), so live and reloaded numbers cannot disagree. The client never folds events itself.
+- **`null` means "not computable yet", never 0** (`tokensPerSecond` before the first complete step, `cacheHitPercent` with no prompt tokens, `contextUsedPercent` without a window).
+- **Cache hit uses the prompt total** (`cacheRead / (input + cacheRead + cacheWrite)`), consistent with the convention that `inputTokens` excludes cached tokens.
+- **Context % is the last step's prompt**, not the cumulative tokens, because the context window is refilled per step by compaction.
+- **A step without usage still counts as a step** but adds no tokens: the harness omits usage when an attempt failed to report it, and inventing a number would be worse than a gap.
+- **Resumable streams seed from stored events** up to the client's last event id, so a reconnect cannot double count.
+
+**Bug found while testing:** patch files were named `model-target-${Date.now()}.json`, so two refreshes in the same millisecond produced the same path and **overwrote a patch a running stage run was still using** — the exact failure the per-run pin exists to prevent. Names now include a sequence. A test with a frozen clock fails without the fix.
+
+**UI:** `docs/ui/RUN-TELEMETRY-STATUS-BAR-PROMPT.md`.
+
+**Not done:** no persistence of telemetry (it is derived on demand); no per-role bars; no client-side estimation; no historical chart of t/s.
+
 ## 11. Test strategy
 
 - **Conformance suite** (same shape as `test/observability-contract.test.ts`): every engine must satisfy usage normalization, error mapping, capability rejection, timeout, and non-throwing behavior.
