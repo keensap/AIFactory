@@ -236,3 +236,94 @@ test('each planning role runs with its assigned agent composition', async () => 
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+// ---- probe -------------------------------------------------------------
+
+test('materialiseAgent writes the patch and SKILL.md, and cleans up the patch', async () => {
+  const { materialiseAgent } = await import('../src/agent-patch.ts')
+  const dir = mkdtempSync(join(tmpdir(), 'aifactory-materialise-'))
+  try {
+    const agent = {
+      id: 'agent-1',
+      persona: 'You are the author.',
+      model: 'author-model',
+      reasoningEffort: null,
+      tools: ['tool-fs'],
+      skills: [{ name: 'telos-writing', description: 'Write TELOS', instructions: '# TELOS\n' }],
+    }
+    const materialised = await materialiseAgent(dir, agent, {
+      provider: 'acme',
+      model: 'base-model',
+      routes: { acme: { api: 'openai-completions', baseURL: 'http://x', models: [{ id: 'base-model' }] } },
+    })
+    const rows = JSON.parse(readFileSync(materialised.patchPath, 'utf8')) as Array<Record<string, unknown>>
+    assert.ok(rows.some((row) => row.id === 'system-prompt'))
+    assert.ok(rows.some((row) => row.id === 'agent-default-model'))
+
+    const skill = join(dir, '.aifactory', 'agents', 'agent-1', 'skills', 'telos-writing', 'SKILL.md')
+    assert.equal(existsSync(skill), true)
+    assert.match(readFileSync(skill, 'utf8'), /name: telos-writing/)
+
+    await materialised.cleanup()
+    assert.equal(existsSync(materialised.patchPath), false, 'the patch is removed')
+    assert.equal(existsSync(skill), true, 'skills stay for inspection')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the probe endpoint reports a composition and refuses when unavailable', async () => {
+  const { createChatServer, serverPort } = await import('../src/server.ts')
+  const { SessionStore } = await import('../src/store.ts')
+  const { DshHarness } = await import('../src/harness.ts')
+  const { ProjectService } = await import('../src/projects.ts')
+  const { SettingsService } = await import('../src/settings.ts')
+  const { MemoryProjectStore } = await import('./support/memory-project-store.ts')
+  const { MemorySettingsStore } = await import('./support/memory-settings-store.ts')
+
+  const store = memoryStore()
+  const service = new AgentService(store)
+  const agent = await service.create(AUTHOR)
+  const dataDir = mkdtempSync(join(tmpdir(), 'aifactory-agent-api-'))
+  const projects = new ProjectService(new MemoryProjectStore(), new SettingsService(new MemorySettingsStore()))
+
+  const start = async (probe?: (agent: AgentRecord) => Promise<unknown>) => {
+    const server = createChatServer({
+      harnessFactory: () => new DshHarness({ command: process.execPath, commandArgs: ['-e', ''] }),
+      store: new SessionStore({ dataDir }),
+      version: 'test',
+      projects,
+      agents: service,
+      ...(probe !== undefined ? { probeAgent: probe } : {}),
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    return { server, base: `http://127.0.0.1:${serverPort(server)}` }
+  }
+
+  const withProbe = await start(async (probed) => ({
+    ok: true,
+    configAccepted: true,
+    config: { persona: true, model: probed.model, tools: 2, skills: ['telos-writing'], patchRows: 4 },
+    model: { ok: true, reply: 'READY' },
+  }))
+  try {
+    const response = await fetch(`${withProbe.base}/api/agents/${agent.id}/test`, { method: 'POST' })
+    assert.equal(response.status, 200)
+    const body = await response.json() as { ok: boolean; configAccepted: boolean; model: { reply: string } }
+    assert.equal(body.ok, true)
+    assert.equal(body.configAccepted, true)
+    assert.equal(body.model.reply, 'READY')
+  } finally {
+    await new Promise<void>((resolve) => withProbe.server.close(() => resolve()))
+  }
+
+  const withoutProbe = await start()
+  try {
+    const response = await fetch(`${withoutProbe.base}/api/agents/${agent.id}/test`, { method: 'POST' })
+    assert.equal(response.status, 503)
+    assert.equal(((await response.json()) as { error: { code: string } }).error.code, 'AGENT_PROBE_NOT_CONFIGURED')
+  } finally {
+    await new Promise<void>((resolve) => withoutProbe.server.close(() => resolve()))
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})

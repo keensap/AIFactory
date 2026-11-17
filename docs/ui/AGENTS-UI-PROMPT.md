@@ -45,6 +45,15 @@ Planning
 - Clearing a project override should say it "falls back to the Factory default", not "removes the agent".
 - `400 NO_PROCESSES` means the stage has no runtime yet: hide the panel rather than showing an error.
 
+### 4. Test an agent
+
+A **Test this agent** button in the editor calls `POST /api/agents/:id/test` and shows two results, not one:
+
+- *Composition accepted* — from `configAccepted`; if false, show `model.message` (a plugin/config problem).
+- *Model reply* — from `model`: the `reply` text on success, or `MODEL_CALL_FAILED` / `MODEL_NOT_CONFIGURED` with the provider message.
+
+Never collapse these into one "passed/failed": a missing API key is not a broken agent. Show the `config` summary (persona on/off, model, tool count, skills) beside the result.
+
 ## Rules
 
 - Admin-only for every write (`POST/PATCH/DELETE /api/agents`, `PUT/DELETE …/assignments/…`). Non-admins see a read-only view.

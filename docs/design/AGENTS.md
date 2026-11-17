@@ -91,16 +91,26 @@ An agent with no persona, no model and no tool restrictions produces an empty pa
 | `GET` | `/api/stages/:stage/assignments?projectId=` | Resolved assignments |
 | `PUT` | `/api/stages/:stage/assignments/:process` | Assign `{ agentId, projectId? }` (admin) |
 | `DELETE` | `/api/stages/:stage/assignments/:process` | Clear (admin) |
+| `POST` | `/api/agents/:id/test` | Boot the composition and report (admin) |
 
 Assignments carry `source`: `project`, `factory` or `none`.
 
-## 7. Limits worth knowing
+## 7. Testing a composition
+
+`POST /api/agents/:id/test` runs the real materialiser and starts a harness with the agent patch and a one-word prompt. It separates two questions that are easy to conflate:
+
+- **Was the composition accepted?** (`configAccepted`) — deterministic, and the only thing a config dump can honestly claim. A bad plugin row or patch shape fails here.
+- **Did the model answer?** (`model`) — needs credentials, so a `MODEL_CALL_FAILED` or `MODEL_NOT_CONFIGURED` is reported without failing the first answer.
+
+A config-file validation is not enough: `dsh --dump-config` does not activate plugins, and the prototype showed a preset with a nonexistent child passing it. Only a boot proves the composition loads.
+
+## 8. Limits worth knowing
 
 - Only `planning` declares processes; other stages return `400 NO_PROCESSES`.
 - Editing an agent affects **new** role runs, not one in flight.
 - Skills are files on disk by design (the harness discovers them); the database holds the definition and the run materialises it.
 - The persona is process-wide inside the harness, which is correct for one-role-per-process. Running several roles in one process would break that assumption — do not "optimise" the runner without revisiting it.
 
-## 8. Tests
+## 9. Tests
 
-`test/agents.test.ts`: name/tool/skill validation, the patch contents (persona, model declared on the same route, disabled tools, skills dir), assignment precedence and clearing, disabled agents, and a stage run where only the assigned author gets a patch while the other roles run unchanged.
+`test/agents.test.ts`: name/tool/skill validation, the patch contents (persona, model declared on the same route, disabled tools, skills dir), assignment precedence and clearing, disabled agents, a stage run where only the assigned author gets a patch while the other roles run unchanged, the shared materialiser, and the probe endpoint (payload and the 503 when unavailable).

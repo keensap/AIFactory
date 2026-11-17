@@ -587,6 +587,21 @@ curl -X PUT /api/stages/planning/assignments/author \
 
 **Validation:** `400 INVALID_AGENT` (shape), `400 INVALID_AGENT_NAME` (not kebab-case), `400 INVALID_AGENT_TOOLS` (unknown tool id), `400 INVALID_AGENT_SKILLS`, `409 AGENT_NAME_TAKEN`, `404 AGENT_NOT_FOUND`, `400 INVALID_PROCESS`, `400 NO_PROCESSES` (stage has no processes yet), `400 AGENT_DISABLED` (assigning a disabled agent).
 
+**Testing an agent.** `POST /api/agents/:id/test` (admin) boots a harness with the agent's composition and asks for one word back:
+
+```json
+{ "ok": true, "configAccepted": true,
+  "config": { "persona": true, "model": "author-model", "tools": 2, "skills": ["telos-writing"], "patchRows": 17 },
+  "model": { "ok": false, "code": "MODEL_CALL_FAILED", "message": "No API key for provider: …" } }
+```
+
+- `configAccepted` is the deterministic part: the patch was written and the harness started with it. A config/plugin problem fails here (`COMPOSITION_REJECTED`).
+- `model` reports the actual call separately, because it needs credentials: `ok: true` with a `reply`, or `MODEL_CALL_FAILED` with the provider's message. `MODEL_NOT_CONFIGURED` when no target is applied.
+- `ok` is true when the composition was accepted (a model failure does not pretend the composition was proven, and does not fail the check).
+- The probe materialises the same `SKILL.md` bundles a real run uses, then removes its patch file.
+
+`503 AGENT_PROBE_NOT_CONFIGURED` when the server has no model runtime.
+
 **In a run:** each role resolves its agent at start, materialises its skills as `SKILL.md` under `.aifactory/agents/<id>/skills/`, and launches with a patch carrying persona, tool allowlist and model. `role_start` events record `agent`, `agentId` and the effective `model`.
 
 ### Stage prerequisites and readiness

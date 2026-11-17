@@ -7,6 +7,10 @@
  * files stay free of adapter imports.
  */
 
+import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+
 export interface AgentRouteModel {
   id: string
   contextWindow?: number
@@ -112,4 +116,69 @@ export function buildAgentPatch(input: AgentPatchInput): string {
   }
 
   return `${JSON.stringify(rows, null, 2)}\n`
+}
+
+/** The parts of an agent a run needs; `AgentComposition` satisfies it. */
+export interface MaterialisedAgentInput {
+  id: string
+  persona: string | null
+  model: string | null
+  reasoningEffort: string | null
+  tools: string[]
+  skills: Array<{ name: string; description: string; instructions: string }>
+}
+
+export interface MaterialisedAgent {
+  patchPath: string
+  skillsDir: string | null
+  /** Remove the patch file; skill bundles stay for inspection. */
+  cleanup(): Promise<void>
+}
+
+/**
+ * Write an agent's composition into `workspace` as a patch file plus `SKILL.md`
+ * bundles the harness can discover. Shared by stage runs and the probe so both
+ * exercise exactly the same composition.
+ */
+export async function materialiseAgent(
+  workspace: string,
+  agent: MaterialisedAgentInput,
+  options: { provider?: string; model?: string; routes?: Record<string, AgentRouteProfile> } = {},
+): Promise<MaterialisedAgent> {
+  const base = join(workspace, '.aifactory', 'agents', agent.id)
+  let skillsDir: string | null = null
+  if (agent.skills.length > 0) {
+    skillsDir = join(base, 'skills')
+    for (const skill of agent.skills) {
+      const dir = join(skillsDir, skill.name)
+      await mkdir(dir, { recursive: true })
+      const description = skill.description === '' ? skill.name : skill.description
+      await writeFile(
+        join(dir, 'SKILL.md'),
+        `---\nname: ${skill.name}\ndescription: ${JSON.stringify(description)}\n---\n\n${skill.instructions}\n`,
+        'utf8',
+      )
+    }
+  }
+  const content = buildAgentPatch({
+    composition: {
+      persona: agent.persona,
+      model: agent.model,
+      reasoningEffort: agent.reasoningEffort,
+      tools: agent.tools,
+    },
+    ...(options.provider !== undefined ? { provider: options.provider } : {}),
+    ...(options.model !== undefined ? { model: options.model } : {}),
+    ...(options.routes !== undefined ? { routes: options.routes } : {}),
+    ...(skillsDir !== null ? { skillsDir } : {}),
+  })
+  const dir = join(base, 'tmp')
+  await mkdir(dir, { recursive: true })
+  const patchPath = join(dir, `patch-${Date.now()}-${randomUUID().slice(0, 8)}.json`)
+  await writeFile(patchPath, content, 'utf8')
+  return {
+    patchPath,
+    skillsDir,
+    cleanup: async () => { await rm(patchPath, { force: true }).catch(() => {}) },
+  }
 }

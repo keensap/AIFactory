@@ -54,6 +54,20 @@ export interface AgentComposition {
   skills: AgentSkill[]
 }
 
+/** The composition an agent definition represents. */
+export function compositionOf(agent: AgentRecord): AgentComposition {
+  const persona = agent.persona ?? ''
+  return {
+    id: agent.id,
+    name: agent.name,
+    persona: persona === '' ? null : persona,
+    model: agent.model ?? null,
+    reasoningEffort: agent.reasoningEffort ?? null,
+    tools: agent.tools ?? [],
+    skills: agent.skills ?? [],
+  }
+}
+
 export class AgentError extends Error {
   readonly status: number
   readonly code: string
@@ -444,16 +458,7 @@ export class AgentService {
     if (chosen === undefined) return undefined
     const agent = await this.store.get(chosen.agentId)
     if (agent === undefined || agent.enabled === false) return undefined
-    const persona = agent.persona ?? ''
-    return {
-      id: agent.id,
-      name: agent.name,
-      persona: persona === '' ? null : persona,
-      model: agent.model ?? null,
-      reasoningEffort: agent.reasoningEffort ?? null,
-      tools: agent.tools ?? [],
-      skills: agent.skills ?? [],
-    }
+    return compositionOf(agent)
   }
 
   async close(): Promise<void> {

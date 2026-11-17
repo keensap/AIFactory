@@ -1977,6 +1977,37 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/agents/{agentId}/test:
+    post:
+      tags: [agents]
+      summary: Boot the agent's composition and report (admin)
+      parameters:
+        - {name: agentId, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Probe result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentProbe'}
+        '403':
+          description: ADMIN_FORBIDDEN
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: AGENT_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: AGENT_PROBE_NOT_CONFIGURED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/stages/{stage}/assignments:
     get:
       tags: [agents]
@@ -2935,6 +2966,28 @@ components:
             id: {type: string, format: uuid}
             createdAt: {type: string, format: date-time}
             updatedAt: {type: string, format: date-time}
+    AgentProbe:
+      type: object
+      properties:
+        ok: {type: boolean, description: True when the composition was accepted}
+        configAccepted: {type: boolean}
+        config:
+          type: object
+          properties:
+            persona: {type: boolean}
+            model: {type: [string, 'null']}
+            tools: {type: integer}
+            skills:
+              type: array
+              items: {type: string}
+            patchRows: {type: integer}
+        model:
+          type: object
+          properties:
+            ok: {type: boolean}
+            reply: {type: string}
+            code: {type: string, enum: [MODEL_CALL_FAILED, MODEL_NOT_CONFIGURED, COMPOSITION_REJECTED]}
+            message: {type: string}
     AgentAssignment:
       type: object
       properties:

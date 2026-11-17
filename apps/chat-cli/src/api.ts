@@ -8,6 +8,8 @@
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { parseArgs } from 'node:util'
 import {
   findLaunchOnlyDotEnvKeys,
@@ -40,7 +42,8 @@ import { PostgresVectorStore } from './vector-store.ts'
 import { ModelRuntime, ModelService, PostgresModelCatalog, PostgresModelSettingsStore } from './models/index.ts'
 import { PostgresStageSettingsStore, StageSettingsService } from './stage-settings.ts'
 import { PostgresPrerequisiteStore, StagePrerequisiteService } from './stage-prerequisites.ts'
-import { AgentService, PostgresAgentStore } from './agents.ts'
+import { AgentService, PostgresAgentStore, compositionOf, type AgentRecord } from './agents.ts'
+import { materialiseAgent } from './agent-patch.ts'
 import { createObservabilityProvider } from './observability/registry/index.ts'
 import { CachedObservabilityReader, type ObservabilityProvider, type ObservabilityReader, type TraceRecorder } from './observability/index.ts'
 import { PostgresProjectWorkspace, type ProjectDocument } from './workspace.ts'
@@ -422,6 +425,76 @@ async function main(): Promise<void> {
         logger: logging.logger,
       })
 
+  /**
+   * Boot a harness with an agent's composition and ask for one word back.
+   *
+   * `configAccepted` is the deterministic part: the patch boots and the harness
+   * starts. The model call needs credentials, so it is reported separately
+   * instead of pretending the composition was proven when it was not.
+   */
+  const probeAgent = async (agent: AgentRecord) => {
+    const composition = compositionOf(agent)
+    const dir = await mkdtemp(join(tmpdir(), 'aifactory-agent-test-'))
+    const config = {
+      persona: composition.persona !== null,
+      model: composition.model,
+      tools: composition.tools.length,
+      skills: composition.skills.map((skill) => skill.name),
+      patchRows: 0,
+    }
+    try {
+      if (modelRuntime === undefined) {
+        return {
+          ok: false,
+          configAccepted: false,
+          config,
+          model: { ok: false, code: 'MODEL_NOT_CONFIGURED', message: 'no model target is applied; set one in Model settings' },
+        }
+      }
+      const pin = modelRuntime.pin()
+      try {
+        const materialised = await materialiseAgent(dir, composition, {
+          ...(pin.attribution !== null ? { provider: pin.attribution.provider, model: pin.attribution.model } : {}),
+          ...(pin.routes !== null ? { routes: pin.routes } : {}),
+        })
+        try {
+          config.patchRows = (JSON.parse(await readFile(materialised.patchPath, 'utf8')) as unknown[]).length
+          try {
+            const harness = pin.harness(dir, 45_000, materialised.patchPath)
+            const result = await harness.run('Reply with the single word READY.')
+            return {
+              ok: true,
+              configAccepted: true,
+              config,
+              model: { ok: true, reply: result.text.trim().slice(0, 1_000) },
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            // A model/credential/transport failure means the harness booted and
+            // accepted the composition; a config failure means it did not.
+            const modelReached = /MISSING_CREDENTIAL|TRANSPORT|RATE_LIMIT|TIMEOUT|HTTP \d{3}|model|provider/i.test(message)
+            return {
+              ok: modelReached,
+              configAccepted: modelReached,
+              config,
+              model: {
+                ok: false,
+                code: modelReached ? 'MODEL_CALL_FAILED' : 'COMPOSITION_REJECTED',
+                message: message.slice(0, 1_000),
+              },
+            }
+          }
+        } finally {
+          await materialised.cleanup()
+        }
+      } finally {
+        pin.release()
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+
   // Logging control plane: persisted settings, live PostgreSQL sink toggle, admin API.
   const logStore = databaseUrl !== undefined && databaseUrl !== '' && projects !== undefined
     ? new PostgresLogStore(databaseUrl)
@@ -532,6 +605,7 @@ async function main(): Promise<void> {
     ...(stageSettings !== undefined ? { stageSettings } : {}),
     ...(prerequisites !== undefined ? { prerequisites } : {}),
     ...(agents !== undefined ? { agents } : {}),
+    ...(agents !== undefined ? { probeAgent } : {}),
     ...(pdfReview !== undefined ? { pdfReview } : {}),
     ...(workspaceStore !== undefined ? { workspace: workspaceStore } : {}),
     ...(briefing !== undefined ? { briefing } : {}),

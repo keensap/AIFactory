@@ -42,7 +42,7 @@ import { SDLC_STAGES, type ProjectStage } from './sdlc.ts'
 import { SettingsError, type SettingsService } from './settings.ts'
 import { StageSettingsError, type StageSettingsService } from './stage-settings.ts'
 import { PrerequisiteError, type StagePrerequisiteService } from './stage-prerequisites.ts'
-import { AgentError, type AgentService } from './agents.ts'
+import { AgentError, type AgentRecord, type AgentService } from './agents.ts'
 import { SemanticIndexError, type SemanticIndexService } from './semantic-index.ts'
 import { VectorStoreError } from './vector-store.ts'
 import { PlanningStageRuntime, StageRuntimeError } from './stage-runtime.ts'
@@ -77,6 +77,8 @@ export interface ChatApiOptions {
   prerequisites?: StagePrerequisiteService
   /** Named agents and their stage-process assignments. */
   agents?: AgentService
+  /** Boots a harness with an agent's composition; set when a model target exists. */
+  probeAgent?: (agent: AgentRecord) => Promise<unknown>
   /** PDF requirement review. When omitted, the PDF route returns 503. */
   pdfReview?: PdfReviewService
   /** SDLC stage, documents and checklist storage. */
@@ -253,6 +255,7 @@ async function route(
         agents: 'GET/POST /api/agents',
         agent: 'GET/PATCH/DELETE /api/agents/:id',
         agentAssignments: 'GET /api/stages/:stage/assignments, PUT/DELETE /api/stages/:stage/assignments/:process',
+        agentTest: 'POST /api/agents/:id/test',
         attachments: 'GET/POST /api/projects/:id/attachments',
         documentExport: 'GET /api/projects/:id/documents/:documentId/export',
         semanticIndex: 'POST /api/projects/:id/index',
@@ -452,6 +455,14 @@ async function route(
     if (rest.length === 0 && request.method === 'POST') {
       requireAdmin(request, options)
       sendJson(response, 201, { agent: await agents.create(await readJson(request)) })
+      return
+    }
+    if (rest.length === 2 && rest[1] === 'test' && request.method === 'POST') {
+      requireAdmin(request, options)
+      if (options.probeAgent === undefined) {
+        throw new HttpError(503, 'agent probing is unavailable; configure a model target first', 'AGENT_PROBE_NOT_CONFIGURED')
+      }
+      sendJson(response, 200, await options.probeAgent(await agents.get(decodeURIComponent(rest[0]!))))
       return
     }
     if (rest.length === 1) {

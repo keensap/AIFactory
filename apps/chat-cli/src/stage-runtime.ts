@@ -10,7 +10,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { access, mkdir, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { buildAgentPatch } from './agent-patch.ts'
+import { materialiseAgent } from './agent-patch.ts'
 import type { AgentComposition } from './agents.ts'
 import type { DshHarness } from './harness.ts'
 import { StageEventSink } from './stage-event-sink.ts'
@@ -198,6 +198,8 @@ export class PlanningStageRuntime {
   private readonly harnessFactory: (cwd?: string, timeoutMs?: number) => DshHarness
   private readonly runPrompt?: (role: StageRole, prompt: string, cwd: string) => Promise<string>
   private readonly agents?: { composition(input: { projectId: string; stage: string; process: string }): Promise<AgentComposition | undefined> }
+  /** Cleanup for agent patch files, so a run removes exactly what it wrote. */
+  private readonly agentCleanup = new Map<string, () => Promise<void>>()
   private readonly maxReviewCycles: number
   private readonly roleTimeoutMs: number
   private readonly workerId: string
@@ -902,44 +904,26 @@ ${trimmedNote !== undefined && trimmedNote !== '' ? `\n${trimmedNote}\n` : ''}
       this.log.error({ event: 'stage.role.failed', role, durationMs: Date.now() - started, err: error })
       throw new StageRuntimeError(502, 'STAGE_ROLE_FAILED', `${role} failed: ${message}`)
     } finally {
-      if (agentPatch !== null) await rm(agentPatch, { force: true }).catch(() => {})
+      if (agentPatch !== null) {
+        const cleanup = this.agentCleanup.get(agentPatch)
+        this.agentCleanup.delete(agentPatch)
+        if (cleanup !== undefined) await cleanup()
+        else await rm(agentPatch, { force: true }).catch(() => {})
+      }
       await sink.flush()
     }
   }
 
-  /**
-   * Materialise an agent's composition into a patch file for one role run, and
-   * its skills as `SKILL.md` bundles the harness can discover.
-   */
+  /** Materialise an agent's composition for one role run. */
   private async writeAgentPatch(cwd: string, composition: AgentComposition, pin: ModelPin | undefined): Promise<string> {
-    const base = join(cwd, '.aifactory', 'agents', composition.id)
-    let skillsDir: string | undefined
-    if (composition.skills.length > 0) {
-      skillsDir = join(base, 'skills')
-      for (const skill of composition.skills) {
-        const dir = join(skillsDir, skill.name)
-        await mkdir(dir, { recursive: true })
-        const description = skill.description === '' ? skill.name : skill.description
-        await writeFile(
-          join(dir, 'SKILL.md'),
-          `---\nname: ${skill.name}\ndescription: ${JSON.stringify(description)}\n---\n\n${skill.instructions}\n`,
-          'utf8',
-        )
-      }
-    }
-    const content = buildAgentPatch({
-      composition,
+    const materialised = await materialiseAgent(cwd, composition, {
       ...(pin?.attribution !== null && pin?.attribution !== undefined
         ? { provider: pin.attribution.provider, model: pin.attribution.model }
         : {}),
       ...(pin?.routes !== null && pin?.routes !== undefined ? { routes: pin.routes } : {}),
-      ...(skillsDir !== undefined ? { skillsDir } : {}),
     })
-    const dir = join(base, 'tmp')
-    await mkdir(dir, { recursive: true })
-    const path = join(dir, `role-${Date.now()}-${randomUUID().slice(0, 8)}.json`)
-    await writeFile(path, content, 'utf8')
-    return path
+    this.agentCleanup.set(materialised.patchPath, materialised.cleanup)
+    return materialised.patchPath
   }
 
   /**
