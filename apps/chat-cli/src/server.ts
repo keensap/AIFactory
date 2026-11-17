@@ -41,6 +41,7 @@ import { ProjectError, type ProjectService, type ProjectStatus } from './project
 import { SDLC_STAGES, type ProjectStage } from './sdlc.ts'
 import { SettingsError, type SettingsService } from './settings.ts'
 import { StageSettingsError, type StageSettingsService } from './stage-settings.ts'
+import { PrerequisiteError, type StagePrerequisiteService } from './stage-prerequisites.ts'
 import { SemanticIndexError, type SemanticIndexService } from './semantic-index.ts'
 import { VectorStoreError } from './vector-store.ts'
 import { PlanningStageRuntime, StageRuntimeError } from './stage-runtime.ts'
@@ -71,6 +72,8 @@ export interface ChatApiOptions {
   settings?: SettingsService
   /** Planning-stage review settings. When omitted, the settings routes return 503. */
   stageSettings?: StageSettingsService
+  /** Stage prerequisite catalogue and readiness. */
+  prerequisites?: StagePrerequisiteService
   /** PDF requirement review. When omitted, the PDF route returns 503. */
   pdfReview?: PdfReviewService
   /** SDLC stage, documents and checklist storage. */
@@ -241,6 +244,9 @@ async function route(
         stageGate: 'POST /api/stage-runs/:runId/gate',
         stageSettings: 'GET/POST/PATCH/DELETE /api/projects/:id/stages/planning/settings',
         stageDefaults: 'GET/POST/PATCH /api/settings/stage-defaults',
+        stageCatalogue: 'GET /api/stages',
+        stageReadiness: 'GET /api/projects/:id/stages/:stage/readiness',
+        stageWaiver: 'POST/DELETE /api/projects/:id/stages/:stage/waivers',
         attachments: 'GET/POST /api/projects/:id/attachments',
         documentExport: 'GET /api/projects/:id/documents/:documentId/export',
         semanticIndex: 'POST /api/projects/:id/index',
@@ -425,6 +431,15 @@ async function route(
       })),
       postgresEnabled: options.loggingManager?.view().postgresActive ?? false,
     })
+    return
+  }
+
+  if (resource === 'stages' && rest.length === 0 && request.method === 'GET') {
+    const prerequisites = options.prerequisites
+    if (prerequisites === undefined) {
+      throw new HttpError(503, 'stage prerequisites are disabled; set DATABASE_URL', 'PREREQUISITES_NOT_CONFIGURED')
+    }
+    sendJson(response, 200, { stages: await prerequisites.catalogue() })
     return
   }
 
@@ -1137,6 +1152,36 @@ async function handleProjects(
     }
   }
 
+  if (id !== undefined && rest.length >= 4 && rest[1] === 'stages' && (rest[3] === 'readiness' || rest[3] === 'waivers')) {
+    const prerequisites = options.prerequisites
+    if (prerequisites === undefined) {
+      throw new HttpError(503, 'stage prerequisites are disabled; set DATABASE_URL', 'PREREQUISITES_NOT_CONFIGURED')
+    }
+    const stage = decodeURIComponent(rest[2]!)
+    await projects.get(id)
+
+    if (rest[3] === 'readiness' && rest.length === 4 && request.method === 'GET') {
+      sendJson(response, 200, await prerequisites.readiness(id, stage))
+      return
+    }
+    if (rest[3] === 'waivers' && rest.length === 4 && request.method === 'POST') {
+      requireAdmin(request, options)
+      const body = await readJson(request)
+      const record = body !== null && typeof body === 'object' ? body as Record<string, unknown> : {}
+      if (typeof record.key !== 'string' || typeof record.reason !== 'string') {
+        throw new HttpError(400, 'key and reason are required', 'INVALID_WAIVER')
+      }
+      sendJson(response, 200, await prerequisites.waive({ projectId: id, stage, key: record.key, reason: record.reason }))
+      return
+    }
+    if (rest[3] === 'waivers' && rest.length === 5 && request.method === 'DELETE') {
+      requireAdmin(request, options)
+      sendJson(response, 200, await prerequisites.unwaive(id, stage, decodeURIComponent(rest[4]!)))
+      return
+    }
+    throw new HttpError(404, 'not found', 'NOT_FOUND')
+  }
+
   if (id !== undefined && rest.length === 4 && rest[1] === 'stages' && rest[3] === 'settings') {
     const stageSettings = options.stageSettings
     if (stageSettings === undefined) {
@@ -1797,6 +1842,7 @@ function toHttpError(error: unknown): HttpError {
   if (error instanceof AttachmentError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof ExportError) return new HttpError(500, error.message, error.code)
   if (error instanceof ReportPdfError) return new HttpError(500, error.message, error.code)
+  if (error instanceof PrerequisiteError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof StageSettingsError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof ModelSettingsError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof ModelError) return new HttpError(modelErrorStatus(error), error.message, `MODEL_${error.kind.toUpperCase()}`)

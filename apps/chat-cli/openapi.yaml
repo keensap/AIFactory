@@ -1767,6 +1767,113 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
 
+  /api/stages:
+    get:
+      tags: [stage-runs]
+      summary: Stage catalogue with prerequisites
+      responses:
+        '200':
+          description: Every stage and what it needs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stages:
+                    type: array
+                    items: {$ref: '#/components/schemas/StagePrerequisite'}
+        '503':
+          description: PREREQUISITES_NOT_CONFIGURED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/projects/{id}/stages/{stage}/readiness:
+    get:
+      tags: [stage-runs]
+      summary: What a stage needs, and what is already present
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: stage, in: path, required: true, schema: {$ref: '#/components/schemas/ProjectStage'}}
+      responses:
+        '200':
+          description: Readiness
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StageReadiness'}
+        '400':
+          description: INVALID_STAGE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: PREREQUISITES_NOT_CONFIGURED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/projects/{id}/stages/{stage}/waivers:
+    post:
+      tags: [stage-runs]
+      summary: Waive a prerequisite with a reason (admin)
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: stage, in: path, required: true, schema: {$ref: '#/components/schemas/ProjectStage'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, reason]
+              properties:
+                key: {type: string}
+                reason: {type: string, minLength: 3}
+      responses:
+        '200':
+          description: Readiness after the waiver
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StageReadiness'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: ADMIN_FORBIDDEN
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: PREREQUISITE_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/projects/{id}/stages/{stage}/waivers/{key}:
+    delete:
+      tags: [stage-runs]
+      summary: Remove a waiver (admin)
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: stage, in: path, required: true, schema: {$ref: '#/components/schemas/ProjectStage'}}
+        - {name: key, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Readiness after removal
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StageReadiness'}
+        '404':
+          description: WAIVER_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/projects/{id}/stages/planning/settings:
     get:
       tags: [stage-runs]
@@ -2503,6 +2610,53 @@ components:
         usd: {type: [number, 'null']}
         pricedTokens: {type: integer}
         unpricedTokens: {type: integer}
+    StagePrerequisite:
+      type: object
+      properties:
+        stage: {$ref: '#/components/schemas/ProjectStage'}
+        stageLabel: {type: string}
+        key: {type: string}
+        label: {type: string}
+        description: {type: string}
+        required: {type: boolean}
+        accepts:
+          type: array
+          items:
+            type: object
+            properties:
+              kind: {type: string, enum: [brief, attachment, document]}
+              label: {type: string}
+              min: {type: integer}
+              documentKinds:
+                type: array
+                items: {type: string}
+    PrerequisiteStatus:
+      allOf:
+        - $ref: '#/components/schemas/StagePrerequisite'
+        - type: object
+          properties:
+            satisfied: {type: boolean}
+            via: {type: [string, 'null'], enum: [brief, attachment, document, waiver, null]}
+            detail: {type: [string, 'null']}
+    StageReadiness:
+      type: object
+      properties:
+        projectId: {type: string, format: uuid}
+        stage: {$ref: '#/components/schemas/ProjectStage'}
+        ready: {type: boolean}
+        prerequisites:
+          type: array
+          items: {$ref: '#/components/schemas/PrerequisiteStatus'}
+        missing:
+          type: array
+          items:
+            type: object
+            properties:
+              key: {type: string}
+              label: {type: string}
+              accepts:
+                type: array
+                items: {type: string}
     PlanningStageSettings:
       type: object
       properties:

@@ -547,6 +547,47 @@ curl -X POST /api/stage-runs/<runId>/decision -d '{"refine":true}'
 
 Errors: `409 STAGE_RUN_NOT_AT_REVIEW_GATE` (wrong gate kind for `/gate`), `409 STAGE_RUN_NOT_AWAITING_DECISION` (wrong gate kind for `/decision`), `400 INVALID_GATE_ACTION`, `400 INVALID_HUMAN_DECISION`.
 
+### Stage prerequisites and readiness
+
+Every stage declares what it needs before it can run. A prerequisite is satisfied by a brief, an uploaded document, a project document of a given kind, or an **admin waiver with a reason** — so a project can start at any stage when the evidence exists.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/stages` | The catalogue: every stage and its prerequisites |
+| `GET` | `/api/projects/:id/stages/:stage/readiness` | What is present, what is missing |
+| `POST` | `/api/projects/:id/stages/:stage/waivers` | Record a waiver (admin) |
+| `DELETE` | `/api/projects/:id/stages/:stage/waivers/:key` | Remove a waiver (admin) |
+
+```json
+{ "projectId": "…", "stage": "planning", "ready": false,
+  "prerequisites": [ { "key": "project-brief", "label": "Project brief", "required": true,
+    "satisfied": false, "via": null,
+    "accepts": [ { "kind": "brief", "label": "the business brief on a run" },
+                 { "kind": "attachment", "min": 1, "label": "an uploaded document" } ] } ],
+  "missing": [ { "key": "project-brief", "label": "Project brief",
+    "accepts": ["the business brief on a run", "an uploaded document", "a business brief document"] } ] }
+```
+
+`via` is `brief` | `attachment` | `document` | `waiver`.
+
+```bash
+curl -X POST /api/projects/<id>/stages/planning/waivers \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"project-brief","reason":"client supplied the brief verbally"}'
+```
+
+A waiver is stored with its reason and satisfies that prerequisite until removed (`400 INVALID_WAIVER_REASON` for a missing reason, `404 PREREQUISITE_NOT_FOUND` for an unknown key, `404 WAIVER_NOT_FOUND` when removing a non-existent one).
+
+**Enforcement.** Starting a planning run evaluates the same rules, treating the submitted `brief` as evidence. When required evidence is missing, the run is refused:
+
+```
+409 STAGE_PREREQUISITES_MISSING — the planning stage needs: Project brief (project-brief). Provide the evidence or waive it with a reason.
+```
+
+The stage is never started with silently empty context.
+
+The catalogue is seeded in `stage_prerequisites` and can be edited without a deploy. Document kinds are a convention (`telos_report`, `business_brief`, `requirements_spec`, `design_spec`, `architecture_spec`, `tech_stack`, `test_plan`, `deployment_plan`), not a constraint: uploads may use any kind.
+
 ### Planning-stage settings
 
 How much review happens before a human is asked. Values resolve **project override → Factory default**; a run snapshots them at start, so changing them mid-run affects later runs only.

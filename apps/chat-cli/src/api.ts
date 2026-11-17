@@ -39,6 +39,7 @@ import { SemanticIndexService } from './semantic-index.ts'
 import { PostgresVectorStore } from './vector-store.ts'
 import { ModelRuntime, ModelService, PostgresModelCatalog, PostgresModelSettingsStore } from './models/index.ts'
 import { PostgresStageSettingsStore, StageSettingsService } from './stage-settings.ts'
+import { PostgresPrerequisiteStore, StagePrerequisiteService } from './stage-prerequisites.ts'
 import { createObservabilityProvider } from './observability/registry/index.ts'
 import { CachedObservabilityReader, type ObservabilityProvider, type ObservabilityReader, type TraceRecorder } from './observability/index.ts'
 import { PostgresProjectWorkspace, type ProjectDocument } from './workspace.ts'
@@ -342,6 +343,7 @@ async function main(): Promise<void> {
   })
   let modelRuntime: ModelRuntime | undefined
   let stageSettings: StageSettingsService | undefined
+  let prerequisites: StagePrerequisiteService | undefined
   // Every harness run goes through the runtime, so the global model target
   // applies to stage roles, chat and briefings alike.
   if (databaseUrl !== undefined && databaseUrl !== '') {
@@ -351,6 +353,13 @@ async function main(): Promise<void> {
     } catch (error) {
       log.warn({ event: 'stage.settings.init_failed', err: error })
       stageSettings = undefined
+    }
+    try {
+      prerequisites = new StagePrerequisiteService(new PostgresPrerequisiteStore(databaseUrl))
+      await prerequisites.migrate()
+    } catch (error) {
+      log.warn({ event: 'stage.prerequisites.init_failed', err: error })
+      prerequisites = undefined
     }
   }
 
@@ -393,6 +402,7 @@ async function main(): Promise<void> {
         harnessFactory,
         roleTimeoutMs: stageRoleTimeoutMs,
         ...(stageSettings !== undefined ? { stageSettings } : {}),
+        ...(prerequisites !== undefined ? { prerequisites } : {}),
         // Late-bound: the model runtime is created after the stage runtime.
         pinModel: () => modelRuntime?.pin(),
         ...(semanticIndex !== undefined
@@ -510,6 +520,7 @@ async function main(): Promise<void> {
     ...(projects !== undefined ? { projects } : {}),
     ...(settings !== undefined ? { settings } : {}),
     ...(stageSettings !== undefined ? { stageSettings } : {}),
+    ...(prerequisites !== undefined ? { prerequisites } : {}),
     ...(pdfReview !== undefined ? { pdfReview } : {}),
     ...(workspaceStore !== undefined ? { workspace: workspaceStore } : {}),
     ...(briefing !== undefined ? { briefing } : {}),
@@ -594,6 +605,7 @@ async function main(): Promise<void> {
       await vectorStore?.close().catch(() => {})
       await logStore?.close().catch(() => {})
       await loggingSettingsStore?.close().catch(() => {})
+      await prerequisites?.close().catch(() => {})
       await stageSettings?.close().catch(() => {})
       await modelRuntime?.shutdown().catch(() => {})
       await modelService?.close().catch(() => {})

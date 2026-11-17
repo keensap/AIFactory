@@ -156,6 +156,16 @@ Resolution:
 
 The target is a **snapshot taken when a run starts**. Changing it affects subsequent runs only; an in-flight stage run keeps the target it started with, so a configuration change cannot corrupt a half-finished run.
 
+**Model hierarchy (decided 2026-11-17, agents not built yet):**
+
+```
+global target: provider + model   (always set; the only place a provider is chosen)
+  └─ stage default: none          (stages do not choose a provider or model)
+       └─ agent override: model   (an agent may pick another model *within the same provider*)
+```
+
+An agent override may **not** switch provider: one credential, one breaker and one fallback path stay in force. A role's effective model is snapshotted and attributed exactly as the global target is today, so per-role usage and cost stay correct.
+
 **Reserved extension point (not implemented):** per-agent-behavior targets. When that work starts, resolution becomes `agentBehavior → factory`, using a table such as:
 
 ```sql

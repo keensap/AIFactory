@@ -73,6 +73,8 @@ export interface StageRuntimeDeps {
   renderPdf?: typeof renderReportPdf
   /** Resolves the project's planning-stage review settings (gate + cycles). */
   stageSettings?: { resolve(projectId: string): Promise<PlanningStageSettings> }
+  /** Refuses to start a run when the stage's prerequisites are not met. */
+  prerequisites?: { ensureReady(projectId: string, stage: ProjectStage, options?: { incomingBrief?: boolean }): Promise<unknown> }
 }
 
 export type StageRole = 'analyzer' | 'author' | 'reviewer'
@@ -202,6 +204,7 @@ export class PlanningStageRuntime {
   private readonly pinModel?: () => ModelPin | undefined
   private readonly renderPdf: typeof renderReportPdf
   private readonly stageSettings?: { resolve(projectId: string): Promise<PlanningStageSettings> }
+  private readonly prerequisites?: { ensureReady(projectId: string, stage: ProjectStage, options?: { incomingBrief?: boolean }): Promise<unknown> }
   /** Model pins of runs currently executing, by run id. */
   private readonly pins = new Map<string, ModelPin>()
 
@@ -209,6 +212,7 @@ export class PlanningStageRuntime {
     if (deps.pinModel !== undefined) this.pinModel = deps.pinModel
     this.renderPdf = deps.renderPdf ?? renderReportPdf
     if (deps.stageSettings !== undefined) this.stageSettings = deps.stageSettings
+    if (deps.prerequisites !== undefined) this.prerequisites = deps.prerequisites
     this.projects = deps.projects
     this.workspace = deps.workspace
     this.harnessFactory = deps.harnessFactory
@@ -233,6 +237,13 @@ export class PlanningStageRuntime {
     this.assertPlanning(input.stage)
     const project = await this.projects.get(input.projectId)
     await assertProjectRoot(project)
+    // Prerequisites are evidence, not "the previous stage ran", so a project can
+    // start here when the inputs exist (or were waived).
+    if (this.prerequisites !== undefined) {
+      await this.prerequisites.ensureReady(project.id, PLANNING_STAGE, {
+        incomingBrief: (input.brief ?? '').trim() !== '',
+      })
+    }
     const snapshot = await this.workspace.getSnapshot(project.id)
     const priorStages = await this.workspace.getPriorStageSummaries(project.id, PLANNING_STAGE)
     const attachments = await this.loadAttachments(project, input.attachmentIds ?? [])
