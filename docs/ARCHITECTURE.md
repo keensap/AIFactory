@@ -1,6 +1,6 @@
 # AI Factory — Architecture
 
-**Status:** current state, 2026-11-17; corrected after the code review the same day  
+**Status:** current state, 2026-11-17; corrected after the code review the same day; Phase 1 hotfixes applied  
 **Scope:** the backend as implemented (`apps/chat-cli`). The UI is a separate workstream; its contracts are described in [`docs/ui/`](ui/).  
 **Related:** [`AI-Factory-Requirements.md`](AI-Factory-Requirements.md) (what to build), [`design/`](design/) (per-area decisions), [`design/ARCHITECTURE-REMEDIATION.md`](design/ARCHITECTURE-REMEDIATION.md) (known defects and the plan to fix them).
 
@@ -146,10 +146,10 @@ A paused run **releases its lease** and persists `pending_gate` + `review_cycles
 
 The status column also carries `execution_attempts` and `locked_by`/`lease_expires_at`: a 120 s lease with a 30 s heartbeat prevents two executors racing the same run.
 
-> **Known defects** ([remediation register](design/ARCHITECTURE-REMEDIATION.md)):
-> - The `cancelled` transitions are **not reachable yet**: no code sets the status and there is no cancel endpoint ([AR-11](design/ARCHITECTURE-REMEDIATION.md#ar-11)).
-> - Resuming from a gate runs under the same failure rule as a first execution. A role error during *apply* or *refine* therefore sends a paused run to `failed`, from which it cannot be claimed again ([AR-04](design/ARCHITECTURE-REMEDIATION.md#ar-04)).
-> - The model target is pinned per lease segment, not per run, so a resumed run uses the target current at resume time ([AR-06](design/ARCHITECTURE-REMEDIATION.md#ar-06)).
+> **Status** ([remediation register](design/ARCHITECTURE-REMEDIATION.md)):
+> - A failed resume **restores the gate** instead of failing the run, and a failed run can be retried explicitly ([AR-04](design/ARCHITECTURE-REMEDIATION.md#ar-04), fixed).
+> - The `cancelled` transitions are still **not reachable**: no code sets the status and there is no cancel endpoint ([AR-11](design/ARCHITECTURE-REMEDIATION.md#ar-11), open).
+> - The model target is pinned per lease segment, not per run, so a resumed run uses the target current at resume time ([AR-06](design/ARCHITECTURE-REMEDIATION.md#ar-06), open).
 
 ---
 
@@ -289,9 +289,9 @@ flowchart LR
 
 The agent's model is declared **on the factory route**, so an agent can change model but never provider. Applying the agent patch last means its `agent-default-model` wins.
 
-> **Known defects:**
-> - Usage from a role whose agent overrides the model is still stamped with the **Factory** model, price and context window, so cost and context figures are wrong for that role ([AR-02](design/ARCHITECTURE-REMEDIATION.md#ar-02)).
-> - The tool allowlist is implemented as a denylist of 15 known rows. The profile has 19, so `tool-subagent-fork` stays enabled for restricted agents; the allowlist **fails open** ([AR-05](design/ARCHITECTURE-REMEDIATION.md#ar-05)).
+> **Status** ([remediation register](design/ARCHITECTURE-REMEDIATION.md)):
+> - Each role's usage is priced and measured as the model it ran, from the pin-time catalogue snapshot; an unknown model is reported as unpriced rather than billed at another's price ([AR-02](design/ARCHITECTURE-REMEDIATION.md#ar-02), fixed).
+> - The allowlist **fails closed**: every `tool-*` row is classified, an unclassified row refuses a restricted agent, and `scripts/check-tool-rows.mjs` fails on drift ([AR-05](design/ARCHITECTURE-REMEDIATION.md#ar-05), fixed).
 
 ---
 
@@ -497,13 +497,14 @@ Rules enforced in code today:
 - **Harness environment** is scrubbed of unrelated secrets.
 - **Model output** is treated as data, never as instructions.
 
-Not yet enforced, despite earlier claims:
+Also enforced since Phase 1:
 
-- **Stage settings writes are not admin-only** ([AR-01](design/ARCHITECTURE-REMEDIATION.md#ar-01)).
-- **"Admin" means any token holder.** With an API token configured, `requireAdmin` admits every authenticated caller. There is no separate admin role, and the token comparison is not constant-time ([AR-01](design/ARCHITECTURE-REMEDIATION.md#ar-01)).
-- **Agent tool allowlists fail open** for rows they do not know ([AR-05](design/ARCHITECTURE-REMEDIATION.md#ar-05)).
+- **Settings writes are admin-only**, and with `AIFACTORY_ADMIN_TOKEN` set the operator token cannot reconfigure the factory (tests: `test/auth.test.ts`, [AR-01](design/ARCHITECTURE-REMEDIATION.md#ar-01)).
+- **Bearer tokens are compared in constant time** over SHA-256 digests.
+- **Agent tool allowlists fail closed**, and an unclassified harness tool row refuses a restricted agent (tests: `test/agents.test.ts`, `scripts/check-tool-rows.mjs`, [AR-05](design/ARCHITECTURE-REMEDIATION.md#ar-05)).
+- **Prerequisites accept only acceptable evidence**: `uploaded`/`in_review`/`approved` documents (newest version), and briefs from runs that did not fail ([AR-07](design/ARCHITECTURE-REMEDIATION.md#ar-07)).
 
-From Phase 1 of the remediation plan, every rule in this section cites the test that proves it ([AR-17](design/ARCHITECTURE-REMEDIATION.md#ar-17)).
+Each rule here cites the test that proves it ([AR-17](design/ARCHITECTURE-REMEDIATION.md#ar-17)).
 
 ---
 
@@ -515,7 +516,7 @@ These gaps are deliberate scope limits rather than defects:
 
 - **Only the planning stage executes.** Other stages have a prerequisite catalogue and empty settings, but no runtime ([AR-15](design/ARCHITECTURE-REMEDIATION.md#ar-15)).
 - **Models and agents are configured globally.** Agent assignments can be project-scoped; model targets cannot yet.
-- **The agent probe is weaker than its name.** It classifies failures by matching words in error messages, so broken compositions can be reported as accepted ([AR-08](design/ARCHITECTURE-REMEDIATION.md#ar-08)).
+- **The agent probe is offline by default**: a stand-in endpoint with no credentials, asserting the request the harness actually made. `?mode=online` uses the real model ([AR-08](design/ARCHITECTURE-REMEDIATION.md#ar-08), fixed).
 - **Paused runs never expire.** A gate can wait indefinitely. Auto-approval is rejected by design; reminders are planned ([AR-16](design/ARCHITECTURE-REMEDIATION.md#ar-16)).
 - **Reverse engineering an existing codebase** is designed but not built; the waiver and document-kind mechanisms are the hooks it will use.
 - **Harness presets are unused.** The headless runner does not bind them; the composition patch is the supported path.

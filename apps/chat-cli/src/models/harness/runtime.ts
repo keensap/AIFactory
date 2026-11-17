@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { DshHarness } from '../../harness.ts'
 import { noopLogger, type Logger } from '../../logging/index.ts'
 import { buildModelPatch, keysToScrub, type ModelPatch, type RouteProfile } from './patch.ts'
-import type { ModelAttribution } from '../attribution.ts'
+import { attributionForModel, type ModelAttribution } from '../attribution.ts'
 import type { ModelPrice, ModelRecord } from '../catalog/types.ts'
 import type { ModelService } from '../service.ts'
 import type { ResolvedTarget } from '../settings.ts'
@@ -65,6 +65,12 @@ export interface ModelPin {
   readonly attribution: ModelAttribution | null
   /** Routes of the pinned patch, so an agent model can be declared on the same provider. */
   readonly routes: Record<string, RouteProfile> | null
+  /**
+   * Attribution for a model on the pinned provider, from the catalogue snapshot
+   * taken at pin time. An agent's model is priced and measured as itself, never
+   * as the Factory model (AR-02).
+   */
+  attributionFor(model?: string): ModelAttribution | null
   /** `extraPatchPath` is applied after the pinned patch (agent composition wins). */
   harness(cwd?: string, timeoutMs?: number, extraPatchPath?: string | null): DshHarness
   /** Idempotent. */
@@ -103,6 +109,8 @@ export class ModelRuntime {
   private resolved: ResolvedTarget | null = null
   private patch: ModelPatch | null = null
   private attribution: ModelAttribution | null = null
+  /** Catalogue rows as of the last refresh; pins snapshot this. */
+  private catalogSnapshot: ModelRecord[] = []
   /** Patch files held by in-flight runs; never pruned while leased. */
   private readonly leases = new Map<string, number>()
   /** Makes patch file names unique even when two refreshes land in one millisecond. */
@@ -148,6 +156,7 @@ export class ModelRuntime {
         return this.status()
       }
       const { providers, models } = await this.service.snapshot()
+      this.catalogSnapshot = models
       const patch = buildModelPatch({ target: resolved.target, providers, models })
       const path = await this.writePatch(patch.content)
       this.patch = patch
@@ -214,11 +223,16 @@ export class ModelRuntime {
     const patchPath = this.patchPath
     const attribution = this.attribution === null ? null : { ...this.attribution }
     const scrub = keysToScrub(this.env, this.requiredEnv)
+    // Snapshot the catalogue so a later refresh cannot change a run's pricing.
+    const models = this.resolved === null
+      ? []
+      : [...this.catalogSnapshot]
     if (patchPath !== null) this.leases.set(patchPath, (this.leases.get(patchPath) ?? 0) + 1)
     let released = false
     return {
       attribution,
       routes: this.patch === null ? null : { ...this.patch.routes },
+      attributionFor: (model?: string) => attributionForModel(attribution, models, model),
       harness: (cwd, timeoutMs, extraPatchPath) => this.buildHarness(patchPath, scrub, cwd, timeoutMs, extraPatchPath),
       release: () => {
         if (released) return

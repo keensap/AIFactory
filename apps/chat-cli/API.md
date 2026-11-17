@@ -587,7 +587,26 @@ curl -X PUT /api/stages/planning/assignments/author \
 
 **Validation:** `400 INVALID_AGENT` (shape), `400 INVALID_AGENT_NAME` (not kebab-case), `400 INVALID_AGENT_TOOLS` (unknown tool id), `400 INVALID_AGENT_SKILLS`, `409 AGENT_NAME_TAKEN`, `404 AGENT_NOT_FOUND`, `400 INVALID_PROCESS`, `400 NO_PROCESSES` (stage has no processes yet), `400 AGENT_DISABLED` (assigning a disabled agent).
 
-**Testing an agent.** `POST /api/agents/:id/test` (admin) boots a harness with the agent's composition and asks for one word back:
+**Testing an agent.** `POST /api/agents/:id/test` (admin) verifies the composition. The default mode is **offline**: a local stand-in endpoint, no credentials, asserting the request the harness actually made.
+
+```json
+{ "ok": true, "configAccepted": true,
+  "checks": [
+    { "name": "composition", "ok": true, "detail": "the harness started with the composed patch" },
+    { "name": "request", "ok": true, "detail": "the harness sent a model request to the probe endpoint" },
+    { "name": "persona", "ok": true, "detail": "the agent persona reached the system prompt" },
+    { "name": "model", "ok": true, "detail": "request model probe-model (expected probe-model)" },
+    { "name": "skill:telos-writing", "ok": true, "detail": "the skill is visible to the model" },
+    { "name": "tools", "ok": true, "detail": "6 tool(s) offered, none outside the allowlist" } ],
+  "config": { "persona": true, "model": null, "tools": 3, "skills": ["telos-writing"], "patchRows": 15 },
+  "request": { "model": "probe-model", "tools": 6, "toolNames": ["edit", "read", "read_image", "skill", "todo_write", "write"] } }
+```
+
+`ok` is true only when **every** check passes. A composition that produces no model request is a failure: nothing else is proven without it.
+
+`?mode=online` performs a real call and reports `model.reply`, or `MODEL_CALL_FAILED` / `COMPOSITION_REJECTED` decided by whether the harness emitted `session` — never by matching words in an error message.
+
+**Legacy (online mode) shape, still returned there:**
 
 ```json
 { "ok": true, "configAccepted": true,
@@ -600,7 +619,7 @@ curl -X PUT /api/stages/planning/assignments/author \
 - `ok` is true when the composition was accepted (a model failure does not pretend the composition was proven, and does not fail the check).
 - The probe materialises the same `SKILL.md` bundles a real run uses, then removes its patch file.
 
-`503 AGENT_PROBE_NOT_CONFIGURED` when the server has no model runtime.
+`400 INVALID_PROBE_MODE` for a mode that is neither `offline` nor `online`; `503 AGENT_PROBE_NOT_CONFIGURED` when the server has no probe.
 
 **In a run:** each role resolves its agent at start, materialises its skills as `SKILL.md` under `.aifactory/agents/<id>/skills/`, and launches with a patch carrying persona, tool allowlist and model. `role_start` events record `agent`, `agentId` and the effective `model`.
 

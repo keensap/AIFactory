@@ -101,6 +101,65 @@ function reasonFailure(reason: TurnReason | null): { message: string; code?: str
   }
 }
 
+/**
+ * Read the `tool-*` row ids the configured harness profile declares.
+ *
+ * Used to verify an agent's tool allowlist against the profile actually in use,
+ * so a harness upgrade that adds a tool is noticed instead of silently granted.
+ * Returns the ids in profile order; throws when the profile cannot be read.
+ */
+export async function readProfileToolRows(options: {
+  command?: string
+  commandArgs?: string[]
+  profile?: string
+  env?: Record<string, string | undefined>
+  timeoutMs?: number
+} = {}): Promise<string[]> {
+  const command = options.command ?? 'dsh'
+  const commandArgs = options.commandArgs ?? []
+  const profile = options.profile ?? 'headless'
+  const timeoutMs = options.timeoutMs ?? 30_000
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let stdout = ''
+    let stderr = ''
+    const finish = (error: Error | null, rows: string[]): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (error !== null) reject(error)
+      else resolve(rows)
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      finish(new HarnessError(`reading the ${profile} profile timed out after ${timeoutMs}ms`), [])
+    }, timeoutMs)
+    timer.unref?.()
+    const child = spawn(command, [...commandArgs, '--profile', profile, '--dump-config'], {
+      env: { ...process.env, ...options.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+    child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+    child.once('error', (error: Error) => finish(new HarnessError(`could not read the ${profile} profile: ${error.message}`), []))
+    child.once('close', (code: number | null) => {
+      if (code !== 0) {
+        // Node writes the message first and the stack after, so the head is more
+        // useful than the tail for diagnosing a failed config read.
+        const detail = stderr.trim().split('\n').filter((line) => line.trim() !== '').slice(0, 3).join(' ').slice(0, 400)
+        finish(new HarnessError(`dsh --dump-config failed (exit ${code ?? 'signal'}): ${detail}`), [])
+        return
+      }
+      const rows: string[] = []
+      for (const line of stdout.split('\n')) {
+        const match = /^- id: (tool-[a-z0-9-]+)\s*$/.exec(line)
+        if (match?.[1] !== undefined && !rows.includes(match[1])) rows.push(match[1])
+      }
+      finish(null, rows)
+    })
+  })
+}
+
 export class DshHarness {
   private readonly command: string
   private readonly commandArgs: string[]

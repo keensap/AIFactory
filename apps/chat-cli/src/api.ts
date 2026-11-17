@@ -19,7 +19,7 @@ import {
 } from './config.ts'
 import { ProjectBriefingService } from './briefing.ts'
 import { EmbeddingClient } from './embeddings.ts'
-import { DshHarness } from './harness.ts'
+import { DshHarness, readProfileToolRows } from './harness.ts'
 import {
   ConsoleSink,
   FileSink,
@@ -43,7 +43,8 @@ import { ModelRuntime, ModelService, PostgresModelCatalog, PostgresModelSettings
 import { PostgresStageSettingsStore, StageSettingsService } from './stage-settings.ts'
 import { PostgresPrerequisiteStore, StagePrerequisiteService } from './stage-prerequisites.ts'
 import { AgentService, PostgresAgentStore, compositionOf, type AgentRecord } from './agents.ts'
-import { materialiseAgent } from './agent-patch.ts'
+import { classifyToolRows, materialiseAgent } from './agent-patch.ts'
+import { probeAgentComposition } from './agent-probe.ts'
 import { createObservabilityProvider } from './observability/registry/index.ts'
 import { CachedObservabilityReader, type ObservabilityProvider, type ObservabilityReader, type TraceRecorder } from './observability/index.ts'
 import { PostgresProjectWorkspace, type ProjectDocument } from './workspace.ts'
@@ -206,6 +207,9 @@ async function main(): Promise<void> {
   )
   const tokenValue = parsed.values.token ?? process.env.AIFACTORY_API_TOKEN
   const apiToken = typeof tokenValue === 'string' && tokenValue !== '' ? tokenValue : undefined
+  // A separate admin credential separates "run the factory" from "reconfigure it".
+  const adminValue = process.env.AIFACTORY_ADMIN_TOKEN
+  const adminToken = typeof adminValue === 'string' && adminValue !== '' ? adminValue : undefined
   const quiet = parsed.values.quiet === true
 
   const logFormat = (process.env.AIFACTORY_LOG_FORMAT ?? 'pretty').toLowerCase() === 'json' ? 'json' : 'pretty'
@@ -367,7 +371,34 @@ async function main(): Promise<void> {
       prerequisites = undefined
     }
     try {
-      agents = new AgentService(new PostgresAgentStore(databaseUrl))
+      agents = new AgentService(new PostgresAgentStore(databaseUrl), {
+        // An agent may only choose a model the Factory provider actually offers.
+        checkModel: async (model) => {
+          if (modelService === undefined) return { ok: true, warning: 'no model service' }
+          try {
+            const resolved = await modelService.resolveForRun()
+            const provider = resolved.target?.provider
+            if (provider === undefined) return { ok: true, warning: 'no model target configured' }
+            const { models } = await modelService.snapshot()
+            const offered = models.filter((entry) => entry.provider === provider)
+            if (offered.length === 0) {
+              // Discovery has not run: accepting is better than blocking configuration
+              // on a local provider, and the run reports an unpriced model if it matters.
+              return { ok: true, warning: `the ${provider} catalogue is empty; run discovery to verify "${model}"` }
+            }
+            if (offered.some((entry) => entry.model === model)) return { ok: true }
+            return {
+              ok: false,
+              message: `the Factory provider "${provider}" does not offer "${model}"; available: ${offered
+                .map((entry) => entry.model)
+                .slice(0, 12)
+                .join(', ')}`,
+            }
+          } catch {
+            return { ok: true, warning: 'the model catalogue could not be read' }
+          }
+        },
+      })
       await agents.migrate()
     } catch (error) {
       log.warn({ event: 'agents.init_failed', err: error })
@@ -382,6 +413,34 @@ async function main(): Promise<void> {
         ...(projectCwd !== undefined ? { cwd: projectCwd } : {}),
         ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       })
+  // Verify the tool allowlist against the profile actually in use (AR-05): a
+  // harness upgrade that adds a tool row must not silently grant it.
+  let profileToolRows: readonly string[] | undefined
+  {
+    const log = logging.logger.child({ component: 'agents' })
+    try {
+      profileToolRows = await readProfileToolRows({
+        command: harness.command,
+        profile: harness.profile,
+      })
+      const classification = classifyToolRows(profileToolRows)
+      log.info({
+        event: 'agents.toolset_classified',
+        modelFacing: classification.modelFacing.length,
+        infrastructure: classification.infrastructure.length,
+        unclassified: classification.unclassified,
+      })
+      if (classification.unclassified.length > 0) {
+        log.error({
+          event: 'agents.toolset_drift',
+          unclassified: classification.unclassified,
+        }, 'the harness exposes tool rows this version does not classify; agents with a tool allowlist will be refused')
+      }
+    } catch (error) {
+      profileToolRows = undefined
+      log.warn({ event: 'agents.toolset_unverified', err: error }, 'could not read the profile tool set; allowlist verification is skipped')
+    }
+  }
   const stageRoleTimeoutMs = (() => {
     const value = Number(process.env.AIFACTORY_STAGE_ROLE_TIMEOUT_MS)
     return Number.isSafeInteger(value) && value > 0 ? value : 300_000
@@ -416,6 +475,7 @@ async function main(): Promise<void> {
         ...(stageSettings !== undefined ? { stageSettings } : {}),
         ...(prerequisites !== undefined ? { prerequisites } : {}),
         ...(agents !== undefined ? { agents } : {}),
+        ...(profileToolRows !== undefined ? { profileToolRows } : {}),
         // Late-bound: the model runtime is created after the stage runtime.
         pinModel: () => modelRuntime?.pin(),
         ...(semanticIndex !== undefined
@@ -432,9 +492,30 @@ async function main(): Promise<void> {
    * starts. The model call needs credentials, so it is reported separately
    * instead of pretending the composition was proven when it was not.
    */
-  const probeAgent = async (agent: AgentRecord) => {
+  /**
+   * Probe an agent composition (AR-08).
+   *
+   * The default is the structural offline probe: a local stand-in endpoint, no
+   * credentials, and assertions on what the harness actually sent. `mode=online`
+   * keeps the real model call, but its verdict now comes from whether the harness
+   * booted, never from words in an error message.
+   */
+  const probeAgent = async (agent: AgentRecord, options: { mode?: 'offline' | 'online' } = {}) => {
     const composition = compositionOf(agent)
-    const dir = await mkdtemp(join(tmpdir(), 'aifactory-agent-test-'))
+    const mode = options.mode ?? 'offline'
+
+    if (mode === 'online') {
+      return probeOnline(composition, agent)
+    }
+
+    return probeAgentComposition(composition, {
+      harness: { command: harness.command, profile: harness.profile },
+      ...(profileToolRows !== undefined ? { profileToolRows } : {}),
+    })
+  }
+
+  /** The real model call, classified by whether the harness booted. */
+  const probeOnline = async (composition: ReturnType<typeof compositionOf>, _agent: AgentRecord) => {
     const config = {
       persona: composition.persona !== null,
       model: composition.model,
@@ -442,55 +523,70 @@ async function main(): Promise<void> {
       skills: composition.skills.map((skill) => skill.name),
       patchRows: 0,
     }
-    try {
-      if (modelRuntime === undefined) {
-        return {
-          ok: false,
-          configAccepted: false,
-          config,
-          model: { ok: false, code: 'MODEL_NOT_CONFIGURED', message: 'no model target is applied; set one in Model settings' },
-        }
+    if (modelRuntime === undefined) {
+      return {
+        ok: false,
+        configAccepted: false,
+        config,
+        checks: [{ name: 'composition', ok: false, detail: 'no model target is applied' }],
+        model: { ok: false, code: 'MODEL_NOT_CONFIGURED', message: 'no model target is applied; set one in Model settings' },
+        request: { model: null, tools: 0 },
       }
-      const pin = modelRuntime.pin()
+    }
+    const dir = await mkdtemp(join(tmpdir(), 'aifactory-agent-test-'))
+    const pin = modelRuntime.pin()
+    try {
+      const materialised = await materialiseAgent(dir, composition, {
+        ...(pin.attribution !== null ? { provider: pin.attribution.provider, model: pin.attribution.model } : {}),
+        ...(pin.routes !== null ? { routes: pin.routes } : {}),
+        ...(profileToolRows !== undefined ? { profileToolRows } : {}),
+      })
       try {
-        const materialised = await materialiseAgent(dir, composition, {
-          ...(pin.attribution !== null ? { provider: pin.attribution.provider, model: pin.attribution.model } : {}),
-          ...(pin.routes !== null ? { routes: pin.routes } : {}),
-        })
+        config.patchRows = (JSON.parse(await readFile(materialised.patchPath, 'utf8')) as unknown[]).length
+        const harnessInstance = pin.harness(dir, 60_000, materialised.patchPath)
+        let sawSession = false
         try {
-          config.patchRows = (JSON.parse(await readFile(materialised.patchPath, 'utf8')) as unknown[]).length
-          try {
-            const harness = pin.harness(dir, 45_000, materialised.patchPath)
-            const result = await harness.run('Reply with the single word READY.')
-            return {
-              ok: true,
-              configAccepted: true,
-              config,
-              model: { ok: true, reply: result.text.trim().slice(0, 1_000) },
-            }
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error)
-            // A model/credential/transport failure means the harness booted and
-            // accepted the composition; a config failure means it did not.
-            const modelReached = /MISSING_CREDENTIAL|TRANSPORT|RATE_LIMIT|TIMEOUT|HTTP \d{3}|model|provider/i.test(message)
-            return {
-              ok: modelReached,
-              configAccepted: modelReached,
-              config,
-              model: {
-                ok: false,
-                code: modelReached ? 'MODEL_CALL_FAILED' : 'COMPOSITION_REJECTED',
-                message: message.slice(0, 1_000),
-              },
-            }
+          const result = await harnessInstance.run('Reply with the single word READY.', {
+            onEvent: (event) => {
+              if ((event as { type?: string }).type === 'session') sawSession = true
+            },
+          })
+          return {
+            ok: true,
+            configAccepted: true,
+            config,
+            checks: [{ name: 'composition', ok: true, detail: 'the harness started with the composed patch' }],
+            model: { ok: true, reply: result.text.trim().slice(0, 1_000) },
+            request: { model: null, tools: 0 },
           }
-        } finally {
-          await materialised.cleanup()
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          // Structure, not wording: a harness that emitted `session` loaded the
+          // composition, so only the model call failed.
+          return {
+            ok: sawSession,
+            configAccepted: sawSession,
+            config,
+            checks: [{
+              name: 'composition',
+              ok: sawSession,
+              detail: sawSession
+                ? 'the harness started with the composed patch; the model call failed'
+                : `the harness did not start with this composition: ${message.slice(0, 400)}`,
+            }],
+            model: {
+              ok: false,
+              code: sawSession ? 'MODEL_CALL_FAILED' : 'COMPOSITION_REJECTED',
+              message: message.slice(0, 1_000),
+            },
+            request: { model: null, tools: 0 },
+          }
         }
       } finally {
-        pin.release()
+        await materialised.cleanup()
       }
     } finally {
+      pin.release()
       await rm(dir, { recursive: true, force: true }).catch(() => {})
     }
   }
@@ -598,6 +694,7 @@ async function main(): Promise<void> {
     store,
     version: packageJson.version,
     ...(apiToken !== undefined ? { apiToken } : {}),
+    ...(adminToken !== undefined ? { adminToken } : {}),
     corsOrigins: cors,
     includeThinking: parsed.values['show-thinking'] === true,
     ...(projects !== undefined ? { projects } : {}),
@@ -653,6 +750,12 @@ async function main(): Promise<void> {
     process.stdout.write(`  models     ${modelService === undefined ? 'disabled' : 'catalogue'}\n`)
     process.stdout.write(`  cors      ${cors === '*' ? '*' : cors.join(', ')}\n`)
     process.stdout.write(`  auth      ${apiToken === undefined ? 'none' : 'bearer token required'}\n`)
+    if (apiToken !== undefined && adminToken === undefined) {
+      log.warn(
+        { event: 'auth.single_token_admin' },
+        'AIFACTORY_ADMIN_TOKEN is not set, so the operator token is also admin; set it to separate the roles',
+      )
+    }
     if (modelService !== undefined) {
       void modelService.resolveForRun().then((resolved) => {
         log.info({

@@ -24,8 +24,18 @@ export interface AgentRouteProfile {
   models?: AgentRouteModel[]
 }
 
-/** Harness rows that expose tools; an agent's allowlist is applied by disabling the rest. */
-export const TOOL_ROW_IDS = [
+/**
+ * Harness `tool-*` rows, classified so an allowlist can be applied **fail-closed**.
+ *
+ * A harness entry is either a tool the model can call (`model`) or plumbing that
+ * must stay enabled for tools to work at all (`infrastructure`). Only `model`
+ * rows are governed by an agent's allowlist; `infrastructure` rows are never
+ * disabled. An unclassified row disables restricted agents rather than granting
+ * a tool nobody chose (see `classifyToolRows`).
+ */
+
+/** Rows that expose one or more model-facing tools. An agent's allowlist selects among these. */
+export const MODEL_FACING_TOOL_ROWS = [
   'tool-working-directory',
   'tool-bash',
   'tool-pwsh',
@@ -36,6 +46,7 @@ export const TOOL_ROW_IDS = [
   'tool-workflow',
   'tool-subagent',
   'tool-subagent-control',
+  'tool-subagent-fork',
   'tool-agent-team',
   'tool-todo',
   'tool-goal',
@@ -43,6 +54,104 @@ export const TOOL_ROW_IDS = [
   'tool-plugin-manager',
 ] as const
 
+/** Rows that must never be disabled: disabling them breaks tool execution itself. */
+export const INFRASTRUCTURE_TOOL_ROWS = [
+  'tool-executor-native',
+  'tool-executor-ptc',
+  'tool-result-pruner',
+] as const
+
+/** Values an agent's `tools` allowlist accepts. */
+export const TOOL_ROW_IDS: readonly string[] = MODEL_FACING_TOOL_ROWS
+
+/**
+ * Tools that read from harness services an agent configures elsewhere, so that a
+ * composition that sets them up without the tool is rejected rather than silently
+ * useless. `tool-skill` is what makes materialised `SKILL.md` files reachable.
+ */
+export const TOOL_REQUIREMENTS: ReadonlyArray<{
+  tool: string
+  requiredBy: 'skills'
+  code: string
+  message: string
+}> = [
+  {
+    tool: 'tool-skill',
+    requiredBy: 'skills',
+    code: 'AGENT_SKILLS_NEED_SKILL_TOOL',
+    message: 'an agent with skills needs "tool-skill" in its tools, otherwise the model cannot load them',
+  },
+]
+
+/** An agent has configured something (skills) whose tool is excluded by its allowlist. */
+export class ToolRequirementError extends Error {
+  readonly code: string
+
+  constructor(code: string, message: string) {
+    super(message)
+    this.name = 'ToolRequirementError'
+    this.code = code
+  }
+}
+
+/**
+ * Reject a composition whose allowlist excludes the tool that makes a configured
+ * feature reachable. Not applied when the allowlist is empty (no restriction).
+ */
+export function assertToolRequirements(input: { tools: readonly string[]; hasSkills: boolean }): void {
+  if (input.tools.length === 0) return
+  for (const requirement of TOOL_REQUIREMENTS) {
+    const configured = requirement.requiredBy === 'skills' ? input.hasSkills : false
+    if (configured && !input.tools.includes(requirement.tool)) {
+      throw new ToolRequirementError(requirement.code, requirement.message)
+    }
+  }
+}
+
+export interface ToolClassification {
+  modelFacing: string[]
+  infrastructure: string[]
+  /** Rows present in the profile that this module does not know about. */
+  unclassified: string[]
+}
+
+/** Split the profile's `tool-*` row ids into the two classes, and surface drift. */
+export function classifyToolRows(rows: readonly string[]): ToolClassification {
+  const modelFacing: string[] = []
+  const infrastructure: string[] = []
+  const unclassified: string[] = []
+  const known = new Set<string>([...MODEL_FACING_TOOL_ROWS, ...INFRASTRUCTURE_TOOL_ROWS])
+  for (const row of rows) {
+    if (!row.startsWith('tool-')) continue
+    if ((MODEL_FACING_TOOL_ROWS as readonly string[]).includes(row)) modelFacing.push(row)
+    else if ((INFRASTRUCTURE_TOOL_ROWS as readonly string[]).includes(row)) infrastructure.push(row)
+    else if (!known.has(row)) unclassified.push(row)
+  }
+  return { modelFacing: modelFacing.sort(), infrastructure: infrastructure.sort(), unclassified: unclassified.sort() }
+}
+
+/** Thrown when the tool set cannot be classified safely. */
+export class ToolsetUnverifiedError extends Error {
+  readonly code = 'AGENT_TOOLSET_UNVERIFIED'
+  readonly unclassified: string[]
+
+  constructor(unclassified: string[]) {
+    super(
+      `the harness exposes tool row(s) this version does not classify: ${unclassified.join(', ')}. `
+      + 'Refusing to apply a tool allowlist that might grant them. Update MODEL_FACING_TOOL_ROWS/'
+      + 'INFRASTRUCTURE_TOOL_ROWS in agent-patch.ts.',
+    )
+    this.name = 'ToolsetUnverifiedError'
+    this.unclassified = unclassified
+  }
+}
+
+/** Refuse to restrict tools when the profile contains a row we cannot classify. */
+export function assertToolsetClassified(rows: readonly string[]): ToolClassification {
+  const classification = classifyToolRows(rows)
+  if (classification.unclassified.length > 0) throw new ToolsetUnverifiedError(classification.unclassified)
+  return classification
+}
 
 /** What an agent changes in its role's harness composition. */
 export interface AgentPatchInput {
@@ -60,6 +169,17 @@ export interface AgentPatchInput {
   routes?: Record<string, AgentRouteProfile>
   /** Directory of materialised SKILL.md bundles, when the agent has skills. */
   skillsDir?: string
+  /**
+   * Model to select when `composition.model` is null (the probe's stand-in, or
+   * the Factory target). Without this an agent that chose no model would keep the
+   * profile default and bypass the probe's endpoint.
+   */
+  effectiveModel?: string
+  /**
+   * The harness profile's `tool-*` row ids. When supplied, an unclassified row
+   * refuses the allowlist instead of possibly granting it.
+   */
+  profileToolRows?: readonly string[]
 }
 
 /**
@@ -70,6 +190,11 @@ export interface AgentPatchInput {
  */
 export function buildAgentPatch(input: AgentPatchInput): string {
   const rows: unknown[] = []
+  const restricted = input.composition.tools.length > 0
+  // Fail closed: verify the profile before trusting a deny list built from it.
+  const classification = restricted && input.profileToolRows !== undefined
+    ? assertToolsetClassified(input.profileToolRows)
+    : undefined
 
   if (input.composition.persona !== null && input.composition.persona.trim() !== '') {
     // Replaces the entry's config wholesale; the other fields keep their defaults.
@@ -83,16 +208,19 @@ export function buildAgentPatch(input: AgentPatchInput): string {
     })
   }
 
+  const selectedModel = input.composition.model !== null && input.composition.model !== ''
+    ? input.composition.model
+    : input.effectiveModel
   if (
-    input.composition.model !== null && input.composition.model !== ''
+    selectedModel !== undefined && selectedModel !== ''
     && input.provider !== undefined && input.routes !== undefined
   ) {
     const routes: Record<string, AgentRouteProfile> = { ...input.routes }
     const route = routes[input.provider]
     if (route !== undefined) {
       const models = route.models ?? []
-      if (!models.some((entry) => entry.id === input.composition.model)) {
-        routes[input.provider] = { ...route, models: [...models, { id: input.composition.model }] }
+      if (!models.some((entry) => entry.id === selectedModel)) {
+        routes[input.provider] = { ...route, models: [...models, { id: selectedModel }] }
       }
     }
     rows.push({ id: 'llm-pi-ai', config: { providers: routes } })
@@ -100,7 +228,7 @@ export function buildAgentPatch(input: AgentPatchInput): string {
       id: 'agent-default-model',
       config: {
         provider: input.provider,
-        model: input.composition.model,
+        model: selectedModel,
         ...(input.composition.reasoningEffort !== null && input.composition.reasoningEffort !== ''
           ? { reasoningEffort: input.composition.reasoningEffort }
           : {}),
@@ -109,9 +237,14 @@ export function buildAgentPatch(input: AgentPatchInput): string {
   }
 
   // An empty allowlist means "no restriction": leave the profile's tools alone.
-  if (input.composition.tools.length > 0) {
-    for (const id of TOOL_ROW_IDS) {
+  if (restricted) {
+    // Disable every model-facing row the agent did not allow. Infrastructure rows
+    // are never touched, and an unclassified row is refused above rather than left on.
+    for (const id of MODEL_FACING_TOOL_ROWS) {
       if (!input.composition.tools.includes(id)) rows.push({ id, disabled: true })
+    }
+    for (const id of classification?.unclassified ?? []) {
+      rows.push({ id, disabled: true })
     }
   }
 
@@ -143,8 +276,15 @@ export interface MaterialisedAgent {
 export async function materialiseAgent(
   workspace: string,
   agent: MaterialisedAgentInput,
-  options: { provider?: string; model?: string; routes?: Record<string, AgentRouteProfile> } = {},
+  options: {
+    provider?: string
+    model?: string
+    routes?: Record<string, AgentRouteProfile>
+    profileToolRows?: readonly string[]
+  } = {},
 ): Promise<MaterialisedAgent> {
+  // A definition saved before this rule existed must not silently lose its skills.
+  assertToolRequirements({ tools: agent.tools, hasSkills: agent.skills.length > 0 })
   const base = join(workspace, '.aifactory', 'agents', agent.id)
   let skillsDir: string | null = null
   if (agent.skills.length > 0) {
@@ -171,6 +311,8 @@ export async function materialiseAgent(
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(options.routes !== undefined ? { routes: options.routes } : {}),
     ...(skillsDir !== null ? { skillsDir } : {}),
+    ...(options.model !== undefined ? { effectiveModel: options.model } : {}),
+    ...(options.profileToolRows !== undefined ? { profileToolRows: options.profileToolRows } : {}),
   })
   const dir = join(base, 'tmp')
   await mkdir(dir, { recursive: true })

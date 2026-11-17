@@ -103,7 +103,12 @@ export function fakeWorkspace(): PostgresProjectWorkspace {
       reviews.push(review)
       return review
     },
-    async addDocument(input: { kind: string; title: string; stageRunId?: string | null }) {
+    async addDocument(input: {
+      kind: string
+      title: string
+      stageRunId?: string | null
+      completeRun?: { summaryMarkdown: string }
+    }) {
       const doc: ProjectDocument & { stageRunId?: string | null } = {
         id: randomUUID(), projectId: 'p', stage: 'planning', kind: input.kind, title: input.title,
         storagePath: '.aifactory/documents/planning/telos.md', mimeType: 'text/markdown',
@@ -112,6 +117,26 @@ export function fakeWorkspace(): PostgresProjectWorkspace {
         stageRunId: input.stageRunId ?? null,
       }
       documents.push(doc)
+      // Mirror the real transaction: the document is approved and the run completes.
+      if (input.completeRun !== undefined && input.stageRunId !== undefined && input.stageRunId !== null) {
+        doc.status = 'approved'
+        // The real transaction marks the planning evidence in the same commit.
+        for (const key of ['business_idea', 'stakeholder_goals', 'feasibility_decision']) {
+          checklistUpdates.push({ key, status: 'done', evidence: doc.id })
+        }
+        const run = runs.get(input.stageRunId)
+        if (run !== undefined) {
+          runs.set(input.stageRunId, {
+            ...run,
+            status: 'completed',
+            pendingGate: null,
+            summaryMarkdown: input.completeRun.summaryMarkdown,
+            completedAt: new Date().toISOString(),
+            lockedBy: null,
+            leaseExpiresAt: null,
+          } as StageRun)
+        }
+      }
       return doc
     },
     async updateDocumentStatus() { return documents[0]! },

@@ -1,6 +1,6 @@
 # Architecture Review — Shortcomings, Remedies and Execution Plan
 
-**Status:** accepted for execution, 2026-11-17  
+**Status:** Phase 0 and Phase 1 complete (2026-11-17); Phases 2–4 pending  
 **Scope:** the backend as implemented (`apps/chat-cli`), reviewed against the code, not against [`../ARCHITECTURE.md`](../ARCHITECTURE.md)  
 **Method:** every finding cites the code that proves it; every remedy states how it is verified as resolved.
 
@@ -26,25 +26,25 @@ Work is planned in five phases (§5). Phases 0–1 fix the defects that can lose
 
 ## 2. Findings register
 
-| ID | Shortcoming | Severity | Phase |
-|---|---|---|---|
-| [AR-01](#ar-01) | Settings writes are not admin-only; "admin" means any token holder | High | 1, 3 |
-| [AR-02](#ar-02) | Agent model overrides are billed and measured as the Factory model | High | 1 |
-| [AR-03](#ar-03) | Stage runs have no fallback and no circuit breaker | High | 3 |
-| [AR-04](#ar-04) | A transient error during a resume destroys a run waiting for approval | High | 1 |
-| [AR-05](#ar-05) | The tool allowlist fails open for tools it does not know | High | 1 |
-| [AR-06](#ar-06) | Model and agents are re-resolved on every resume, not once per run | Medium | 3 |
-| [AR-07](#ar-07) | Prerequisites accept rejected documents and failed-run briefs | Medium | 1 |
-| [AR-08](#ar-08) | The agent probe reports broken compositions as accepted | Medium | 1 |
-| [AR-09](#ar-09) | Agent assignments outlive their project | Medium | 2 |
-| [AR-10](#ar-10) | Allowlisting tools can silently disable an agent's skills | Medium | 1 |
-| [AR-11](#ar-11) | Runs cannot be cancelled | Medium | 3 |
-| [AR-12](#ar-12) | Twelve connection pools per process | Medium | 2 |
-| [AR-13](#ar-13) | No migration runner; seeds never update existing databases | Medium | 2, 4 |
-| [AR-14](#ar-14) | 2,004-line positional router | Medium | 2 |
-| [AR-15](#ar-15) | The runtime only knows the planning stage | Medium | 4 |
-| [AR-16](#ar-16) | Dead tables from the superseded role-config design; gates never expire | Low | 2, 3 |
-| [AR-17](#ar-17) | Architecture documentation claimed enforcement that did not exist | Low | 0 |
+| ID | Shortcoming | Severity | Phase | State |
+|---|---|---|---|---|
+| [AR-01](#ar-01) | Settings writes are not admin-only; "admin" means any token holder | High | 1, 3 | open — settings writes now admin-only; operator/admin split done |
+| [AR-02](#ar-02) | Agent model overrides are billed and measured as the Factory model | High | 1 | fixed |
+| [AR-03](#ar-03) | Stage runs have no fallback and no circuit breaker | High | 3 | open |
+| [AR-04](#ar-04) | A transient error during a resume destroys a run waiting for approval | High | 1 | fixed |
+| [AR-05](#ar-05) | The tool allowlist fails open for tools it does not know | High | 1 | fixed |
+| [AR-06](#ar-06) | Model and agents are re-resolved on every resume, not once per run | Medium | 3 | open |
+| [AR-07](#ar-07) | Prerequisites accept rejected documents and failed-run briefs | Medium | 1 | fixed |
+| [AR-08](#ar-08) | The agent probe reports broken compositions as accepted | Medium | 1 | fixed |
+| [AR-09](#ar-09) | Agent assignments outlive their project | Medium | 2 | open |
+| [AR-10](#ar-10) | Allowlisting tools can silently disable an agent's skills | Medium | 1 | fixed |
+| [AR-11](#ar-11) | Runs cannot be cancelled | Medium | 3 | open |
+| [AR-12](#ar-12) | Twelve connection pools per process | Medium | 2 | open |
+| [AR-13](#ar-13) | No migration runner; seeds never update existing databases | Medium | 2, 4 | open |
+| [AR-14](#ar-14) | 2,004-line positional router | Medium | 2 | open |
+| [AR-15](#ar-15) | The runtime only knows the planning stage | Medium | 4 | open |
+| [AR-16](#ar-16) | Dead tables from the superseded role-config design; gates never expire | Low | 2, 3 | open |
+| [AR-17](#ar-17) | Architecture documentation claimed enforcement that did not exist | Low | 0 | fixed |
 
 ---
 
@@ -609,7 +609,7 @@ Effort is a rough estimate in engineering days, including tests, live verificati
 
 **Exit:** no claim in §3 is still untrue.
 
-#### Phase 1 — Security and correctness hotfixes (4–5 days)
+#### Phase 1 — Security and correctness hotfixes (4–5 days) — **done**
 
 | Item | Work |
 |---|---|
@@ -627,6 +627,29 @@ Effort is a rough estimate in engineering days, including tests, live verificati
 - Full suite green; a live run completes; the offline probe verifies persona, tools and skills against the real harness.
 
 **Risk.** AR-05 may reject existing allowlisted agents if the profile has unclassified rows. Mitigation: classify all 19 current rows in the same change, and the drift test proves it.
+
+#### Phase 1 — done (2026-11-17)
+
+All seven items are implemented, tested and verified live. What changed in behaviour:
+
+| Finding | Now |
+|---|---|
+| AR-01 | `AIFACTORY_ADMIN_TOKEN` separates admin from operator; every settings write calls `requireAdmin`, and authorisation happens before a 404 can reveal whether a project exists. Tokens are compared with `timingSafeEqual` over SHA-256 digests. |
+| AR-02 | A pin exposes `attributionFor(model)`; each role's usage, cost and context window come from the catalogue snapshot taken at pin time. An unpriced model reports `unpriced: true` and **no** `costUsd`. Saving an agent with a model the Factory provider does not offer returns `400 AGENT_MODEL_UNKNOWN`. |
+| AR-04 | Resuming from a gate records a checkpoint and restores it on failure (`502 STAGE_RESUME_FAILED`, `gate_resume_failed` event) instead of failing the run. Completion is one transaction. `POST /api/stage-runs/:id/retry` resumes a failed run from its stored analysis and draft. |
+| AR-05 | Every `tool-*` row is classified; an unclassified row refuses a restricted agent (`AGENT_TOOLSET_UNVERIFIED`). `scripts/check-tool-rows.mjs` reads the real profile and fails on drift — it currently reports **19 rows: 16 model-facing, 3 infrastructure**. |
+| AR-07 | Only `uploaded`/`in_review`/`approved` documents count, newest version only; briefs from `failed`/`cancelled` runs do not. Readiness returns the evidence that satisfied each prerequisite, and the evaluation is snapshotted into the run context. |
+| AR-08 | The probe is structural and offline by default: a local stand-in endpoint, no credentials, asserting that a request was made and that persona, model, skills and the tool allowlist took effect. `?mode=online` keeps the real call, but its verdict now comes from whether the harness booted. |
+| AR-10 | An agent with skills and an allowlist without `tool-skill` is rejected (`AGENT_SKILLS_NEED_SKILL_TOOL`), including on a partial update and at materialisation for definitions saved earlier. |
+
+Two bugs were found by the live check that the tests had missed, both now covered:
+
+- the probe dropped the model override when an agent chose no model, so it silently measured the profile default;
+- it treated "no request captured" as a pass. A composition is now only proven by a request that reached the stand-in (`request` check).
+
+**Verification:** 544 tests pass; `check-tool-rows.mjs` and the model import guard pass; live API with both tokens: operator read `200`, operator write `403 ADMIN_FORBIDDEN`, admin write `200`, bad token `401`; the live probe against the real harness returned PASS for composition, request, persona, model, skill and tools (`['edit','read','read_image','skill','todo_write','write']`).
+
+**Not done in Phase 1, deliberately:** persisting the probe result on the agent (`verified_at`) needs the Phase 2 migration runner, so the save response carries it instead.
 
 #### Phase 2 — Platform foundations (6–8 days)
 
@@ -683,8 +706,8 @@ Effort is a rough estimate in engineering days, including tests, live verificati
 
 | Phase | Effort | Cumulative | Checkpoint |
 |---|---|---|---|
-| 0 | 0.5 d | 0.5 d | Docs true |
-| 1 | 4–5 d | ~5 d | Defects that lose money, work or access control are closed |
+| 0 | 0.5 d | 0.5 d | Docs true — **done** |
+| 1 | 4–5 d | ~5 d | Defects that lose money, work or access control are closed — **done** |
 | 2 | 6–8 d | ~12 d | Schema and routing under control |
 | 3 | 6–8 d | ~19 d | Runs reproducible, cancellable, fail over |
 | 4 | 8–10 d | ~28 d | Second stage is configuration, not a copy |

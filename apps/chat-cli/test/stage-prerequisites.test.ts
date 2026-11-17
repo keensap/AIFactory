@@ -27,12 +27,24 @@ const url = process.env.AIFACTORY_TEST_DATABASE_URL
 const skip = url === undefined || url === '' ? 'AIFACTORY_TEST_DATABASE_URL is not set' : false
 
 const evidence = (overrides: Partial<PrerequisiteEvidence> = {}): PrerequisiteEvidence => ({
+  brief: null,
   hasBrief: false,
   attachmentCount: 0,
   documentKinds: new Set<string>(),
+  documents: new Map<string, { documentId: string; status: string }>(),
   waivers: new Map(),
   ...overrides,
 })
+
+/** Evidence with one acceptable document of the given kind. */
+const withDocument = (kind: string, status = 'uploaded'): PrerequisiteEvidence => {
+  const base = evidence()
+  return {
+    ...base,
+    documentKinds: new Set([kind]),
+    documents: new Map([[kind, { documentId: `doc-${kind}`, status }]]),
+  }
+}
 
 const planning = STAGE_PREREQUISITE_SEEDS.filter((entry) => entry.stage === 'planning')
 const design = STAGE_PREREQUISITE_SEEDS.filter((entry) => entry.stage === 'design')
@@ -60,9 +72,12 @@ test('a planning brief, an attachment or a brief document all satisfy the first 
   assert.equal(viaAttachment.ready, true)
   assert.equal(viaAttachment.prerequisites[0]?.via, 'attachment')
 
-  const viaDocument = evaluate(evidence({ documentKinds: new Set(['business_brief']) }))
+  const viaDocument = evaluate(withDocument('business_brief'))
   assert.equal(viaDocument.ready, true)
   assert.equal(viaDocument.prerequisites[0]?.via, 'document')
+  assert.deepEqual(viaDocument.prerequisites[0]?.evidence, {
+    kind: 'document', documentId: 'doc-business_brief', documentKind: 'business_brief', status: 'uploaded',
+  })
 })
 
 test('a waiver satisfies a prerequisite and says why', () => {
@@ -78,14 +93,14 @@ test('a waiver satisfies a prerequisite and says why', () => {
 test('later stages do not accept an unrelated document', () => {
   const readiness = evaluateStageReadiness({
     projectId: 'p', stage: 'design', catalogue: design,
-    evidence: evidence({ documentKinds: new Set(['telos_report']) }),
+    evidence: withDocument('telos_report'),
   })
   assert.equal(readiness.ready, false)
   assert.equal(readiness.missing[0]?.key, 'requirements-baseline')
 
   const ok = evaluateStageReadiness({
     projectId: 'p', stage: 'design', catalogue: design,
-    evidence: evidence({ documentKinds: new Set(['requirements_spec']) }),
+    evidence: withDocument('requirements_spec'),
   })
   assert.equal(ok.ready, true)
 })
@@ -256,7 +271,7 @@ test('a stage run is refused when prerequisites are missing, and allowed once wa
           if (!ready) {
             throw new PrerequisiteError(409, 'STAGE_PREREQUISITES_MISSING', 'the planning stage needs: Project brief (project-brief)')
           }
-          return { ready: true }
+          return { ready: true, evaluatedAt: new Date().toISOString(), prerequisites: [] }
         },
       },
     })
@@ -272,5 +287,77 @@ test('a stage run is refused when prerequisites are missing, and allowed once wa
     assert.ok(run.id.length > 0)
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ---- AR-07: only acceptable evidence counts ---------------------------
+
+test('a rejected or superseded document does not satisfy a prerequisite', { skip }, async () => {
+  const t = await setup()
+  const qa = await t.store.create({ name: `QA ${Date.now()}`, rootPath: mkdtempSync(join(tmpdir(), 'aifactory-prereq-rej-')), organization: null, ownerEmail: null, status: 'inactive' })
+  const insert = (kind: string, status: string, version: number) => t.pool.query(
+    `INSERT INTO project_documents (id, project_id, stage, kind, title, storage_path, mime_type, size_bytes, sha256, status, version)
+     VALUES (gen_random_uuid(), $1, 'design', $2, $3, $4, 'text/markdown', 10, 'x', $5, $6)`,
+    [qa.id, kind, `${kind} v${version}`, `.aifactory/documents/design/${kind}-${version}.md`, status, version],
+  )
+  try {
+    // A rejected specification must not unlock the design stage.
+    await insert('requirements_spec', 'rejected', 1)
+    let readiness = await t.service.readiness(qa.id, 'design')
+    assert.equal(readiness.ready, false, 'a rejected document is not evidence')
+    assert.equal(readiness.missing[0]?.key, 'requirements-baseline')
+
+    // A newer uploaded version does.
+    await insert('requirements_spec', 'uploaded', 2)
+    readiness = await t.service.readiness(qa.id, 'design')
+    assert.equal(readiness.ready, true)
+    const ref = readiness.prerequisites[0]?.evidence as { kind: string; status: string } | null
+    assert.equal(ref?.kind, 'document')
+    assert.equal(ref?.status, 'uploaded')
+
+    // Superseding it with a rejected version closes the gate again: only the newest counts.
+    await insert('requirements_spec', 'superseded', 3)
+    await insert('requirements_spec', 'rejected', 4)
+    readiness = await t.service.readiness(qa.id, 'design')
+    assert.equal(readiness.ready, false, 'the newest version is rejected, so there is no evidence')
+  } finally {
+    await t.cleanup()
+  }
+})
+
+test('a failed run does not satisfy a prerequisite with its brief', { skip }, async () => {
+  const t = await setup()
+  try {
+    const project = await t.store.create({ name: `Failed ${Date.now()}`, rootPath: mkdtempSync(join(tmpdir(), 'aifactory-prereq-fail-')), organization: null, ownerEmail: null, status: 'inactive' })
+    await t.pool.query(
+      `INSERT INTO project_stage_runs (id, project_id, stage, status, input_text, context_hash)
+       VALUES (gen_random_uuid(), $1, 'planning', 'failed', 'build a portal', 'h')`,
+      [project.id],
+    )
+    assert.equal((await t.service.readiness(project.id, 'planning')).ready, false, 'a failed run produced no brief')
+
+    await t.pool.query(
+      `INSERT INTO project_stage_runs (id, project_id, stage, status, input_text, context_hash)
+       VALUES (gen_random_uuid(), $1, 'planning', 'awaiting_human', 'build a portal', 'h2')`,
+      [project.id],
+    )
+    const readiness = await t.service.readiness(project.id, 'planning')
+    assert.equal(readiness.ready, true)
+    const ref = readiness.prerequisites[0]?.evidence as { kind: string; runId: string } | null
+    assert.equal(ref?.kind, 'brief')
+  } finally {
+    await t.cleanup()
+  }
+})
+
+test('readiness reports when it was evaluated, for the run snapshot', { skip }, async () => {
+  const t = await setup()
+  try {
+    const first = await t.service.readiness(t.project.id, 'planning')
+    assert.match(first.evaluatedAt, /^\d{4}-\d{2}-\d{2}T/)
+    const second = await t.service.readiness(t.project.id, 'planning')
+    assert.ok(Date.parse(second.evaluatedAt) >= Date.parse(first.evaluatedAt))
+  } finally {
+    await t.cleanup()
   }
 })

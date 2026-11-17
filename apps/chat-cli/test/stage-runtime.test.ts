@@ -111,18 +111,33 @@ function scriptHarness(cwd?: string, env: Record<string, string> = {}): DshHarne
 
 interface FakePin extends ModelPin { released: number }
 
-function fakePin(attribution: ModelPin['attribution'], env: Record<string, string> = {}): FakePin {
+function fakePin(
+  attribution: ModelPin['attribution'],
+  env: Record<string, string> = {},
+  perModel?: Record<string, { price: { input: number; output: number } | null; contextWindow: number | null }>,
+): FakePin {
   const pin: FakePin = {
     attribution,
     routes: null,
     released: 0,
+    attributionFor: (model?: string) => {
+      if (attribution === null) return null
+      if (model === undefined || perModel === undefined) return attribution
+      const entry = perModel[model]
+      if (entry === undefined) return attribution
+      return { ...attribution, model, price: entry.price, contextWindow: entry.contextWindow }
+    },
     harness: (cwd) => scriptHarness(cwd, env),
     release() { pin.released += 1 },
   }
   return pin
 }
 
-async function runWith(options: { pin?: ModelPin | undefined; harnessEnv?: Record<string, string> }) {
+async function runWith(options: {
+  pin?: ModelPin | undefined
+  harnessEnv?: Record<string, string>
+  agents?: { composition(input: { projectId: string; stage: string; process: string }): Promise<{ id: string; name: string; persona: string | null; model: string | null; reasoningEffort: string | null; tools: string[]; skills: Array<{ name: string; description: string; instructions: string }> } | undefined> }
+}) {
   const root = mkdtempSync(join(tmpdir(), 'aifactory-attr-'))
   const projects = new ProjectService(new MemoryProjectStore(), new SettingsService(new MemorySettingsStore()))
   const project = await projects.create({ name: 'Portal', rootPath: root, organization: null, ownerEmail: null, status: 'active' })
@@ -132,6 +147,7 @@ async function runWith(options: { pin?: ModelPin | undefined; harnessEnv?: Recor
     workspace,
     harnessFactory: (cwd) => scriptHarness(cwd, options.harnessEnv),
     ...(options.pin !== undefined ? { pinModel: () => options.pin } : {}),
+    ...(options.agents !== undefined ? { agents: options.agents } : {}),
   })
   const started = await runtime.start({ projectId: project.id, stage: 'planning', brief: 'Build a portal' })
   return { runtime, workspace, started, root }
@@ -401,6 +417,79 @@ test('exportRun re-renders and overwrites the canonical file', async () => {
     const second = readFileSync(file)
     assert.equal(second.subarray(0, 5).toString(), '%PDF-')
     assert.ok(second.byteLength > 1000)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('an agent model is priced as itself in the usage events of its own role only', async () => {
+  // The author runs a small model; the analyzer and reviewer keep the Factory one.
+  const pin = fakePin(
+    { provider: 'anthropic', model: 'big-model', source: 'settings', price: { input: 3, output: 15 }, contextWindow: 200_000 },
+    {},
+    { 'small-model': { price: { input: 0.3, output: 1.5 }, contextWindow: 32_000 } },
+  )
+  const { runtime, workspace, started, root } = await runWith({
+    pin,
+    agents: {
+      async composition(input) {
+        if (input.process !== 'author') return undefined
+        return {
+          id: 'agent-author', name: 'feasibility-author', persona: 'You are the author.',
+          model: 'small-model', reasoningEffort: null, tools: [], skills: [],
+        }
+      },
+    },
+  })
+  try {
+    await runtime.execute(started.id)
+    const starts = events(workspace).filter((event) => event.type === 'role_start')
+    const author = starts.find((event) => (event.payload as { role: string }).role === 'author')!
+    assert.deepEqual((author.payload as { model: unknown }).model, { provider: 'anthropic', model: 'small-model', source: 'settings' })
+
+    const usage = events(workspace).filter((event) => event.type === 'status' && (event.payload as { usage?: unknown }).usage !== undefined)
+    assert.equal(usage.length, 3)
+    // 1000 * 3 + 500 * 15 = 10500/million for the Factory model
+    // 1000 * 0.3 + 500 * 1.5 = 1050/million for the agent's model
+    const costs = usage.map((event) => (event.payload as { costUsd?: number }).costUsd)
+    assert.deepEqual(costs.slice().sort((a, b) => (a ?? 0) - (b ?? 0)), [0.00105, 0.0105, 0.0105], 'only the author is cheaper')
+    const authorUsage = usage.find((event) => (event.payload as { model?: { model: string } }).model?.model === 'small-model')!
+    assert.equal((authorUsage.payload as { contextWindow: number }).contextWindow, 32_000, 'the agent window, not the Factory one')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('an unpriced agent model reports no cost and flags the role', async () => {
+  const pin = fakePin(
+    { provider: 'anthropic', model: 'big-model', source: 'settings', price: { input: 3, output: 15 }, contextWindow: 200_000 },
+    {},
+    { 'mystery-model': { price: null, contextWindow: null } },
+  )
+  const { runtime, workspace, started, root } = await runWith({
+    pin,
+    agents: {
+      async composition(input) {
+        if (input.process !== 'reviewer') return undefined
+        return {
+          id: 'agent-reviewer', name: 'mystery-reviewer', persona: null,
+          model: 'mystery-model', reasoningEffort: null, tools: [], skills: [],
+        }
+      },
+    },
+  })
+  try {
+    await runtime.execute(started.id)
+    const unpriced = events(workspace).filter((event) => event.type === 'model_unpriced')
+    assert.equal(unpriced.length, 1, 'the role is flagged once')
+    assert.equal((unpriced[0]!.payload as { model: string }).model, 'mystery-model')
+
+    const reviewer = events(workspace).find((event) => event.type === 'status'
+      && (event.payload as { model?: { model: string } }).model?.model === 'mystery-model')
+    assert.ok(reviewer !== undefined)
+    const payload = reviewer.payload as Record<string, unknown>
+    assert.equal('costUsd' in payload, false, 'no cost is invented for an unpriced model')
+    assert.equal(payload.unpriced, true)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

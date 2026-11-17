@@ -6,7 +6,7 @@
  * harness Session remains the source of truth for conversation state.
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -63,6 +63,8 @@ export interface ChatApiOptions {
   version: string
   /** When set, every /api route except /api/health requires this bearer token. */
   apiToken?: string
+  /** Separate admin credential; when set, `apiToken` is an operator token only. */
+  adminToken?: string
   /** `*` or an explicit origin allowlist. */
   corsOrigins?: string[] | '*'
   /** Forward committed reasoning events to SSE clients. Off by default. */
@@ -78,7 +80,7 @@ export interface ChatApiOptions {
   /** Named agents and their stage-process assignments. */
   agents?: AgentService
   /** Boots a harness with an agent's composition; set when a model target exists. */
-  probeAgent?: (agent: AgentRecord) => Promise<unknown>
+  probeAgent?: (agent: AgentRecord, options?: { mode?: 'offline' | 'online' }) => Promise<unknown>
   /** PDF requirement review. When omitted, the PDF route returns 503. */
   pdfReview?: PdfReviewService
   /** SDLC stage, documents and checklist storage. */
@@ -166,7 +168,7 @@ async function handleRequestScoped(
 
   try {
     if (url.pathname.startsWith('/api/') && url.pathname !== '/api/health') {
-      requireToken(request, options.apiToken)
+      requireToken(request, options)
     }
     await route(request, response, url, options)
   } catch (error) {
@@ -242,6 +244,7 @@ async function route(
         stageRun: 'GET /api/stage-runs/:runId',
         executeStageRun: 'POST /api/stage-runs/:runId/execute',
         stageDecision: 'POST /api/stage-runs/:runId/decision',
+        stageRetry: 'POST /api/stage-runs/:runId/retry',
         stageEvents: 'GET /api/stage-runs/:runId/events',
         stageEventStream: 'GET /api/stage-runs/:runId/events/stream',
         stageTelemetry: 'GET /api/stage-runs/:runId/telemetry',
@@ -460,9 +463,16 @@ async function route(
     if (rest.length === 2 && rest[1] === 'test' && request.method === 'POST') {
       requireAdmin(request, options)
       if (options.probeAgent === undefined) {
-        throw new HttpError(503, 'agent probing is unavailable; configure a model target first', 'AGENT_PROBE_NOT_CONFIGURED')
+        throw new HttpError(503, 'agent probing is unavailable', 'AGENT_PROBE_NOT_CONFIGURED')
       }
-      sendJson(response, 200, await options.probeAgent(await agents.get(decodeURIComponent(rest[0]!))))
+      const mode = new URL(request.url ?? '/', 'http://localhost').searchParams.get('mode')
+      if (mode !== null && mode !== 'offline' && mode !== 'online') {
+        throw new HttpError(400, 'mode must be "offline" or "online"', 'INVALID_PROBE_MODE')
+      }
+      sendJson(response, 200, await options.probeAgent(
+        await agents.get(decodeURIComponent(rest[0]!)),
+        mode === null ? {} : { mode },
+      ))
       return
     }
     if (rest.length === 1) {
@@ -559,6 +569,7 @@ async function route(
         return
       }
       if (request.method === 'PATCH' || request.method === 'POST') {
+        requireAdmin(request, options)
         sendJson(response, 200, { stage, settings: await stageSettings.updateFactoryDefaults(stage, await readJson(request)) })
         return
       }
@@ -578,6 +589,7 @@ async function route(
       return
     }
     if (request.method === 'PATCH' || request.method === 'POST') {
+      requireAdmin(request, options)
       sendJson(response, 200, { stageDefaults: await stageSettings.updateFactoryDefaults('planning', await readJson(request)) })
       return
     }
@@ -660,9 +672,26 @@ function requireLogStore(options: ChatApiOptions): PostgresLogStore {
   return options.logStore
 }
 
-/** Admin endpoints need the bearer token, or a loopback client when no token is configured. */
+/**
+ * Admin endpoints need the admin credential.
+ *
+ * With `AIFACTORY_ADMIN_TOKEN` set, only that token is admin: an operator token
+ * can run the factory but not reconfigure it. Without it, the operator token
+ * remains admin (backwards compatible), and with no token at all a loopback
+ * client is trusted.
+ */
 function requireAdmin(request: IncomingMessage, options: ChatApiOptions): void {
-  if (options.apiToken !== undefined) return
+  if (options.adminToken !== undefined && options.adminToken !== '') {
+    if (!hasAdminToken(request, options)) {
+      throw new HttpError(
+        403,
+        'admin endpoints require the admin bearer token (AIFACTORY_ADMIN_TOKEN)',
+        'ADMIN_FORBIDDEN',
+      )
+    }
+    return
+  }
+  if (options.apiToken !== undefined && options.apiToken !== '') return
   const address = request.socket.remoteAddress ?? ''
   const loopback = address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
   if (!loopback) {
@@ -1023,6 +1052,12 @@ async function handleStageRuns(
     sendJson(response, 200, { run: await runtime.answerGate(runId, record.action) })
     return
   }
+  if (rest.length === 2 && rest[1] === 'retry' && request.method === 'POST') {
+    // Explicit retry of a failed run: it resumes from stored analysis/draft (AR-04).
+    requireAdmin(request, options)
+    sendJson(response, 200, { run: await runtime.retry(runId) })
+    return
+  }
   if (rest.length === 2 && rest[1] === 'decision' && request.method === 'POST') {
     const body = await readJson(request)
     const record = body !== null && typeof body === 'object' ? body as Record<string, unknown> : {}
@@ -1312,8 +1347,10 @@ async function handleProjects(
     if (stageSettings === undefined) {
       throw new HttpError(503, 'stage settings are disabled; set DATABASE_URL', 'STAGE_SETTINGS_NOT_CONFIGURED')
     }
-    await projects.get(id)
     const stage = decodeURIComponent(rest[2]!)
+    // Authorise before revealing whether the project exists.
+    if (request.method !== 'GET') requireAdmin(request, options)
+    await projects.get(id)
     if (request.method === 'GET') {
       sendJson(response, 200, await stageSettings.resolve(id, stage))
       return
@@ -1834,12 +1871,43 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   }
 }
 
-function requireToken(request: IncomingMessage, token: string | undefined): void {
-  if (token === undefined || token === '') return
-  const header = request.headers.authorization
-  if (header !== `Bearer ${token}`) {
-    throw new HttpError(401, 'missing or invalid bearer token', 'UNAUTHORIZED')
-  }
+/**
+ * Compare a presented token with the configured one in constant time.
+ *
+ * A plain `!==` leaks the length and prefix of the secret through timing. Hashing
+ * both sides to a fixed length first also hides the secret's length from the
+ * comparison itself.
+ */
+function tokensMatch(presented: string, expected: string): boolean {
+  const a = createHash('sha256').update(presented, 'utf8').digest()
+  const b = createHash('sha256').update(expected, 'utf8').digest()
+  return timingSafeEqual(a, b)
+}
+
+/**
+ * Authenticate an ordinary request.
+ *
+ * Either configured credential is accepted here: the admin token is a superset of
+ * the operator token, and `requireAdmin` narrows it further where it matters.
+ */
+function requireToken(request: IncomingMessage, options: ChatApiOptions): void {
+  const accepted = [options.apiToken, options.adminToken]
+    .filter((value): value is string => value !== undefined && value !== '')
+  if (accepted.length === 0) return
+  const header = request.headers.authorization ?? ''
+  const prefix = 'Bearer '
+  const presented = header.startsWith(prefix) ? header.slice(prefix.length) : null
+  const ok = presented !== null && accepted.some((token) => tokensMatch(presented, token))
+  if (!ok) throw new HttpError(401, 'missing or invalid bearer token', 'UNAUTHORIZED')
+}
+
+/** Whether the request carries the admin bearer token, when one is configured. */
+function hasAdminToken(request: IncomingMessage, options: ChatApiOptions): boolean {
+  const configured = options.adminToken
+  if (configured === undefined || configured === '') return false
+  const header = request.headers.authorization ?? ''
+  const prefix = 'Bearer '
+  return header.startsWith(prefix) && tokensMatch(header.slice(prefix.length), configured)
 }
 
 function applyCors(

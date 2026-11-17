@@ -78,8 +78,16 @@ export interface StageRuntimeDeps {
   renderPdf?: typeof renderReportPdf
   /** Resolves the project's planning-stage settings (gate, cycles, acceptance). */
   stageSettings?: { planning(projectId: string): Promise<PlanningStageSettings> }
+  /** The profile's `tool-*` rows, so an allowlist can be verified (AR-05). */
+  profileToolRows?: readonly string[]
   /** Refuses to start a run when the stage's prerequisites are not met. */
-  prerequisites?: { ensureReady(projectId: string, stage: ProjectStage, options?: { incomingBrief?: boolean }): Promise<unknown> }
+  prerequisites?: {
+    ensureReady(
+      projectId: string,
+      stage: ProjectStage,
+      options?: { incomingBrief?: boolean },
+    ): Promise<{ ready: boolean; evaluatedAt: string; prerequisites: Array<{ key: string; satisfied: boolean; evidence: unknown }> }>
+  }
 }
 
 export type StageRole = 'analyzer' | 'author' | 'reviewer'
@@ -127,6 +135,11 @@ export interface StageContextPacket {
     documentKind: string
     cardinality: 'one'
   }
+  /**
+   * The readiness evaluation the run was allowed to start on, so the gate can be
+   * audited against the evidence that existed then (AR-07).
+   */
+  readiness?: { evaluatedAt: string; prerequisites: Array<{ key: string; satisfied: boolean; evidence: unknown }> }
 }
 
 export interface StageReviewResult {
@@ -212,7 +225,14 @@ export class PlanningStageRuntime {
   private readonly pinModel?: () => ModelPin | undefined
   private readonly renderPdf: typeof renderReportPdf
   private readonly stageSettings?: { planning(projectId: string): Promise<PlanningStageSettings> }
-  private readonly prerequisites?: { ensureReady(projectId: string, stage: ProjectStage, options?: { incomingBrief?: boolean }): Promise<unknown> }
+  private readonly profileToolRows?: readonly string[]
+  private readonly prerequisites?: {
+    ensureReady(
+      projectId: string,
+      stage: ProjectStage,
+      options?: { incomingBrief?: boolean },
+    ): Promise<{ ready: boolean; evaluatedAt: string; prerequisites: Array<{ key: string; satisfied: boolean; evidence: unknown }> }>
+  }
   /** Model pins of runs currently executing, by run id. */
   private readonly pins = new Map<string, ModelPin>()
 
@@ -221,6 +241,7 @@ export class PlanningStageRuntime {
     this.renderPdf = deps.renderPdf ?? renderReportPdf
     if (deps.stageSettings !== undefined) this.stageSettings = deps.stageSettings
     if (deps.prerequisites !== undefined) this.prerequisites = deps.prerequisites
+    if (deps.profileToolRows !== undefined) this.profileToolRows = deps.profileToolRows
     this.projects = deps.projects
     this.workspace = deps.workspace
     this.harnessFactory = deps.harnessFactory
@@ -248,8 +269,11 @@ export class PlanningStageRuntime {
     await assertProjectRoot(project)
     // Prerequisites are evidence, not "the previous stage ran", so a project can
     // start here when the inputs exist (or were waived).
+    // What the run was allowed to start on, recorded in its context so the gate
+    // can always be audited against the evidence that existed at the time (AR-07).
+    let readiness: { ready: boolean; evaluatedAt: string; prerequisites: Array<{ key: string; satisfied: boolean; evidence: unknown }> } | undefined
     if (this.prerequisites !== undefined) {
-      await this.prerequisites.ensureReady(project.id, PLANNING_STAGE, {
+      readiness = await this.prerequisites.ensureReady(project.id, PLANNING_STAGE, {
         incomingBrief: (input.brief ?? '').trim() !== '',
       })
     }
@@ -266,6 +290,9 @@ export class PlanningStageRuntime {
       attachments,
       settings.gateAfterEachReview,
       { minRating: settings.minRating, maxBlockers: settings.maxBlockers, maxMajor: settings.maxMajor },
+      readiness === undefined
+        ? undefined
+        : { evaluatedAt: readiness.evaluatedAt, prerequisites: readiness.prerequisites },
     )
     const run = await this.workspace.createStageRun({
       projectId: project.id,
@@ -386,7 +413,7 @@ export class PlanningStageRuntime {
         const draft = await this.reviseOnce(ctx, ctx.run.draftMarkdown ?? '', ctx.run.analysisMarkdown ?? '', gate.findings)
         await ctx.update({ reviewCycles: cycle, draftMarkdown: draft, pendingGate: null })
         return this.reviewAndContinue(ctx, draft, ctx.run.analysisMarkdown ?? '', cycle, settings)
-      }),
+      }, { resumeAtGate: true }),
     )
   }
 
@@ -420,8 +447,32 @@ export class PlanningStageRuntime {
           return this.refineOnce(ctx, review, settings)
         }
         return this.completeRun(ctx, input.decision as HumanDecision, input.note, review)
-      }),
+      }, { resumeAtGate: true }),
     )
+  }
+
+  /**
+   * Retry a failed run (AR-04). The stored analysis and draft are kept, so the
+   * runtime resumes from the last completed phase instead of paying for it again.
+   * Explicit and audited: never automatic.
+   */
+  async retry(runId: string): Promise<StageRunDetail> {
+    const run = await this.requireRun(runId)
+    if (run.status !== 'failed') {
+      throw new StageRuntimeError(409, 'STAGE_RUN_NOT_FAILED', `only a failed run can be retried; this run is ${run.status}`)
+    }
+    await this.appendRunEvent(run.projectId, run.id, 'run_retried', {
+      attempt: run.attempt,
+      hadAnalysis: (run.analysisMarkdown ?? '').trim() !== '',
+      hadDraft: (run.draftMarkdown ?? '').trim() !== '',
+    }, 'info')
+    await this.workspace.updateStageRun(run.id, {
+      status: 'pending',
+      pendingGate: null,
+      summaryMarkdown: null,
+    } as StageRunPatch)
+    this.log.info({ event: 'stage.run.retried', runId: run.id, attempt: run.attempt })
+    return this.get(run.id)
   }
 
   private async requireRun(runId: string): Promise<StageRun> {
@@ -435,7 +486,18 @@ export class PlanningStageRuntime {
 
   // ---- lease, tracing and failure handling ------------------------------
 
-  private async withLease<T>(runId: string, fn: (ctx: LeaseContext) => Promise<T>): Promise<T> {
+  /**
+   * Run `fn` under a lease.
+   *
+   * `resumeAtGate` is set when the work continues a run that is already paused at
+   * a gate: it had reached a safe state, so a failure must return it to that state
+   * instead of destroying it (AR-04).
+   */
+  private async withLease<T>(
+    runId: string,
+    fn: (ctx: LeaseContext) => Promise<T>,
+    options: { resumeAtGate?: boolean } = {},
+  ): Promise<T> {
     const run = await this.requireRun(runId)
     if (this.activeRuns.has(run.id)) {
       throw new StageRuntimeError(409, 'STAGE_RUN_RUNNING', 'stage run is already executing')
@@ -472,6 +534,15 @@ export class PlanningStageRuntime {
     heartbeat.unref()
 
     let runSpan: TraceSpan | undefined
+    // The run's safe state, restored if a resume fails (declared outside the try so
+    // the catch can reach it).
+    let checkpoint: {
+      status: StageRun['status']
+      pendingGate: StageRun['pendingGate']
+      draftMarkdown: string | null
+      reviewCycles: number
+      summaryMarkdown: string | null
+    } | null = null
     try {
       const project = await this.projects.get(run.projectId)
       await assertProjectRoot(project)
@@ -515,6 +586,16 @@ export class PlanningStageRuntime {
           return next
         },
       }
+      // Captured before the work starts, so a failure can put it back.
+      checkpoint = options.resumeAtGate === true
+        ? {
+            status: claimed.status,
+            pendingGate: claimed.pendingGate,
+            draftMarkdown: claimed.draftMarkdown,
+            reviewCycles: claimed.reviewCycles,
+            summaryMarkdown: claimed.summaryMarkdown,
+          }
+        : null
       return await fn(ctx)
     } catch (error) {
       if (leaseLost) {
@@ -525,8 +606,23 @@ export class PlanningStageRuntime {
       }
       runSpan?.recordException(error instanceof Error ? error : new Error(String(error)))
       runSpan?.setStatus('error', error instanceof Error ? error.message : String(error))
-      this.log.error({ event: 'stage.run.failed', err: error })
       const message = error instanceof Error ? error.message : String(error)
+      if (checkpoint !== null) {
+        // Put the run back where the operator left it: same gate, same draft.
+        // Losing an approvable draft to a transient error is the most expensive
+        // failure this system can produce.
+        await this.workspace.updateStageRun(run.id, {
+          status: checkpoint.status,
+          pendingGate: checkpoint.pendingGate,
+          draftMarkdown: checkpoint.draftMarkdown,
+          reviewCycles: checkpoint.reviewCycles,
+          summaryMarkdown: checkpoint.summaryMarkdown,
+        } as StageRunPatch).catch(() => {})
+        await this.appendRunEvent(run.projectId, run.id, 'gate_resume_failed', { message }, 'error').catch(() => {})
+        this.log.error({ event: 'stage.run.resume_failed', err: error }, 'the resume failed; the run was restored to its gate')
+        throw new StageRuntimeError(502, 'STAGE_RESUME_FAILED', `the run is still waiting at its gate; retry: ${message}`)
+      }
+      this.log.error({ event: 'stage.run.failed', err: error })
       await this.workspace.updateStageRun(run.id, {
         status: 'failed',
         summaryMarkdown: `# Planning & Feasibility run failed\n\n${message}\n`,
@@ -743,6 +839,10 @@ export class PlanningStageRuntime {
       throw new StageRuntimeError(409, 'DOCUMENT_EMPTY', 'the stage document is empty; nothing to complete with')
     }
 
+    // One transaction: document (approved) + checklist evidence + run completed,
+    // so a failure cannot leave half a completion behind (AR-04).
+    const summary = this.buildSummary(ctx.run, decision, note, review)
+    ctx.assertLease()
     let document: ProjectDocument
     try {
       document = await this.workspace.addDocument({
@@ -754,6 +854,7 @@ export class PlanningStageRuntime {
         mimeType: 'text/markdown',
         buffer: Buffer.from(draft, 'utf8'),
         stageRunId: ctx.run.id,
+        completeRun: { summaryMarkdown: summary },
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -763,8 +864,6 @@ export class PlanningStageRuntime {
         `could not store the TELOS document under ${project.rootPath}: ${message}`,
       )
     }
-    await this.workspace.updateDocumentStatus(project.id, document.id, 'approved')
-    await this.markPlanningEvidence(project.id, document)
     await this.appendRunEvent(project.id, ctx.run.id, 'document_created', {
       documentId: document.id,
       kind: document.kind,
@@ -788,35 +887,9 @@ export class PlanningStageRuntime {
       })
     }
 
-    await this.workspace.updateChecklistItem(project.id, PLANNING_STAGE, 'feasibility_decision', 'done', document.id)
     const decisionLine = decision.replace('_', '-')
     const trimmedNote = note?.trim()
-    const summary = `# Planning & Feasibility — stage summary
-
-Status: completed
-
-## Analysis
-
-${(ctx.run.analysisMarkdown ?? '').trim()}
-
-## Review
-
-Decision: ${review.decision}
-
-Findings:
-${review.findings.length === 0 ? '- none' : review.findings.map((item) => `- ${JSON.stringify(item)}`).join('\n')}
-
-## Artifact
-
-- ${document.title}: \`${document.storagePath}\`
-
-## Human decision
-
-Decision: **${decisionLine}**
-${trimmedNote !== undefined && trimmedNote !== '' ? `\n${trimmedNote}\n` : ''}
-`
-    ctx.assertLease()
-    await ctx.update({ status: 'completed', pendingGate: null, summaryMarkdown: summary })
+    ctx.run = { ...ctx.run, status: 'completed', pendingGate: null, summaryMarkdown: summary }
     await this.appendRunEvent(project.id, ctx.run.id, 'human_decision', {
       decision,
       note: trimmedNote ?? null,
@@ -854,12 +927,27 @@ ${trimmedNote !== undefined && trimmedNote !== '' ? `\n${trimmedNote}\n` : ''}
     const composition = this.agents === undefined
       ? undefined
       : await this.agents.composition({ projectId, stage: PLANNING_STAGE, process: role })
+    // An agent may run a different model from the Factory target. Price and
+    // measure this role as the model that actually ran (AR-02), never as another's.
+    const attribution = pin === undefined
+      ? null
+      : (pin.attributionFor?.(composition?.model ?? undefined) ?? pin.attribution)
     await sink.append('role_start', {
       role,
       timeoutMs: this.roleTimeoutMs,
-      model: composition?.model ?? roleModel(pin?.attribution),
+      model: roleModel(attribution),
       ...(composition === undefined ? {} : { agent: composition.name, agentId: composition.id }),
     })
+    if (attribution !== null && attribution.price === null) {
+      // Unknown cost must be visible, not silently billed at another model's price.
+      await sink.append('model_unpriced', { role, model: attribution.model, provider: attribution.provider }, 'warn')
+      this.log.warn({
+        event: 'stage.role.model_unpriced',
+        role,
+        provider: attribution.provider,
+        model: attribution.model,
+      }, 'this model has no price in the catalogue; its cost will be reported as unknown')
+    }
     this.log.info({ event: 'stage.role.started', role, timeoutMs: this.roleTimeoutMs, agent: composition?.name })
     let agentPatch: string | null = null
     try {
@@ -880,7 +968,7 @@ ${trimmedNote !== undefined && trimmedNote !== '' ? `\n${trimmedNote}\n` : ''}
           const phase = 'phase' in event && typeof event.phase === 'string' ? event.phase : null
           // Usage events are stamped with the pinned model and the cost at the
           // price in force when the run started.
-          void sink.append(event.type, attributeUsage(event, pin?.attribution ?? null), phase)
+          void sink.append(event.type, attributeUsage(event, attribution), phase)
           this.traces.recordHarnessEvent(roleSpan, event)
         },
       })
@@ -921,6 +1009,7 @@ ${trimmedNote !== undefined && trimmedNote !== '' ? `\n${trimmedNote}\n` : ''}
         ? { provider: pin.attribution.provider, model: pin.attribution.model }
         : {}),
       ...(pin?.routes !== null && pin?.routes !== undefined ? { routes: pin.routes } : {}),
+      ...(this.profileToolRows !== undefined ? { profileToolRows: this.profileToolRows } : {}),
     })
     this.agentCleanup.set(materialised.patchPath, materialised.cleanup)
     return materialised.patchPath
@@ -1004,6 +1093,42 @@ ${trimmedNote !== undefined && trimmedNote !== '' ? `\n${trimmedNote}\n` : ''}
     }
   }
 
+  /** The run summary written in the completion transaction. */
+  private buildSummary(
+    run: StageRun,
+    decision: HumanDecision,
+    note: string | undefined,
+    review: StageReviewResult,
+  ): string {
+    const decisionLine = decision.replace('_', '-')
+    const trimmedNote = note?.trim()
+    const findings = review.findings.length === 0
+      ? '- none'
+      : review.findings.map((item) => `- ${JSON.stringify(item)}`).join('\n')
+    return [
+      '# Planning & Feasibility — stage summary',
+      '',
+      'Status: completed',
+      '',
+      '## Analysis',
+      '',
+      (run.analysisMarkdown ?? '').trim(),
+      '',
+      '## Review',
+      '',
+      `Decision: ${review.decision}`,
+      '',
+      'Findings:',
+      findings,
+      '',
+      '## Human decision',
+      '',
+      `Decision: **${decisionLine}**`,
+      trimmedNote !== undefined && trimmedNote !== '' ? `\n${trimmedNote}\n` : '',
+      '',
+    ].join('\n')
+  }
+
   private async markPlanningEvidence(projectId: string, document: ProjectDocument): Promise<void> {
     for (const key of ['business_idea', 'stakeholder_goals']) {
       await this.workspace.updateChecklistItem(projectId, PLANNING_STAGE, key, 'done', document.id)
@@ -1040,6 +1165,7 @@ export function buildContextPacket(
   attachments: ContextAttachment[] = [],
   gateAfterEachReview = false,
   acceptance: { minRating: number; maxBlockers: number; maxMajor: number } = { minRating: 0, maxBlockers: 0, maxMajor: 0 },
+  readiness?: { evaluatedAt: string; prerequisites: Array<{ key: string; satisfied: boolean; evidence: unknown }> },
 ): StageContextPacket {
   return {
     schemaVersion: 1,
@@ -1061,6 +1187,9 @@ export function buildContextPacket(
     documents: snapshot.documents,
     attachments,
     input,
+    ...(readiness === undefined
+      ? {}
+      : { readiness: { evaluatedAt: readiness.evaluatedAt, prerequisites: readiness.prerequisites } }),
     constraints: {
       maxReviewCycles,
       gateAfterEachReview,

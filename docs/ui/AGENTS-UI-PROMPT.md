@@ -47,12 +47,28 @@ Planning
 
 ### 4. Test an agent
 
-A **Test this agent** button in the editor calls `POST /api/agents/:id/test` and shows two results, not one:
+A **Test this agent** button in the editor calls `POST /api/agents/:id/test` and renders the result as a checklist, not a single verdict.
 
-- *Composition accepted* — from `configAccepted`; if false, show `model.message` (a plugin/config problem).
-- *Model reply* — from `model`: the `reply` text on success, or `MODEL_CALL_FAILED` / `MODEL_NOT_CONFIGURED` with the provider message.
+The default probe is **offline**: it needs no credentials, costs nothing, and inspects the request the harness actually made. Each check is a row:
 
-Never collapse these into one "passed/failed": a missing API key is not a broken agent. Show the `config` summary (persona on/off, model, tool count, skills) beside the result.
+| Check | Meaning |
+|---|---|
+| `composition` | the harness started with the composed patch |
+| `request` | a model request reached the probe endpoint (without this, nothing else is proven) |
+| `persona` | the persona text is in the system prompt |
+| `model` | the request names the agent's model |
+| `skill:<name>` | the skill is visible to the model |
+| `tools` | no tool outside the allowlist is enabled |
+
+Show `configAccepted` as "composition verified" and never mix it with a model reply: in offline mode there is no real answer.
+
+`POST /api/agents/:id/test?mode=online` performs a real call. There, a failure is `MODEL_CALL_FAILED` (harness booted, model did not) or `COMPOSITION_REJECTED` (harness did not boot) — distinct states, because a missing API key is not a broken agent.
+
+Show `request.toolNames` in a details panel: it is the evidence behind the tools check.
+
+### 5. Admin vs operator
+
+Settings, agents, assignments, waivers and probes need the **admin** token. Plain run operations need the operator token. On `403 ADMIN_FORBIDDEN`, say "this action needs the admin token", not "forbidden" — and do not offer the write controls to a session that only holds the operator token.
 
 ## Rules
 

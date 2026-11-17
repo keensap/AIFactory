@@ -3,6 +3,8 @@ import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import {
   AgentError,
   AgentService,
@@ -25,7 +27,7 @@ const AUTHOR: AgentInput = {
   name: 'feasibility-author',
   persona: 'You are the AI Factory planning author.',
   model: 'author-model',
-  tools: ['tool-fs', 'tool-todo'],
+  tools: ['tool-fs', 'tool-todo', 'tool-skill'],
   skills: [{ name: 'telos-writing', description: 'Write TELOS sections', instructions: '# Write TELOS\n' }],
 }
 
@@ -193,6 +195,10 @@ test('each planning role runs with its assigned agent composition', async () => 
     const pin: ModelPin = {
       attribution: { provider: 'acme', model: 'base-model', source: 'global', price: null, contextWindow: 1000 },
       routes: { acme: { api: 'openai-completions', baseURL: 'http://x', models: [{ id: 'base-model' }] } },
+      // The agent's model must be attributed as itself (AR-02).
+      attributionFor: (model?: string) => (model === undefined || model === '' || model === 'base-model'
+        ? { provider: 'acme', model: 'base-model', source: 'global', price: null, contextWindow: 1000 }
+        : { provider: 'acme', model, source: 'global', price: { input: 1, output: 2 }, contextWindow: 32_000 }),
       harness: (_cwd: string | undefined, _timeout: number | undefined, extraPatchPath?: string | null) => {
         roles += 1
         if (extraPatchPath !== null && extraPatchPath !== undefined) {
@@ -231,7 +237,11 @@ test('each planning role runs with its assigned agent composition', async () => 
     const events = (workspace as unknown as { events: Array<{ type: string; payload: Record<string, unknown> }> }).events
     const authorStart = events.find((event) => event.type === 'role_start' && event.payload.role === 'author')
     assert.equal(authorStart?.payload.agent, 'feasibility-author')
-    assert.equal(authorStart?.payload.model, 'author-model', 'the event records the agent model')
+    assert.deepEqual(
+      authorStart?.payload.model,
+      { provider: 'acme', model: 'author-model', source: 'global' },
+      'the event records the agent model as attribution, not as the Factory one',
+    )
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -248,7 +258,7 @@ test('materialiseAgent writes the patch and SKILL.md, and cleans up the patch', 
       persona: 'You are the author.',
       model: 'author-model',
       reasoningEffort: null,
-      tools: ['tool-fs'],
+      tools: ['tool-fs', 'tool-skill'],
       skills: [{ name: 'telos-writing', description: 'Write TELOS', instructions: '# TELOS\n' }],
     }
     const materialised = await materialiseAgent(dir, agent, {
@@ -326,4 +336,107 @@ test('the probe endpoint reports a composition and refuses when unavailable', as
     await new Promise<void>((resolve) => withoutProbe.server.close(() => resolve()))
     rmSync(dataDir, { recursive: true, force: true })
   }
+})
+
+// ---- AR-05: the allowlist fails closed ---------------------------------
+
+test('tool rows are classified, and unknown rows are reported as drift', async () => {
+  const { MODEL_FACING_TOOL_ROWS, INFRASTRUCTURE_TOOL_ROWS, classifyToolRows } = await import('../src/agent-patch.ts')
+  const result = classifyToolRows([
+    'tool-fs', 'tool-bash', 'tool-executor-native', 'tool-result-pruner', 'tool-subagent-fork', 'not-a-tool',
+  ])
+  assert.deepEqual(result.modelFacing, ['tool-bash', 'tool-fs', 'tool-subagent-fork'])
+  assert.deepEqual(result.infrastructure, ['tool-executor-native', 'tool-result-pruner'])
+  assert.deepEqual(result.unclassified, [], 'every listed row is known')
+  assert.equal(result.modelFacing.includes('tool-executor-native'), false, 'infrastructure is never allowlisted')
+
+  assert.equal(classifyToolRows(['tool-brand-new']).unclassified[0], 'tool-brand-new')
+  assert.ok(MODEL_FACING_TOOL_ROWS.includes('tool-subagent-fork'), 'subagent_fork is model-facing')
+  assert.equal(INFRASTRUCTURE_TOOL_ROWS.includes('tool-executor-ptc'), true)
+})
+
+test('a restricted agent disables model-facing tools it did not allow, including subagent_fork', () => {
+  const rows = JSON.parse(buildAgentPatch({
+    composition: { persona: null, model: null, reasoningEffort: null, tools: ['tool-fs'] },
+  })) as Array<{ id: string; disabled?: boolean }>
+  const disabled = new Set(rows.filter((row) => row.disabled === true).map((row) => row.id))
+
+  assert.equal(disabled.has('tool-subagent-fork'), true, 'the row the old allowlist leaked')
+  assert.equal(disabled.has('tool-bash'), true)
+  assert.equal(disabled.has('tool-fs'), false, 'the allowed tool stays')
+  for (const infrastructure of ['tool-executor-native', 'tool-executor-ptc', 'tool-result-pruner']) {
+    assert.equal(disabled.has(infrastructure), false, `${infrastructure} must never be disabled`)
+  }
+})
+
+test('an unclassified profile row refuses the allowlist instead of granting it', async () => {
+  const { buildAgentPatch: build, ToolsetUnverifiedError } = await import('../src/agent-patch.ts')
+  assert.throws(
+    () => build({
+      composition: { persona: null, model: null, reasoningEffort: null, tools: ['tool-fs'] },
+      profileToolRows: ['tool-fs', 'tool-mystery'],
+    }),
+    (error: unknown) => error instanceof ToolsetUnverifiedError
+      && error.code === 'AGENT_TOOLSET_UNVERIFIED'
+      && error.unclassified[0] === 'tool-mystery',
+  )
+  // An unrestricted agent does not depend on the classification.
+  assert.doesNotThrow(() => build({
+    composition: { persona: null, model: null, reasoningEffort: null, tools: [] },
+    profileToolRows: ['tool-mystery'],
+  }))
+})
+
+test('the installed profile contains only classified tool rows', () => {
+  // Runs as a separate process (like the model import guard) because spawning the
+  // harness from inside the test runner fails on filesystem writes it performs.
+  const root = fileURLToPath(new URL('..', import.meta.url))
+  const output = execFileSync(process.execPath, [join(root, 'scripts/check-tool-rows.mjs')], {
+    encoding: 'utf8',
+    timeout: 120_000,
+  })
+  // Either it verified the profile, or it reported why it could not in this environment.
+  assert.match(output, /tool guard: (\d+ tool rows classified|.*skipped)/)
+  if (/classified/.test(output)) {
+    assert.match(output, /\(\d+ model-facing, \d+ infrastructure\)/)
+  }
+})
+
+// ---- AR-10: skills need tool-skill ------------------------------------
+
+test('an agent with skills must allow tool-skill', () => {
+  const skills = [{ name: 'telos-writing', description: 'x', instructions: '# x' }]
+  assert.throws(
+    () => parseAgent({ name: 'a-b', tools: ['tool-fs'], skills }),
+    (error: unknown) => error instanceof AgentError && error.code === 'AGENT_SKILLS_NEED_SKILL_TOOL',
+  )
+  assert.ok(parseAgent({ name: 'a-b', tools: ['tool-fs', 'tool-skill'], skills }).skills !== undefined)
+  assert.ok(parseAgent({ name: 'a-b', tools: [], skills }).skills !== undefined, 'no allowlist means no restriction')
+  assert.ok(parseAgent({ name: 'a-b', tools: ['tool-fs'] }).tools !== undefined, 'no skills, no requirement')
+})
+
+test('a definition saved before the rule existed is refused at materialisation', async () => {
+  const { materialiseAgent } = await import('../src/agent-patch.ts')
+  const dir = mkdtempSync(join(tmpdir(), 'aifactory-requirement-'))
+  try {
+    await assert.rejects(
+      () => materialiseAgent(dir, {
+        id: 'legacy', persona: null, model: null, reasoningEffort: null,
+        tools: ['tool-fs'],
+        skills: [{ name: 'telos-writing', description: '', instructions: '# x' }],
+      }),
+      (error: unknown) => (error as { code?: string }).code === 'AGENT_SKILLS_NEED_SKILL_TOOL',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('patching only the tools of an agent with skills cannot orphan them', async () => {
+  const service = new AgentService(memoryStore())
+  const agent = await service.create(AUTHOR)
+  await assert.rejects(
+    () => service.update(agent.id, { tools: ['tool-fs'] }),
+    (error: unknown) => error instanceof AgentError && error.code === 'AGENT_SKILLS_NEED_SKILL_TOOL',
+  )
 })

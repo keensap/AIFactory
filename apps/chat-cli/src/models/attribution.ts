@@ -37,6 +37,34 @@ export interface RoleModel {
   source: string
 }
 
+/**
+ * Attribution for a model on the same provider, from the catalogue snapshot taken
+ * when the run was pinned.
+ *
+ * An agent may run a different model from the Factory target. Pricing and context
+ * that role at the Factory model would be wrong, so the price and window are
+ * looked up per model. A model the catalogue does not know keeps `price: null`
+ * (cost is then reported as unknown, never guessed) and `contextWindow: null`.
+ */
+export function attributionForModel(
+  base: ModelAttribution | null,
+  models: ReadonlyArray<{ provider: string; model: string; price?: ModelPrice | null; contextWindow?: number | null }>,
+  model: string | undefined,
+): ModelAttribution | null {
+  if (base === null) return null
+  if (model === undefined || model === '' || model === base.model) return base
+  const entry = models.find((candidate) => candidate.provider === base.provider && candidate.model === model)
+  return {
+    provider: base.provider,
+    model,
+    source: base.source,
+    price: entry?.price ?? null,
+    contextWindow: entry?.contextWindow !== undefined && entry.contextWindow !== null && entry.contextWindow > 0
+      ? entry.contextWindow
+      : null,
+  }
+}
+
 export function roleModel(attribution: ModelAttribution | null | undefined): RoleModel | null {
   if (attribution === null || attribution === undefined) return null
   return { provider: attribution.provider, model: attribution.model, source: attribution.source }
@@ -60,6 +88,8 @@ export function attributeUsage(event: unknown, attribution: ModelAttribution | n
     ...event,
     model: { provider: attribution.provider, model: attribution.model },
     ...(cost !== undefined ? { costUsd: cost } : {}),
+    // No cost is reported as unknown, never as another model's price.
+    ...(attribution.price === null ? { unpriced: true } : {}),
     ...(attribution.contextWindow !== null && attribution.contextWindow > 0
       ? { contextWindow: attribution.contextWindow }
       : {}),

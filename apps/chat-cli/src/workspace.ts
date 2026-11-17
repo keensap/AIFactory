@@ -855,6 +855,12 @@ export class PostgresProjectWorkspace {
     buffer: Uint8Array
     stageRunId?: string | null
     parentDocumentId?: string | null
+    /**
+     * Complete the owning run in the same transaction as the document, so a
+     * partial failure cannot leave a document without a completed run (or the
+     * reverse). Requires `stageRunId`.
+     */
+    completeRun?: { summaryMarkdown: string }
   }): Promise<ProjectDocument> {
     if (input.buffer.byteLength > MAX_DOCUMENT_BYTES) {
       throw new WorkspaceError(413, 'DOCUMENT_TOO_LARGE', `document exceeds ${MAX_DOCUMENT_BYTES} bytes`)
@@ -903,6 +909,26 @@ export class PostgresProjectWorkspace {
             input.parentDocumentId ?? null,
           ],
         )
+        if (input.completeRun !== undefined) {
+          if (input.stageRunId === undefined || input.stageRunId === null) {
+            throw new WorkspaceError(400, 'INVALID_COMPLETION', 'completeRun requires stageRunId')
+          }
+          // The document is the artifact of an approved decision, so it is
+          // approved, its checklist evidence is set, and the run completes here.
+          await client.query(`UPDATE project_documents SET status = 'approved', updated_at = now() WHERE id = $1`, [id])
+          const completed = await client.query(
+            `UPDATE project_stage_runs
+             SET status = 'completed', pending_gate = NULL, summary_markdown = $2,
+                 completed_at = now(), updated_at = now(),
+                 locked_by = NULL, lease_expires_at = NULL
+             WHERE id = $1 AND status <> 'completed'
+             RETURNING id`,
+            [input.stageRunId, input.completeRun.summaryMarkdown],
+          )
+          if ((completed.rowCount ?? 0) === 0) {
+            throw new WorkspaceError(409, 'STAGE_RUN_NOT_COMPLETABLE', 'the stage run is already completed')
+          }
+        }
         const checklistKey = DOCUMENT_CHECKLIST_MAP[input.kind]
         if (checklistKey !== undefined) {
           await client.query(
@@ -911,6 +937,16 @@ export class PostgresProjectWorkspace {
              WHERE project_id = $2 AND stage = $3 AND key = $4 AND status = 'open' AND active = true`,
             [id, input.project.id, input.stage, checklistKey],
           )
+        }
+        if (input.completeRun !== undefined) {
+          for (const key of ['business_idea', 'stakeholder_goals', 'feasibility_decision']) {
+            await client.query(
+              `UPDATE project_checklist_items
+               SET status = 'done', completed_at = COALESCE(completed_at, now()), evidence_document_id = $1
+               WHERE project_id = $2 AND stage = $3 AND key = $4 AND active = true`,
+              [id, input.project.id, input.stage, key],
+            )
+          }
         }
         await client.query('COMMIT')
         return mapDocument(result.rows[0]!)

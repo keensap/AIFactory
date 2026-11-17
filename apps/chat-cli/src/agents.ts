@@ -14,7 +14,7 @@
 
 import { Pool } from 'pg'
 import { SDLC_STAGES, type ProjectStage } from './sdlc.ts'
-import { TOOL_ROW_IDS } from './agent-patch.ts'
+import { TOOL_ROW_IDS, ToolRequirementError, assertToolRequirements } from './agent-patch.ts'
 
 /** Processes each stage runs. Only planning has a runtime today. */
 export const STAGE_PROCESSES: Partial<Record<ProjectStage, readonly string[]>> = {
@@ -155,6 +155,16 @@ export function parseAgent(input: unknown, options: { partial?: boolean } = {}):
 
   if (options.partial !== true && out.name === undefined) {
     throw new AgentError(400, 'NO_FIELDS', 'name is required')
+  }
+  // A configured feature whose tool is excluded by the allowlist is a silent
+  // failure at run time; reject it here instead (AR-10).
+  if (out.tools !== undefined || out.skills !== undefined) {
+    try {
+      assertToolRequirements({ tools: out.tools ?? [], hasSkills: (out.skills?.length ?? 0) > 0 })
+    } catch (error) {
+      if (error instanceof ToolRequirementError) throw new AgentError(400, error.code, error.message)
+      throw error
+    }
   }
   return out as AgentInput
 }
@@ -365,11 +375,31 @@ export interface ResolvedAssignment {
   source: 'project' | 'factory' | 'none'
 }
 
+/**
+ * Whether an agent's model can actually run.
+ *
+ * `ok: true` with a `warning` means the check could not be performed (no target,
+ * or the provider's catalogue has not been discovered yet). A definite `ok: false`
+ * rejects the save, because an agent pointed at a model the Factory provider does
+ * not offer would fail only when a run starts.
+ */
+export type AgentModelCheck = (
+  model: string,
+) => Promise<{ ok: true; warning?: string } | { ok: false; message: string }>
+
 export class AgentService {
   private readonly store: AgentStore
+  private readonly checkModel?: AgentModelCheck
 
-  constructor(store: AgentStore) {
+  constructor(store: AgentStore, options: { checkModel?: AgentModelCheck } = {}) {
     this.store = store
+    if (options.checkModel !== undefined) this.checkModel = options.checkModel
+  }
+
+  private async assertModel(model: string | null | undefined): Promise<void> {
+    if (model === null || model === undefined || model === '' || this.checkModel === undefined) return
+    const result = await this.checkModel(model)
+    if (!result.ok) throw new AgentError(400, 'AGENT_MODEL_UNKNOWN', result.message)
   }
 
   async migrate(): Promise<void> {
@@ -387,12 +417,26 @@ export class AgentService {
   }
 
   async create(input: unknown): Promise<AgentRecord> {
-    return this.store.create(parseAgent(input))
+    const parsed = parseAgent(input)
+    await this.assertModel(parsed.model)
+    return this.store.create(parsed)
   }
 
   async update(id: string, input: unknown): Promise<AgentRecord> {
     const agent = await this.get(id)
-    const updated = await this.store.update(agent.id, parseAgent(input, { partial: true }))
+    const patch = parseAgent(input, { partial: true })
+    if (patch.model !== undefined) await this.assertModel(patch.model)
+    // Patching only one of tools/skills can break the pair: validate the result.
+    try {
+      assertToolRequirements({
+        tools: patch.tools ?? agent.tools ?? [],
+        hasSkills: (patch.skills ?? agent.skills ?? []).length > 0,
+      })
+    } catch (error) {
+      if (error instanceof ToolRequirementError) throw new AgentError(400, error.code, error.message)
+      throw error
+    }
+    const updated = await this.store.update(agent.id, patch)
     if (updated === undefined) throw new AgentError(404, 'AGENT_NOT_FOUND', `no agent "${id}"`)
     return updated
   }

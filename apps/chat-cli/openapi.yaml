@@ -1980,9 +1980,11 @@ paths:
   /api/agents/{agentId}/test:
     post:
       tags: [agents]
-      summary: Boot the agent's composition and report (admin)
+      summary: Verify the agent's composition (admin)
+      description: Offline by default - a local stand-in endpoint with no credentials, asserting the request the harness made. mode=online uses the real model.
       parameters:
         - {name: agentId, in: path, required: true, schema: {type: string}}
+        - {name: mode, in: query, required: false, schema: {type: string, enum: [offline, online]}}
       responses:
         '200':
           description: Probe result
@@ -2969,8 +2971,17 @@ components:
     AgentProbe:
       type: object
       properties:
-        ok: {type: boolean, description: True when the composition was accepted}
+        ok: {type: boolean, description: True only when every check passed}
         configAccepted: {type: boolean}
+        checks:
+          type: array
+          description: Offline mode only.
+          items:
+            type: object
+            properties:
+              name: {type: string, description: 'composition | request | persona | model | skill:<name> | tools'}
+              ok: {type: boolean}
+              detail: {type: string}
         config:
           type: object
           properties:
@@ -2981,6 +2992,15 @@ components:
               type: array
               items: {type: string}
             patchRows: {type: integer}
+        request:
+          type: object
+          description: What the harness actually sent (offline mode).
+          properties:
+            model: {type: [string, 'null']}
+            tools: {type: integer}
+            toolNames:
+              type: array
+              items: {type: string}
         model:
           type: object
           properties:
