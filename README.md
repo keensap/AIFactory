@@ -4,6 +4,8 @@ Detailed requirements for an autonomous, human-governed software delivery platfo
 
 **Architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the implemented system, with diagrams for the runtime, stage lifecycle, gates, model layer, agents, prerequisites, data model and trust boundaries.
 
+**Known defects and remediation plan:** [docs/design/ARCHITECTURE-REMEDIATION.md](docs/design/ARCHITECTURE-REMEDIATION.md) — 17 findings from the code review of 2026-11-17, each with evidence, remedy and acceptance checks, and a five-phase execution plan.
+
 **Primary document:** [docs/AI-Factory-Requirements.md](docs/AI-Factory-Requirements.md) — version 1.0 (draft for review), 2026-11-09.
 
 ## Implementation

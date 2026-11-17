@@ -1,10 +1,10 @@
 # AI Factory — Architecture
 
-**Status:** current state, 2026-11-17  
+**Status:** current state, 2026-11-17; corrected after the code review the same day  
 **Scope:** the backend as implemented (`apps/chat-cli`). The UI is a separate workstream; its contracts are described in [`docs/ui/`](ui/).  
-**Related:** [`AI-Factory-Requirements.md`](AI-Factory-Requirements.md) (what to build), [`design/`](design/) (per-area decisions).
+**Related:** [`AI-Factory-Requirements.md`](AI-Factory-Requirements.md) (what to build), [`design/`](design/) (per-area decisions), [`design/ARCHITECTURE-REMEDIATION.md`](design/ARCHITECTURE-REMEDIATION.md) (known defects and the plan to fix them).
 
-This document describes what exists **today**, not the target. Where something is designed but not implemented, it says so.
+This document describes what exists **today**, not the target. Where something is designed but not implemented, it says so. Where the code does not yet do what a diagram implies, a **Known defect** note follows the diagram and links to the remediation register.
 
 ---
 
@@ -135,8 +135,8 @@ stateDiagram-v2
   reviewing --> failed: role error, invalid review
   drafting --> failed: role error
   analyzing --> failed: role error
-  pending --> cancelled
-  reviewing --> cancelled
+  pending --> cancelled: planned, AR-11
+  reviewing --> cancelled: planned, AR-11
   completed --> [*]
   failed --> [*]
   cancelled --> [*]
@@ -145,6 +145,11 @@ stateDiagram-v2
 A paused run **releases its lease** and persists `pending_gate` + `review_cycles`, so it can wait for days and be resumed by any API instance. `claimStageRun` admits `awaiting_human` for that reason.
 
 The status column also carries `execution_attempts` and `locked_by`/`lease_expires_at`: a 120 s lease with a 30 s heartbeat prevents two executors racing the same run.
+
+> **Known defects** ([remediation register](design/ARCHITECTURE-REMEDIATION.md)):
+> - The `cancelled` transitions are **not reachable yet**: no code sets the status and there is no cancel endpoint ([AR-11](design/ARCHITECTURE-REMEDIATION.md#ar-11)).
+> - Resuming from a gate runs under the same failure rule as a first execution. A role error during *apply* or *refine* therefore sends a paused run to `failed`, from which it cannot be claimed again ([AR-04](design/ARCHITECTURE-REMEDIATION.md#ar-04)).
+> - The model target is pinned per lease segment, not per run, so a resumed run uses the target current at resume time ([AR-06](design/ARCHITECTURE-REMEDIATION.md#ar-06)).
 
 ---
 
@@ -259,6 +264,8 @@ flowchart LR
 
 Credentials never enter the database or the patch file: a route references `apiKeyEnv`, and the child process receives only the variables it needs. A failed refresh keeps the last good patch, so a bad model setting cannot stop runs.
 
+> **Known defect — fallback and breaker apply to direct calls only.** The fallback chain and circuit breaker drawn above live in `ModelRouter`, whose only caller is `POST /api/models/test`. Stage runs select the primary target through `agent-default-model` and **never fall back**: the fallback models are declared as routes in the patch but never chosen ([AR-03](design/ARCHITECTURE-REMEDIATION.md#ar-03)).
+
 ---
 
 ## 10. Per-role composition
@@ -281,6 +288,10 @@ flowchart LR
 ```
 
 The agent's model is declared **on the factory route**, so an agent can change model but never provider. Applying the agent patch last means its `agent-default-model` wins.
+
+> **Known defects:**
+> - Usage from a role whose agent overrides the model is still stamped with the **Factory** model, price and context window, so cost and context figures are wrong for that role ([AR-02](design/ARCHITECTURE-REMEDIATION.md#ar-02)).
+> - The tool allowlist is implemented as a denylist of 15 known rows. The profile has 19, so `tool-subagent-fork` stays enabled for restricted agents; the allowlist **fails open** ([AR-05](design/ARCHITECTURE-REMEDIATION.md#ar-05)).
 
 ---
 
@@ -478,18 +489,34 @@ flowchart TB
   provider -->|"text, treated as data"| dsh
 ```
 
-Rules enforced in code: admin-only for agents, settings, waivers and probes; credentials live only in the environment and the database stores variable *names*; attachment and export paths are resolved and confined to the project; harness environment is scrubbed of unrelated secrets; model content is treated as data, never instructions.
+Rules enforced in code today:
+
+- **Admin-only:** agent writes, assignment writes, agent probes, waivers and model settings call `requireAdmin`.
+- **Credentials** live only in the environment; the database stores variable *names*.
+- **Paths:** attachment and export paths are resolved and confined to the project.
+- **Harness environment** is scrubbed of unrelated secrets.
+- **Model output** is treated as data, never as instructions.
+
+Not yet enforced, despite earlier claims:
+
+- **Stage settings writes are not admin-only** ([AR-01](design/ARCHITECTURE-REMEDIATION.md#ar-01)).
+- **"Admin" means any token holder.** With an API token configured, `requireAdmin` admits every authenticated caller. There is no separate admin role, and the token comparison is not constant-time ([AR-01](design/ARCHITECTURE-REMEDIATION.md#ar-01)).
+- **Agent tool allowlists fail open** for rows they do not know ([AR-05](design/ARCHITECTURE-REMEDIATION.md#ar-05)).
+
+From Phase 1 of the remediation plan, every rule in this section cites the test that proves it ([AR-17](design/ARCHITECTURE-REMEDIATION.md#ar-17)).
 
 ---
 
-## 18. Known gaps
+## 18. Known gaps and defects
 
-These are deliberate, not oversights:
+The architecture review of 2026-11-17 found 17 shortcomings. They are tracked, with remedies and a phased plan, in [ARCHITECTURE-REMEDIATION.md](design/ARCHITECTURE-REMEDIATION.md). The defects are flagged inline above where they affect a diagram.
 
-- **Only the planning stage executes.** Other stages have a prerequisite catalogue and empty settings, but no runtime.
+These gaps are deliberate scope limits rather than defects:
+
+- **Only the planning stage executes.** Other stages have a prerequisite catalogue and empty settings, but no runtime ([AR-15](design/ARCHITECTURE-REMEDIATION.md#ar-15)).
 - **Models and agents are configured globally.** Agent assignments can be project-scoped; model targets cannot yet.
-- **Probing needs credentials.** `POST /agents/:id/test` proves the composition boots; the model reply requires a key.
-- **Paused runs never expire.** A gate can wait indefinitely; there is no timeout or auto-accept policy.
+- **The agent probe is weaker than its name.** It classifies failures by matching words in error messages, so broken compositions can be reported as accepted ([AR-08](design/ARCHITECTURE-REMEDIATION.md#ar-08)).
+- **Paused runs never expire.** A gate can wait indefinitely. Auto-approval is rejected by design; reminders are planned ([AR-16](design/ARCHITECTURE-REMEDIATION.md#ar-16)).
 - **Reverse engineering an existing codebase** is designed but not built; the waiver and document-kind mechanisms are the hooks it will use.
 - **Harness presets are unused.** The headless runner does not bind them; the composition patch is the supported path.
 
@@ -499,6 +526,7 @@ These are deliberate, not oversights:
 
 | Area | Document |
 |---|---|
+| Known defects, remedies, phased plan | [`design/ARCHITECTURE-REMEDIATION.md`](design/ARCHITECTURE-REMEDIATION.md) |
 | Stage runtime internals | [`design/STAGE-RUNTIME.md`](design/STAGE-RUNTIME.md) |
 | Gates, cycles, acceptance | [`design/STAGE-GATES.md`](design/STAGE-GATES.md) |
 | Prerequisites and readiness | [`design/STAGE-PREREQUISITES.md`](design/STAGE-PREREQUISITES.md) |
