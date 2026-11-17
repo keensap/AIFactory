@@ -18,6 +18,7 @@
  */
 
 import { Pool } from 'pg'
+import { SDLC_STAGES, STAGE_LABELS, type ProjectStage } from './sdlc.ts'
 
 export const MIN_REVIEW_CYCLES = 1
 export const MAX_REVIEW_CYCLES = 10
@@ -45,12 +46,6 @@ export const DEFAULT_PLANNING_STAGE_SETTINGS: PlanningStageSettings = {
   minRating: 0,
   maxBlockers: 0,
   maxMajor: 0,
-}
-
-export type SettingsSource = 'project' | 'factory'
-
-export interface ResolvedStageSettings extends PlanningStageSettings {
-  source: SettingsSource
 }
 
 export class StageSettingsError extends Error {
@@ -141,12 +136,89 @@ export function settingsFromContext(context: unknown): PlanningStageSettings {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Per-stage definitions
+// ---------------------------------------------------------------------------
+
+/**
+ * Settings are heterogeneous per stage, so each stage owns a definition: its
+ * defaults and a validator. A stage without a runtime has no definition and
+ * therefore no editable settings — storage is still per stage, so adding one
+ * later is code, not a migration.
+ */
+export interface StageSettingsDefinition {
+  stage: ProjectStage
+  label: string
+  defaults: Record<string, unknown>
+  /** Validate a partial update; throws `StageSettingsError`. */
+  validate(input: unknown): Record<string, unknown>
+  /** Read the stage's snapshot out of a run context's constraints, tolerantly. */
+  fromContext(constraints: unknown): Record<string, unknown>
+}
+
+const PLANNING_DEFINITION: StageSettingsDefinition = {
+  stage: 'planning',
+  label: STAGE_LABELS.planning,
+  defaults: { ...DEFAULT_PLANNING_STAGE_SETTINGS },
+  validate(input: unknown): Record<string, unknown> {
+    return { ...parseStageSettings(input, { partial: true }) }
+  },
+  fromContext(constraints: unknown): Record<string, unknown> {
+    return { ...settingsFromContext({ constraints }) }
+  },
+}
+
+export const STAGE_SETTINGS_DEFINITIONS: Partial<Record<ProjectStage, StageSettingsDefinition>> = {
+  planning: PLANNING_DEFINITION,
+}
+
+export function stageSettingsDefinition(stage: string): StageSettingsDefinition | undefined {
+  if (!(SDLC_STAGES as readonly string[]).includes(stage)) {
+    throw new StageSettingsError(400, 'INVALID_STAGE', `unknown SDLC stage ${stage}`)
+  }
+  return STAGE_SETTINGS_DEFINITIONS[stage as ProjectStage]
+}
+
+/** Effective settings for one stage: definition defaults ← Factory ← project. */
+export function mergeStageSettings(
+  stage: string,
+  ...layers: Array<Record<string, unknown> | undefined>
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...(stageSettingsDefinition(stage)?.defaults ?? {}) }
+  for (const layer of layers) {
+    if (layer === undefined) continue
+    for (const [key, value] of Object.entries(layer)) {
+      if (value !== undefined) merged[key] = value
+    }
+  }
+  return merged
+}
+
+/** The planning settings a run uses, read from its snapshotted context. */
+export function planningSettingsFromContext(context: unknown): PlanningStageSettings {
+  return settingsFromContext(context)
+}
+
+// ---------------------------------------------------------------------------
+// Storage
+// ---------------------------------------------------------------------------
+
+export type SettingsSource = 'project' | 'factory' | 'defaults'
+
+export interface ResolvedStageSettings {
+  stage: ProjectStage
+  settings: Record<string, unknown>
+  source: SettingsSource
+}
+
 export interface StageSettingsStore {
   migrate?(): Promise<void>
-  loadDefaults(): Promise<PlanningStageSettings>
-  saveDefaults(settings: PlanningStageSettings): Promise<PlanningStageSettings>
-  getProject(projectId: string): Promise<PlanningStageSettings | undefined>
-  setProject(projectId: string, settings: PlanningStageSettings | null): Promise<void>
+  /** Factory defaults per stage, as stored (not merged with definitions). */
+  loadFactory(): Promise<Record<string, Record<string, unknown>>>
+  saveFactory(stage: ProjectStage, settings: Record<string, unknown>): Promise<void>
+  getProject(projectId: string, stage: ProjectStage): Promise<Record<string, unknown> | undefined>
+  setProject(projectId: string, stage: ProjectStage, settings: Record<string, unknown> | null): Promise<void>
   close?(): Promise<void>
 }
 
@@ -168,87 +240,97 @@ export class PostgresStageSettingsStore implements StageSettingsStore {
       CREATE TABLE IF NOT EXISTS project_stage_settings (
         project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
         stage TEXT NOT NULL,
-        gate_after_each_review BOOLEAN NOT NULL,
-        max_review_cycles INTEGER NOT NULL,
-        min_rating INTEGER NOT NULL DEFAULT 0,
-        max_blockers INTEGER NOT NULL DEFAULT 0,
-        max_major INTEGER NOT NULL DEFAULT 0,
+        settings JSONB NOT NULL DEFAULT '{}'::jsonb,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         PRIMARY KEY (project_id, stage)
       );
     `)
-    // Existing installations predate the acceptance criteria columns.
-    for (const [column, definition] of [
-      ['min_rating', 'INTEGER NOT NULL DEFAULT 0'],
-      ['max_blockers', 'INTEGER NOT NULL DEFAULT 0'],
-      ['max_major', 'INTEGER NOT NULL DEFAULT 0'],
-    ] as const) {
-      const existing = await this.pool.query(
-        `SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'project_stage_settings' AND column_name = $1`,
-        [column],
+    // Upgrade a table created before settings became per-stage JSONB: move the
+    // typed columns into `settings` once, then drop them so there is one shape.
+    const upgraded = await this.pool.query<{ present: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'project_stage_settings' AND column_name = 'settings'
+       ) AS present`,
+    )
+    if (upgraded.rows[0]?.present === true) return
+
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(`ALTER TABLE project_stage_settings ADD COLUMN settings JSONB NOT NULL DEFAULT '{}'::jsonb`)
+      await client.query(
+        `UPDATE project_stage_settings
+         SET settings = jsonb_build_object(
+           'gateAfterEachReview', gate_after_each_review,
+           'maxReviewCycles', max_review_cycles,
+           'minRating', min_rating,
+           'maxBlockers', max_blockers,
+           'maxMajor', max_major
+         )
+         WHERE stage = 'planning'`,
       )
-      if ((existing.rowCount ?? 0) === 0) await this.pool.query(`ALTER TABLE project_stage_settings ADD COLUMN ${column} ${definition}`)
+      await client.query(
+        `ALTER TABLE project_stage_settings
+           DROP COLUMN IF EXISTS gate_after_each_review,
+           DROP COLUMN IF EXISTS max_review_cycles,
+           DROP COLUMN IF EXISTS min_rating,
+           DROP COLUMN IF EXISTS max_blockers,
+           DROP COLUMN IF EXISTS max_major`,
+      )
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      client.release()
     }
   }
 
-  async loadDefaults(): Promise<PlanningStageSettings> {
+  async loadFactory(): Promise<Record<string, Record<string, unknown>>> {
     const result = await this.pool.query<{ value: unknown }>(`SELECT value FROM settings WHERE key = 'stage_defaults'`)
     const value = result.rows[0]?.value
-    if (!isRecord(value) || !isRecord(value.planning)) return { ...DEFAULT_PLANNING_STAGE_SETTINGS }
-    try {
-      const parsed = parseStageSettings({ ...DEFAULT_PLANNING_STAGE_SETTINGS, ...value.planning }, { partial: true })
-      return { ...DEFAULT_PLANNING_STAGE_SETTINGS, ...parsed }
-    } catch {
-      // Corrupt settings must not stop the Factory; defaults are safe.
-      return { ...DEFAULT_PLANNING_STAGE_SETTINGS }
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
+    const out: Record<string, Record<string, unknown>> = {}
+    for (const [stage, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (entry !== null && typeof entry === 'object' && !Array.isArray(entry)) {
+        out[stage] = entry as Record<string, unknown>
+      }
     }
+    return out
   }
 
-  async saveDefaults(settings: PlanningStageSettings): Promise<PlanningStageSettings> {
+  async saveFactory(stage: ProjectStage, settings: Record<string, unknown>): Promise<void> {
+    const current = await this.loadFactory()
+    current[stage] = settings
     await this.pool.query(
       `INSERT INTO settings (key, value, updated_at) VALUES ('stage_defaults', $1::jsonb, now())
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-      [JSON.stringify({ planning: settings })],
+      [JSON.stringify(current)],
     )
-    return settings
   }
 
-  async getProject(projectId: string): Promise<PlanningStageSettings | undefined> {
-    const result = await this.pool.query<{ gate: boolean; cycles: number; minRating: number; maxBlockers: number; maxMajor: number }>(
-      `SELECT gate_after_each_review AS "gate", max_review_cycles AS "cycles",
-              min_rating AS "minRating", max_blockers AS "maxBlockers", max_major AS "maxMajor"
-       FROM project_stage_settings WHERE project_id = $1 AND stage = 'planning'`,
-      [projectId],
+  async getProject(projectId: string, stage: ProjectStage): Promise<Record<string, unknown> | undefined> {
+    const result = await this.pool.query<{ settings: unknown }>(
+      `SELECT settings FROM project_stage_settings WHERE project_id = $1 AND stage = $2`,
+      [projectId, stage],
     )
-    const row = result.rows[0]
-    return row === undefined
+    const value = result.rows[0]?.settings
+    return value === null || typeof value !== 'object' || Array.isArray(value)
       ? undefined
-      : {
-          gateAfterEachReview: row.gate,
-          maxReviewCycles: row.cycles,
-          minRating: row.minRating,
-          maxBlockers: row.maxBlockers,
-          maxMajor: row.maxMajor,
-        }
+      : (value as Record<string, unknown>)
   }
 
-  async setProject(projectId: string, settings: PlanningStageSettings | null): Promise<void> {
+  async setProject(projectId: string, stage: ProjectStage, settings: Record<string, unknown> | null): Promise<void> {
     if (settings === null) {
-      await this.pool.query(`DELETE FROM project_stage_settings WHERE project_id = $1 AND stage = 'planning'`, [projectId])
+      await this.pool.query(`DELETE FROM project_stage_settings WHERE project_id = $1 AND stage = $2`, [projectId, stage])
       return
     }
     await this.pool.query(
-      `INSERT INTO project_stage_settings
-         (project_id, stage, gate_after_each_review, max_review_cycles, min_rating, max_blockers, max_major, updated_at)
-       VALUES ($1, 'planning', $2, $3, $4, $5, $6, now())
-       ON CONFLICT (project_id, stage) DO UPDATE SET
-         gate_after_each_review = EXCLUDED.gate_after_each_review,
-         max_review_cycles = EXCLUDED.max_review_cycles,
-         min_rating = EXCLUDED.min_rating,
-         max_blockers = EXCLUDED.max_blockers,
-         max_major = EXCLUDED.max_major,
-         updated_at = now()`,
-      [projectId, settings.gateAfterEachReview, settings.maxReviewCycles, settings.minRating, settings.maxBlockers, settings.maxMajor],
+      `INSERT INTO project_stage_settings (project_id, stage, settings, updated_at)
+       VALUES ($1, $2, $3::jsonb, now())
+       ON CONFLICT (project_id, stage) DO UPDATE SET settings = EXCLUDED.settings, updated_at = now()`,
+      [projectId, stage, JSON.stringify(settings)],
     )
   }
 
@@ -257,7 +339,10 @@ export class PostgresStageSettingsStore implements StageSettingsStore {
   }
 }
 
-/** Resolve and edit planning-stage settings. */
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
 export class StageSettingsService {
   private readonly store: StageSettingsStore
 
@@ -269,41 +354,80 @@ export class StageSettingsService {
     await this.store.migrate?.()
   }
 
-  async factoryDefaults(): Promise<PlanningStageSettings> {
-    return this.store.loadDefaults()
+  /** Factory defaults for one stage, merged with its definition defaults. */
+  async factoryDefaultFor(stage: string): Promise<Record<string, unknown>> {
+    stageSettingsDefinition(stage)
+    const stored = await this.store.loadFactory()
+    return mergeStageSettings(stage, stored[stage])
   }
 
-  async updateFactoryDefaults(input: unknown): Promise<PlanningStageSettings> {
-    const patch = parseStageSettings(input, { partial: true })
+  /** Factory defaults for every stage, merged with each definition's defaults. */
+  async factoryDefaults(): Promise<Record<string, Record<string, unknown>>> {
+    const stored = await this.store.loadFactory()
+    const out: Record<string, Record<string, unknown>> = {}
+    for (const stage of SDLC_STAGES) out[stage] = mergeStageSettings(stage, stored[stage])
+    return out
+  }
+
+  async updateFactoryDefaults(stage: string, input: unknown): Promise<Record<string, unknown>> {
+    const definition = this.requireDefinition(stage)
+    const patch = definition.validate(input)
     if (Object.keys(patch).length === 0) {
       throw new StageSettingsError(400, 'NO_FIELDS', 'no recognised settings were provided')
     }
-    return this.store.saveDefaults({ ...(await this.store.loadDefaults()), ...patch })
+    const stored = await this.store.loadFactory()
+    const next = mergeStageSettings(stage, stored[stage], patch)
+    await this.store.saveFactory(stage as ProjectStage, next)
+    return next
   }
 
-  /** Project override, or the Factory default when the project has none. */
-  async resolve(projectId: string): Promise<ResolvedStageSettings> {
-    const project = await this.store.getProject(projectId)
-    if (project !== undefined) return { ...project, source: 'project' }
-    return { ...(await this.store.loadDefaults()), source: 'factory' }
-  }
-
-  async setProject(projectId: string, input: unknown): Promise<ResolvedStageSettings> {
-    if (input === null) {
-      await this.store.setProject(projectId, null)
-    } else {
-      const patch = parseStageSettings(input, { partial: true })
-      if (Object.keys(patch).length === 0) {
-        throw new StageSettingsError(400, 'NO_FIELDS', 'no recognised settings were provided')
-      }
-      const current = (await this.store.getProject(projectId)) ?? (await this.store.loadDefaults())
-      const next: PlanningStageSettings = { ...current, ...patch }
-      await this.store.setProject(projectId, next)
+  async resolve(projectId: string, stage: string): Promise<ResolvedStageSettings> {
+    stageSettingsDefinition(stage)
+    const project = await this.store.getProject(projectId, stage as ProjectStage)
+    if (project !== undefined) {
+      return { stage: stage as ProjectStage, settings: mergeStageSettings(stage, project), source: 'project' }
     }
-    return this.resolve(projectId)
+    const factory = (await this.store.loadFactory())[stage]
+    if (factory !== undefined) {
+      return { stage: stage as ProjectStage, settings: mergeStageSettings(stage, factory), source: 'factory' }
+    }
+    return { stage: stage as ProjectStage, settings: mergeStageSettings(stage), source: 'defaults' }
+  }
+
+  async setProject(projectId: string, stage: string, input: unknown): Promise<ResolvedStageSettings> {
+    const definition = this.requireDefinition(stage)
+    if (input === null) {
+      await this.store.setProject(projectId, stage as ProjectStage, null)
+      return this.resolve(projectId, stage)
+    }
+    const patch = definition.validate(input)
+    if (Object.keys(patch).length === 0) {
+      throw new StageSettingsError(400, 'NO_FIELDS', 'no recognised settings were provided')
+    }
+    const current = await this.resolve(projectId, stage)
+    await this.store.setProject(projectId, stage as ProjectStage, { ...current.settings, ...patch })
+    return this.resolve(projectId, stage)
+  }
+
+  /** The planning settings a run should start with. */
+  async planning(projectId: string): Promise<PlanningStageSettings> {
+    const resolved = await this.resolve(projectId, 'planning')
+    return { ...DEFAULT_PLANNING_STAGE_SETTINGS, ...(resolved.settings as Partial<PlanningStageSettings>) }
   }
 
   async close(): Promise<void> {
     await this.store.close?.()
+  }
+
+  private requireDefinition(stage: string): StageSettingsDefinition {
+    const definition = stageSettingsDefinition(stage)
+    if (definition === undefined) {
+      throw new StageSettingsError(
+        501,
+        'STAGE_SETTINGS_NOT_IMPLEMENTED',
+        `settings exist only for stages with a runtime; the ${stage} stage has no settings yet`,
+      )
+    }
+    return definition
   }
 }

@@ -1709,10 +1709,109 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/settings/stages:
+    get:
+      tags: [stage-runs]
+      summary: Factory defaults for every stage
+      responses:
+        '200':
+          description: Per-stage defaults
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stages:
+                    type: object
+                    additionalProperties: {type: object, additionalProperties: true}
+                    description: Keyed by stage; stages without a runtime are empty objects.
+        '503':
+          description: STAGE_SETTINGS_NOT_CONFIGURED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/settings/stages/{stage}:
+    get:
+      tags: [stage-runs]
+      summary: Factory default for one stage
+      parameters:
+        - {name: stage, in: path, required: true, schema: {$ref: '#/components/schemas/ProjectStage'}}
+      responses:
+        '200':
+          description: The stage default
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stage: {$ref: '#/components/schemas/ProjectStage'}
+                  settings: {type: object, additionalProperties: true}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags: [stage-runs]
+      summary: Update a stage Factory default (alias of PATCH)
+      parameters:
+        - {name: stage, in: path, required: true, schema: {$ref: '#/components/schemas/ProjectStage'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        '200':
+          description: Updated default
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stage: {$ref: '#/components/schemas/ProjectStage'}
+                  settings: {type: object, additionalProperties: true}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '501':
+          description: STAGE_SETTINGS_NOT_IMPLEMENTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      tags: [stage-runs]
+      summary: Update a stage Factory default
+      parameters:
+        - {name: stage, in: path, required: true, schema: {$ref: '#/components/schemas/ProjectStage'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        '200':
+          description: Updated default
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stage: {$ref: '#/components/schemas/ProjectStage'}
+                  settings: {type: object, additionalProperties: true}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '501':
+          description: STAGE_SETTINGS_NOT_IMPLEMENTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/settings/stage-defaults:
     get:
       tags: [stage-runs]
       summary: Factory defaults for planning-stage review settings
+      deprecated: true
       responses:
         '200':
           description: Defaults
@@ -1874,12 +1973,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
-  /api/projects/{id}/stages/planning/settings:
+  /api/projects/{id}/stages/{stage}/settings:
     get:
       tags: [stage-runs]
-      summary: Effective planning-stage settings for a project
+      summary: Effective settings for a project stage
       parameters:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: stage, in: path, required: true, schema: {$ref: '#/components/schemas/ProjectStage'}}
       responses:
         '200':
           description: Settings with their source
@@ -1888,7 +1988,9 @@ paths:
               schema:
                 type: object
                 properties:
-                  settings: {$ref: '#/components/schemas/ResolvedStageSettings'}
+                  stage: {$ref: '#/components/schemas/ProjectStage'}
+                  settings: {type: object, additionalProperties: true}
+                  source: {type: string, enum: [project, factory, defaults]}
         '501':
           description: STAGE_SETTINGS_NOT_IMPLEMENTED
           content:
@@ -1900,6 +2002,7 @@ paths:
       summary: Set a project override (alias of PATCH)
       parameters:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: stage, in: path, required: true, schema: {$ref: '#/components/schemas/ProjectStage'}}
       requestBody:
         required: true
         content:
@@ -1913,7 +2016,9 @@ paths:
               schema:
                 type: object
                 properties:
-                  settings: {$ref: '#/components/schemas/ResolvedStageSettings'}
+                  stage: {$ref: '#/components/schemas/ProjectStage'}
+                  settings: {type: object, additionalProperties: true}
+                  source: {type: string, enum: [project, factory, defaults]}
         '400':
           $ref: '#/components/responses/BadRequest'
     patch:
@@ -1921,6 +2026,7 @@ paths:
       summary: Set a project override
       parameters:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: stage, in: path, required: true, schema: {$ref: '#/components/schemas/ProjectStage'}}
       requestBody:
         required: true
         content:
@@ -1934,7 +2040,9 @@ paths:
               schema:
                 type: object
                 properties:
-                  settings: {$ref: '#/components/schemas/ResolvedStageSettings'}
+                  stage: {$ref: '#/components/schemas/ProjectStage'}
+                  settings: {type: object, additionalProperties: true}
+                  source: {type: string, enum: [project, factory, defaults]}
         '400':
           $ref: '#/components/responses/BadRequest'
     delete:
@@ -1942,6 +2050,7 @@ paths:
       summary: Clear the project override (fall back to the Factory default)
       parameters:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: stage, in: path, required: true, schema: {$ref: '#/components/schemas/ProjectStage'}}
       responses:
         '200':
           description: Effective settings after clearing
@@ -1950,7 +2059,9 @@ paths:
               schema:
                 type: object
                 properties:
-                  settings: {$ref: '#/components/schemas/ResolvedStageSettings'}
+                  stage: {$ref: '#/components/schemas/ProjectStage'}
+                  settings: {type: object, additionalProperties: true}
+                  source: {type: string, enum: [project, factory, defaults]}
 
   /api/stage-runs/{runId}/export:
     post:
@@ -2666,11 +2777,14 @@ components:
         maxBlockers: {type: integer, minimum: 0, maximum: 20, description: Blockers tolerated before revising again}
         maxMajor: {type: integer, minimum: 0, maximum: 50, description: Major findings tolerated before revising again}
     ResolvedStageSettings:
-      allOf:
-        - $ref: '#/components/schemas/PlanningStageSettings'
-        - type: object
-          properties:
-            source: {type: string, enum: [project, factory]}
+      type: object
+      properties:
+        stage: {$ref: '#/components/schemas/ProjectStage'}
+        settings:
+          type: object
+          additionalProperties: true
+          description: Heterogeneous per stage; planning carries gate, cycle and acceptance fields.
+        source: {type: string, enum: [project, factory, defaults]}
     PendingGate:
       type: object
       description: The question a paused run is waiting on. The draft is in run.draftMarkdown; no document or PDF exists yet.

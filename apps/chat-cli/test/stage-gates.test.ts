@@ -57,7 +57,7 @@ function harness(script: Script) {
       reviewIndex += 1
       return decision
     },
-    stageSettings: { resolve: async () => settings },
+    stageSettings: { planning: async () => settings },
   })
 
   return {

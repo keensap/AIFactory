@@ -122,15 +122,22 @@ Planning & Feasibility — review settings
 
 | Purpose | Call |
 |---|---|
-| Factory defaults | `GET` / `PATCH /api/settings/stage-defaults` |
-| Project override | `GET` / `PATCH` / `DELETE /api/projects/:id/stages/planning/settings` |
+| Factory defaults (all stages) | `GET /api/settings/stages` |
+| Factory default (one stage) | `GET` / `PATCH` / `POST /api/settings/stages/:stage` |
+| Project override | `GET` / `PATCH` / `POST` / `DELETE /api/projects/:id/stages/:stage/settings` |
 
 ```json
-{ "stageDefaults": { "gateAfterEachReview": false, "maxReviewCycles": 3 } }
-{ "settings": { "gateAfterEachReview": true, "maxReviewCycles": 3, "source": "project" } }
+{ "stages": { "planning": { "gateAfterEachReview": false, "maxReviewCycles": 3, "minRating": 0, "maxBlockers": 0, "maxMajor": 0 },
+              "design": {} } }
+```
+```json
+{ "stage": "planning", "source": "project",
+  "settings": { "gateAfterEachReview": true, "maxReviewCycles": 3, "minRating": 95, "maxBlockers": 0, "maxMajor": 1 } }
 ```
 
-- Show `source` (`project` or `factory`) next to the controls so the user knows what they are overriding.
+Only stages with a runtime have settings. Show the planning controls today; for another stage, `settings` is `{}` and `PATCH` returns `501 STAGE_SETTINGS_NOT_IMPLEMENTED` — render "this stage has no settings yet" rather than an error.
+
+- Show `source` (`project`, `factory` or `defaults`) next to the controls so the user knows what they are overriding.
 - The number is only meaningful when gating is **off**; disable the input (with a hint) when gating is on, but still send it.
 - Ranges: cycles 1–10, rating 0–100, blockers 0–20, major 0–50. Surface `INVALID_REVIEW_CYCLES`, `INVALID_MIN_RATING`, `INVALID_MAX_BLOCKERS`, `INVALID_MAX_MAJOR` on the fields.
 - Explain the early stop in one line: "The run stops revising as soon as all three hold, and asks you to approve." Setting `minRating: 0` with `0`/`0` means only the reviewer's own approval ends the loop.

@@ -588,6 +588,149 @@ The stage is never started with silently empty context.
 
 The catalogue is seeded in `stage_prerequisites` and can be edited without a deploy. Document kinds are a convention (`telos_report`, `business_brief`, `requirements_spec`, `design_spec`, `architecture_spec`, `tech_stack`, `test_plan`, `deployment_plan`), not a constraint: uploads may use any kind.
 
+### Stage settings
+
+Settings are **per stage and per project**, stored as JSONB because each stage needs different knobs. A stage without a runtime has no settings yet (its defaults are `{}` and updates return `501 STAGE_SETTINGS_NOT_IMPLEMENTED`) — but the storage, precedence and endpoints are already stage-generic.
+
+Resolution is **definition defaults ← Factory default ← project override**, and a run snapshots the resolved values at start, so changing them mid-run affects later runs only.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/settings/stages` | Factory defaults for every stage |
+| `GET` | `/api/settings/stages/:stage` | Factory default for one stage |
+| `POST` / `PATCH` | `/api/settings/stages/:stage` | Update a stage's Factory default |
+| `GET` | `/api/projects/:id/stages/:stage/settings` | Effective settings and their source |
+| `POST` / `PATCH` | `/api/projects/:id/stages/:stage/settings` | Set a project override |
+| `DELETE` | `/api/projects/:id/stages/:stage/settings` | Clear the override |
+
+```json
+{ "stages": {
+    "planning": { "gateAfterEachReview": false, "maxReviewCycles": 3, "minRating": 0, "maxBlockers": 0, "maxMajor": 0 },
+    "requirements": {}, "design": {}, "architecture": {}, "development": {}, "testing": {}, "deployment": {}, "maintenance": {} } }
+```
+
+```json
+{ "stage": "planning", "source": "project",
+  "settings": { "gateAfterEachReview": true, "maxReviewCycles": 3, "minRating": 92, "maxBlockers": 0, "maxMajor": 2 } }
+```
+
+`source` is `project` | `factory` | `defaults`.
+
+**Planning settings** (the only stage with a runtime so far):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `gateAfterEachReview` | `false` | Pause after **every** non-approved review and ask before applying its changes |
+| `maxReviewCycles` | `3` | Autonomous write→review cycles when gating is off, counted **after** the first review (1–10) |
+| `minRating` | `0` | Minimum overall document rating (0–100) to stop revising early |
+| `maxBlockers` | `0` | Blockers tolerated before revising again |
+| `maxMajor` | `0` | Major findings tolerated before revising again |
+
+**How the loop ends.** After each review the reviewer returns `rating` (0–100) and findings by severity. The run **stops revising immediately** — going straight to the final gate for human approval — when all of these hold:
+
+```
+blockers <= maxBlockers   AND   major <= maxMajor   AND   rating >= minRating
+```
+
+Otherwise it keeps revising (or gates, when `gateAfterEachReview` is on) until `maxReviewCycles` is spent, then it asks for approval anyway. A reviewer that returns no rating (older/simpler reviewer) falls back to its `decision`: `approved` plus the issue limits.
+
+Severities count as: `blocker`/`critical`/`blocking` → blockers, `major` → major, everything else → minor.
+
+The gate payload reports the outcome, so the UI can show why the run stopped:
+
+```json
+{ "pendingGate": { "kind": "final", "accepted": true, "rating": 96,
+  "counts": { "blockers": 0, "major": 1, "minor": 2 },
+  "criteria": { "minRating": 95, "maxBlockers": 0, "maxMajor": 1 } } }
+```
+
+Validation: `400 INVALID_GATE_SETTING`, `400 INVALID_REVIEW_CYCLES` (1–10), `400 INVALID_MIN_RATING` (0–100), `400 INVALID_MAX_BLOCKERS` (0–20), `400 INVALID_MAX_MAJOR` (0–50), `400 NO_FIELDS`, `400 INVALID_STAGE`, `501 STAGE_SETTINGS_NOT_IMPLEMENTED`.
+
+`GET/PATCH /api/settings/stage-defaults` remains as a **deprecated alias** for the planning stage.
+
+### Review gates and the final decision
+
+A planning run does **not** complete on its own. It pauses at a **gate** with status `awaiting_human` and a `pendingGate`, releases its lease, and resumes when a human answers. Two gates exist:
+
+| `pendingGate.kind` | When | Asked | Answered with |
+|---|---|---|---|
+| `review_changes` | after a review that is not `approved`, **when gating is on** | "Apply the reviewer findings, or accept the draft as it is?" | `POST …/gate {action:"apply"\|"accept"}` |
+| `final` | an approved review, or the automatic cycle budget is spent | "Complete the stage, or refine it further?" | `POST …/decision {decision, refine}` |
+
+```json
+{ "run": { "status": "awaiting_human",
+  "pendingGate": { "kind": "review_changes", "cycle": 0, "maxReviewCycles": 3,
+    "gateAfterEachReview": true, "reviewDecision": "needs_revision",
+    "findings": [ { "id": "F-001", "severity": "major" } ],
+    "question": "Apply the reviewer findings, or accept the draft as it is?",
+    "waitingSince": "2026-11-16T17:00:00.000Z" } } }
+```
+
+**Applying or accepting a review**
+
+```bash
+curl -X POST /api/stage-runs/<runId>/gate -d '{"action":"apply"}'   # revise, then review again
+curl -X POST /api/stage-runs/<runId>/gate -d '{"action":"accept"}'  # skip changes, go to the final gate
+```
+
+`apply` runs the author with the findings, then reviews again (another review gate if gating is on). `accept` overrides the reviewer and moves straight to the final gate, recording the override.
+
+**The final gate**
+
+```bash
+curl -X POST /api/stage-runs/<runId>/decision -d '{"decision":"go","note":"Approved by sponsor"}'
+curl -X POST /api/stage-runs/<runId>/decision -d '{"refine":true}'
+```
+
+- `decision` (`go` / `conditional_go` / `no_go`) is required unless `refine` is true.
+- `refine: true` runs one more review plus a revision if needed, then returns to the final gate. Nothing is completed.
+- Without `refine`, the stage becomes `completed`: the Markdown document is stored, the PDF is produced, and the `feasibility_decision` checklist item is marked done.
+
+**Neither the document nor the PDF exists before approval.** While a run is paused, the draft is available as `run.draftMarkdown`.
+
+Errors: `409 STAGE_RUN_NOT_AT_REVIEW_GATE` (wrong gate kind for `/gate`), `409 STAGE_RUN_NOT_AWAITING_DECISION` (wrong gate kind for `/decision`), `400 INVALID_GATE_ACTION`, `400 INVALID_HUMAN_DECISION`.
+
+### Stage prerequisites and readiness
+
+Every stage declares what it needs before it can run. A prerequisite is satisfied by a brief, an uploaded document, a project document of a given kind, or an **admin waiver with a reason** — so a project can start at any stage when the evidence exists.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/stages` | The catalogue: every stage and its prerequisites |
+| `GET` | `/api/projects/:id/stages/:stage/readiness` | What is present, what is missing |
+| `POST` | `/api/projects/:id/stages/:stage/waivers` | Record a waiver (admin) |
+| `DELETE` | `/api/projects/:id/stages/:stage/waivers/:key` | Remove a waiver (admin) |
+
+```json
+{ "projectId": "…", "stage": "planning", "ready": false,
+  "prerequisites": [ { "key": "project-brief", "label": "Project brief", "required": true,
+    "satisfied": false, "via": null,
+    "accepts": [ { "kind": "brief", "label": "the business brief on a run" },
+                 { "kind": "attachment", "min": 1, "label": "an uploaded document" } ] } ],
+  "missing": [ { "key": "project-brief", "label": "Project brief",
+    "accepts": ["the business brief on a run", "an uploaded document", "a business brief document"] } ] }
+```
+
+`via` is `brief` | `attachment` | `document` | `waiver`.
+
+```bash
+curl -X POST /api/projects/<id>/stages/planning/waivers \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"project-brief","reason":"client supplied the brief verbally"}'
+```
+
+A waiver is stored with its reason and satisfies that prerequisite until removed (`400 INVALID_WAIVER_REASON` for a missing reason, `404 PREREQUISITE_NOT_FOUND` for an unknown key, `404 WAIVER_NOT_FOUND` when removing a non-existent one).
+
+**Enforcement.** Starting a planning run evaluates the same rules, treating the submitted `brief` as evidence. When required evidence is missing, the run is refused:
+
+```
+409 STAGE_PREREQUISITES_MISSING — the planning stage needs: Project brief (project-brief). Provide the evidence or waive it with a reason.
+```
+
+The stage is never started with silently empty context.
+
+The catalogue is seeded in `stage_prerequisites` and can be edited without a deploy. Document kinds are a convention (`telos_report`, `business_brief`, `requirements_spec`, `design_spec`, `architecture_spec`, `tech_stack`, `test_plan`, `deployment_plan`), not a constraint: uploads may use any kind.
+
 ### Planning-stage settings
 
 How much review happens before a human is asked. Values resolve **project override → Factory default**; a run snapshots them at start, so changing them mid-run affects later runs only.

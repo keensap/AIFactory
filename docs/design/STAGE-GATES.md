@@ -21,6 +21,8 @@ Now a run **pauses at gates** and resumes when a human answers:
 
 ## 2. Settings
 
+Settings are stored **per project and per stage** as JSONB, because each stage needs different knobs: `project_stage_settings(project_id, stage, settings)`. A stage's schema lives in code (`STAGE_SETTINGS_DEFINITIONS`); a stage without a runtime has no definition, so its settings are `{}` and updates return `501`. Resolution is **definition defaults ← Factory default ← project override**, and the Factory defaults are one JSONB document keyed by stage.
+
 | Field | Default | Meaning |
 |---|---|---|
 | `gateAfterEachReview` | `false` | Pause after every non-approved review and ask before applying changes |
@@ -31,8 +33,9 @@ Now a run **pauses at gates** and resumes when a human answers:
 
 Resolution is **project override → Factory default**. Endpoints:
 
-- `GET/PATCH /api/settings/stage-defaults`
-- `GET/PATCH/DELETE /api/projects/:id/stages/planning/settings`
+- `GET /api/settings/stages`, `GET/PATCH /api/settings/stages/:stage` (Factory defaults)
+- `GET/PATCH/DELETE /api/projects/:id/stages/:stage/settings` (project override)
+- `GET/PATCH /api/settings/stage-defaults` is a deprecated alias for the planning default.
 
 A run **snapshots** the resolved values into its context packet at start, so changing settings mid-run cannot alter an in-flight run. A corrupt stored value falls back to the defaults rather than blocking runs.
 

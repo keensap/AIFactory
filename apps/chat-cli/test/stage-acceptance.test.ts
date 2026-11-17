@@ -39,7 +39,7 @@ function harness(reviews: string[], settings: PlanningStageSettings) {
       index += 1
       return next
     },
-    stageSettings: { resolve: async () => settings },
+    stageSettings: { planning: async () => settings },
   })
   return {
     root, runtime, workspace, projects,

@@ -242,8 +242,8 @@ async function route(
         stageTelemetry: 'GET /api/stage-runs/:runId/telemetry',
         stageExport: 'POST /api/stage-runs/:runId/export',
         stageGate: 'POST /api/stage-runs/:runId/gate',
-        stageSettings: 'GET/POST/PATCH/DELETE /api/projects/:id/stages/planning/settings',
-        stageDefaults: 'GET/POST/PATCH /api/settings/stage-defaults',
+        stageSettings: 'GET/POST/PATCH/DELETE /api/projects/:id/stages/:stage/settings',
+        stageDefaults: 'GET/POST/PATCH /api/settings/stages[/:stage]',
         stageCatalogue: 'GET /api/stages',
         stageReadiness: 'GET /api/projects/:id/stages/:stage/readiness',
         stageWaiver: 'POST/DELETE /api/projects/:id/stages/:stage/waivers',
@@ -443,17 +443,43 @@ async function route(
     return
   }
 
+  // Per-stage settings: Factory defaults for every stage, and one stage at a time.
+  if (resource === 'settings' && rest[0] === 'stages') {
+    const stageSettings = options.stageSettings
+    if (stageSettings === undefined) {
+      throw new HttpError(503, 'stage settings are disabled; set DATABASE_URL', 'STAGE_SETTINGS_NOT_CONFIGURED')
+    }
+    if (rest.length === 1 && request.method === 'GET') {
+      sendJson(response, 200, { stages: await stageSettings.factoryDefaults() })
+      return
+    }
+    if (rest.length === 2) {
+      const stage = decodeURIComponent(rest[1]!)
+      if (request.method === 'GET') {
+        sendJson(response, 200, { stage, settings: await stageSettings.factoryDefaultFor(stage) })
+        return
+      }
+      if (request.method === 'PATCH' || request.method === 'POST') {
+        sendJson(response, 200, { stage, settings: await stageSettings.updateFactoryDefaults(stage, await readJson(request)) })
+        return
+      }
+      throw new HttpError(405, 'method not allowed', 'METHOD_NOT_ALLOWED')
+    }
+    throw new HttpError(404, 'not found', 'NOT_FOUND')
+  }
+
+  // Deprecated alias for the planning defaults, kept for existing clients.
   if (resource === 'settings' && rest.length === 1 && rest[0] === 'stage-defaults') {
     const stageSettings = options.stageSettings
     if (stageSettings === undefined) {
       throw new HttpError(503, 'stage settings are disabled; set DATABASE_URL', 'STAGE_SETTINGS_NOT_CONFIGURED')
     }
     if (request.method === 'GET') {
-      sendJson(response, 200, { stageDefaults: await stageSettings.factoryDefaults() })
+      sendJson(response, 200, { stageDefaults: await stageSettings.factoryDefaultFor('planning') })
       return
     }
     if (request.method === 'PATCH' || request.method === 'POST') {
-      sendJson(response, 200, { stageDefaults: await stageSettings.updateFactoryDefaults(await readJson(request)) })
+      sendJson(response, 200, { stageDefaults: await stageSettings.updateFactoryDefaults('planning', await readJson(request)) })
       return
     }
     throw new HttpError(405, 'method not allowed', 'METHOD_NOT_ALLOWED')
@@ -1187,21 +1213,18 @@ async function handleProjects(
     if (stageSettings === undefined) {
       throw new HttpError(503, 'stage settings are disabled; set DATABASE_URL', 'STAGE_SETTINGS_NOT_CONFIGURED')
     }
-    const stage = decodeURIComponent(rest[2]!)
-    if (stage !== 'planning') {
-      throw new HttpError(501, 'settings exist only for the planning stage so far', 'STAGE_SETTINGS_NOT_IMPLEMENTED')
-    }
     await projects.get(id)
+    const stage = decodeURIComponent(rest[2]!)
     if (request.method === 'GET') {
-      sendJson(response, 200, { settings: await stageSettings.resolve(id) })
+      sendJson(response, 200, await stageSettings.resolve(id, stage))
       return
     }
     if (request.method === 'PATCH' || request.method === 'POST') {
-      sendJson(response, 200, { settings: await stageSettings.setProject(id, await readJson(request)) })
+      sendJson(response, 200, await stageSettings.setProject(id, stage, await readJson(request)))
       return
     }
     if (request.method === 'DELETE') {
-      sendJson(response, 200, { settings: await stageSettings.setProject(id, null) })
+      sendJson(response, 200, await stageSettings.setProject(id, stage, null))
       return
     }
     throw new HttpError(405, 'method not allowed', 'METHOD_NOT_ALLOWED')

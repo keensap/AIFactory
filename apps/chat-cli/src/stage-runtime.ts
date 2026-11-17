@@ -71,8 +71,8 @@ export interface StageRuntimeDeps {
   pinModel?: () => ModelPin | undefined
   /** Test seam: replace PDF rendering (e.g. to simulate a failure). */
   renderPdf?: typeof renderReportPdf
-  /** Resolves the project's planning-stage review settings (gate + cycles). */
-  stageSettings?: { resolve(projectId: string): Promise<PlanningStageSettings> }
+  /** Resolves the project's planning-stage settings (gate, cycles, acceptance). */
+  stageSettings?: { planning(projectId: string): Promise<PlanningStageSettings> }
   /** Refuses to start a run when the stage's prerequisites are not met. */
   prerequisites?: { ensureReady(projectId: string, stage: ProjectStage, options?: { incomingBrief?: boolean }): Promise<unknown> }
 }
@@ -203,7 +203,7 @@ export class PlanningStageRuntime {
   private readonly activeRuns = new Set<string>()
   private readonly pinModel?: () => ModelPin | undefined
   private readonly renderPdf: typeof renderReportPdf
-  private readonly stageSettings?: { resolve(projectId: string): Promise<PlanningStageSettings> }
+  private readonly stageSettings?: { planning(projectId: string): Promise<PlanningStageSettings> }
   private readonly prerequisites?: { ensureReady(projectId: string, stage: ProjectStage, options?: { incomingBrief?: boolean }): Promise<unknown> }
   /** Model pins of runs currently executing, by run id. */
   private readonly pins = new Map<string, ModelPin>()
@@ -307,7 +307,7 @@ export class PlanningStageRuntime {
       return { ...DEFAULT_PLANNING_STAGE_SETTINGS, maxReviewCycles: this.maxReviewCycles }
     }
     try {
-      const resolved = await this.stageSettings.resolve(projectId)
+      const resolved = await this.stageSettings.planning(projectId)
       return {
         gateAfterEachReview: resolved.gateAfterEachReview,
         maxReviewCycles: resolved.maxReviewCycles,
