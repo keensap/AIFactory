@@ -167,3 +167,67 @@ test('attachment ids must be an array of strings', { skip }, async () => {
     assert.equal(((await response.json()) as { error: { code: string } }).error.code, 'INVALID_ATTACHMENTS')
   })
 })
+
+test('the exported PDF is downloadable, and a missing file is reported clearly', { skip }, async () => {
+  await withApi(async ({ base, projectId, root }) => {
+    const pdf = await makePdf(['Invoices and card payments.'])
+    const uploaded = await upload(base, projectId, [{ name: 'brief.pdf', bytes: pdf, type: 'application/pdf' }])
+    const attachment = (await uploaded.json() as { attachments: Array<{ id: string }> }).attachments[0]!
+    const created = await fetch(`${base}/api/projects/${projectId}/stages/planning/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ brief: 'Build a portal', attachmentIds: [attachment.id] }),
+    })
+    const runId = (await created.json() as { run: { id: string } }).run.id
+    await fetch(`${base}/api/stage-runs/${runId}/execute?wait=1`, { method: 'POST' })
+    await fetch(`${base}/api/stage-runs/${runId}/decision`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: 'go' }),
+    })
+    const detail = await (await fetch(`${base}/api/stage-runs/${runId}`)).json() as {
+      run: { documents: Array<{ id: string; exportPath?: string }> }
+    }
+    const documentId = detail.run.documents[0]!.id
+    const exportPath = detail.run.documents[0]!.exportPath!
+    assert.ok(exportPath.startsWith('documents/'))
+
+    // 1. Download works.
+    const download = await fetch(`${base}/api/projects/${projectId}/documents/${documentId}/export`)
+    assert.equal(download.status, 200)
+    assert.equal(download.headers.get('content-type'), 'application/pdf')
+    assert.match(download.headers.get('content-disposition') ?? '', /filename\*=UTF-8''/)
+    const bytes = Buffer.from(await download.arrayBuffer())
+    assert.equal(bytes.subarray(0, 5).toString(), '%PDF-')
+    assert.equal(Number(download.headers.get('content-length')), bytes.byteLength)
+
+    // 2. A file the user moved or deleted is reported, not silently empty.
+    rmSync(join(root, exportPath))
+    const missing = await fetch(`${base}/api/projects/${projectId}/documents/${documentId}/export`)
+    assert.equal(missing.status, 410)
+    assert.equal(((await missing.json()) as { error: { code: string } }).error.code, 'EXPORT_FILE_MISSING')
+
+    // 3. Re-exporting recreates it and the download works again.
+    assert.equal((await fetch(`${base}/api/stage-runs/${runId}/export`, { method: 'POST' })).status, 200)
+    assert.equal((await fetch(`${base}/api/projects/${projectId}/documents/${documentId}/export`)).status, 200)
+
+    // 4. Unknown documents, and documents that never had an export.
+    assert.equal((await fetch(`${base}/api/projects/${projectId}/documents/00000000-0000-0000-0000-000000000000/export`)).status, 404)
+    const form = new FormData()
+    form.append('file', new Blob([new Uint8Array(await makePdf(['manual']))], { type: 'application/pdf' }), 'manual.pdf')
+    const manual = await (await fetch(`${base}/api/projects/${projectId}/documents`, { method: 'POST', body: form })).json() as { document: { id: string } }
+    const noExport = await fetch(`${base}/api/projects/${projectId}/documents/${manual.document.id}/export`)
+    assert.equal(noExport.status, 404)
+    assert.equal(((await noExport.json()) as { error: { code: string } }).error.code, 'DOCUMENT_NOT_EXPORTED')
+
+    // 5. A tampered export path cannot read outside documents/.
+    const { Pool } = await import('pg')
+    const pool = new Pool({ connectionString: url!, max: 1 })
+    try {
+      await pool.query(`UPDATE stage_document_exports SET path = '../.aifactory/documents/planning/escape.pdf' WHERE document_id = $1`, [documentId])
+    } finally {
+      await pool.end()
+    }
+    const escaped = await fetch(`${base}/api/projects/${projectId}/documents/${documentId}/export`)
+    assert.equal(escaped.status, 500)
+    assert.equal(((await escaped.json()) as { error: { code: string } }).error.code, 'EXPORT_PATH_INVALID')
+  })
+})

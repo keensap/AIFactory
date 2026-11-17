@@ -741,6 +741,39 @@ paths:
                   document:
                     $ref: '#/components/schemas/ProjectDocument'
 
+  /api/projects/{id}/documents/{documentId}/export:
+    get:
+      tags: [projects]
+      summary: Download the generated PDF for a stage document
+      description: Streams the file from the project's documents/ tree. Refuses a recorded path outside that directory.
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: documentId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: The PDF
+          content:
+            application/pdf:
+              schema: {type: string, format: binary}
+        '404':
+          description: DOCUMENT_NOT_FOUND or DOCUMENT_NOT_EXPORTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '410':
+          description: EXPORT_FILE_MISSING (re-export to recreate it)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: EXPORT_PATH_INVALID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/projects/{id}/documents/{documentId}/content:
     parameters:
       - $ref: '#/components/parameters/ProjectId'

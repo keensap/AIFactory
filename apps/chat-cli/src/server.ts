@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { basename, resolve } from 'node:path'
+import { basename, resolve, sep } from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { DshHarness, HarnessError } from './harness.ts'
 import {
@@ -30,7 +30,7 @@ import { DirectoryError, listDirectories } from './directories.ts'
 import { EmbeddingError } from './embeddings.ts'
 import { readMultipart, readMultipartFiles, UploadError } from './multipart.ts'
 import { AttachmentError, MAX_ATTACHMENTS_PER_UPLOAD, assertSupportedUpload } from './attachments.ts'
-import { ExportError } from './report/export.ts'
+import { EXPORT_ROOT, ExportError } from './report/export.ts'
 import { ReportPdfError } from './report/pdf.ts'
 import { PdfError } from './pdf.ts'
 import { PdfReviewError, type PdfReviewService } from './pdf-review.ts'
@@ -242,6 +242,7 @@ async function route(
         stageSettings: 'GET/PATCH/DELETE /api/projects/:id/stages/planning/settings',
         stageDefaults: 'GET/PATCH /api/settings/stage-defaults',
         attachments: 'GET/POST /api/projects/:id/attachments',
+        documentExport: 'GET /api/projects/:id/documents/:documentId/export',
         semanticIndex: 'POST /api/projects/:id/index',
         semanticSearch: 'GET /api/projects/:id/search?q=...',
         observability: 'GET /api/projects/:id/observability?hours=24',
@@ -1055,6 +1056,46 @@ async function handleProjects(
       })
       return
     }
+  }
+
+  // The generated PDF lives in the project tree; this streams it for the UI.
+  if (id !== undefined && rest.length === 4 && rest[1] === 'documents' && rest[3] === 'export' && request.method === 'GET') {
+    const workspace = requireWorkspace(options)
+    const project = await projects.get(id)
+    const documentId = decodeURIComponent(rest[2]!)
+    const document = await workspace.getDocument(id, documentId)
+    if (document === undefined) throw new HttpError(404, 'document not found', 'DOCUMENT_NOT_FOUND')
+
+    const exported = (await workspace.listDocumentExports([documentId])).get(documentId)
+    if (exported === undefined) {
+      throw new HttpError(404, 'this document has no exported PDF yet; complete the stage or POST /api/stage-runs/:id/export', 'DOCUMENT_NOT_EXPORTED')
+    }
+
+    // The recorded path is written by the server, but never trust it: resolve and
+    // confirm it stays inside <root>/documents before reading anything.
+    const documentsRoot = resolve(project.rootPath, EXPORT_ROOT)
+    const absolute = resolve(project.rootPath, exported.path)
+    if (!absolute.startsWith(`${documentsRoot}${sep}`)) {
+      throw new HttpError(500, 'the recorded export path is outside the project documents directory', 'EXPORT_PATH_INVALID')
+    }
+
+    let bytes: Buffer
+    try {
+      bytes = await readFile(absolute)
+    } catch {
+      throw new HttpError(410, 'the exported PDF is no longer on disk; re-export it', 'EXPORT_FILE_MISSING')
+    }
+
+    const name = basename(absolute)
+    const asciiName = name.replace(/[^\x20-\x7e]/g, '-').replace(/["\\]/g, '_')
+    response.writeHead(200, {
+      'Content-Type': 'application/pdf',
+      'Content-Length': String(bytes.byteLength),
+      'Content-Disposition': `inline; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+      'Cache-Control': 'no-store',
+    })
+    response.end(bytes)
+    return
   }
 
   if (id !== undefined && rest.length === 4 && rest[1] === 'documents' && rest[3] === 'content' && request.method === 'GET') {

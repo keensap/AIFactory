@@ -314,6 +314,7 @@ Stages: `planning`, `requirements`, `design`, `architecture`, `development`, `te
 | `GET` | `/api/projects/:id/documents/:documentId` | Get document metadata |
 | `PATCH` | `/api/projects/:id/documents/:documentId` | Set document status |
 | `GET` | `/api/projects/:id/documents/:documentId/content` | Download the stored file |
+| `GET` | `/api/projects/:id/documents/:documentId/export` | Download the generated PDF (from `documents/`) |
 | `GET` | `/api/projects/:id/briefing` | Read the cached AI briefing |
 | `POST` | `/api/projects/:id/briefing` | Generate or refresh the AI briefing |
 
@@ -414,6 +415,20 @@ e.g. documents/planning/TELOS Feasibility Report — ABCClothing.pdf
 ```
 
 Re-running the stage overwrites that file; the Markdown source and version history stay in `.aifactory`. `POST /api/stage-runs/:runId/export` re-renders on demand.
+
+**Downloading it.** The PDF is a file in the project tree, so the API also serves it for the UI:
+
+```bash
+curl -OJ http://127.0.0.1:8787/api/projects/<projectId>/documents/<documentId>/export
+```
+
+It returns `application/pdf` with `Content-Disposition: inline` (plus an RFC 5987 `filename*` for the em dash in the name). Three failures are distinguished:
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `DOCUMENT_NOT_EXPORTED` | 404 | the document exists but no PDF was produced yet (stage not completed) |
+| `EXPORT_FILE_MISSING` | 410 | the recorded PDF is no longer on disk — the user moved or deleted it; `POST /api/stage-runs/:runId/export` recreates it |
+| `EXPORT_PATH_INVALID` | 500 | the recorded path points outside `documents/`; refused rather than read |
 
 ```json
 { "export": { "path": "documents/planning/TELOS Feasibility Report — ABCClothing.pdf", "bytes": 48213, "documentId": "…" } }

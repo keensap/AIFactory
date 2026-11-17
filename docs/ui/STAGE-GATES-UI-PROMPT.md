@@ -145,7 +145,7 @@ Planning & Feasibility — review settings
 | `400 INVALID_REVIEW_CYCLES` / `INVALID_GATE_SETTING` | on the settings field |
 | `501 STAGE_SETTINGS_NOT_IMPLEMENTED` | other stages have no settings yet; hide the section |
 | `503 STAGE_SETTINGS_NOT_CONFIGURED` | no database; disable the section |
-| Run `completed` | show the document card with **Open PDF** and **Re-export** |
+| Run `completed` | show the document card with **Open PDF** (`GET /api/projects/:id/documents/:documentId/export`) and **Re-export** (`POST /api/stage-runs/:runId/export`); on `410 EXPORT_FILE_MISSING`, offer Re-export and retry |
 | Run `failed` | show the failure summary; gates are not available |
 
 **Polling:** while paused, the run does not change on its own. Poll slowly (or not at all) — refresh after an action instead. While executing, poll as today.

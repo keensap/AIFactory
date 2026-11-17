@@ -107,7 +107,9 @@ TELOS Feasibility Report                        [Open PDF]  [Re-export]
 documents/planning/TELOS Feasibility Report — ABCClothing.pdf · 47 KB
 ```
 
-- `Open PDF`: link to `GET /api/projects/:id/documents/:documentId/content` (the stored file) **or** offer the path as copyable text with a hint that the file is in the project folder. Do not construct a filesystem URL the browser cannot open.
+- `Open PDF`: `GET /api/projects/:id/documents/:documentId/export` returns the actual PDF with `Content-Disposition: inline`, so it opens in a tab and can be downloaded. Do not construct a filesystem URL; show `exportPath` as copyable text beside it.
+  - `404 DOCUMENT_NOT_EXPORTED` — no PDF yet (stage not completed); show "Available after the stage is approved".
+  - `410 EXPORT_FILE_MISSING` — the file was moved or deleted; offer **Re-export** (`POST /api/stage-runs/:runId/export`) and retry.
 - Show the relative `exportPath` in full — it is what the user asked for and what they will look for in their repository.
 - `Re-export`:
 
