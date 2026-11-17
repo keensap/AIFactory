@@ -137,6 +137,14 @@ export interface PendingGate {
   gateAfterEachReview: boolean
   reviewDecision: string
   findings: unknown[]
+  /** Overall document rating from the review, when the reviewer provided one. */
+  rating: number | null
+  /** Findings by severity. */
+  counts: { blockers: number; major: number; minor: number }
+  /** Whether the review met the acceptance criteria (the run could stop). */
+  accepted: boolean
+  /** The criteria in force when the gate was raised. */
+  criteria: { minRating: number; maxBlockers: number; maxMajor: number }
   waitingSince: string
 }
 

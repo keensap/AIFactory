@@ -1728,6 +1728,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+    post:
+      tags: [stage-runs]
+      summary: Update Factory defaults (alias of PATCH)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PlanningStageSettings'}
+      responses:
+        '200':
+          description: Updated defaults
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stageDefaults: {$ref: '#/components/schemas/PlanningStageSettings'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
     patch:
       tags: [stage-runs]
       summary: Update Factory defaults
@@ -1769,6 +1788,27 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+    post:
+      tags: [stage-runs]
+      summary: Set a project override (alias of PATCH)
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PlanningStageSettings'}
+      responses:
+        '200':
+          description: Effective settings after the change
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settings: {$ref: '#/components/schemas/ResolvedStageSettings'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
     patch:
       tags: [stage-runs]
       summary: Set a project override
@@ -2467,7 +2507,10 @@ components:
       type: object
       properties:
         gateAfterEachReview: {type: boolean, description: Pause after every review and ask before applying its changes}
-        maxReviewCycles: {type: integer, minimum: 1, maximum: 10, description: Revision cycles applied automatically when gating is off, counted after the first review}
+        maxReviewCycles: {type: integer, minimum: 1, maximum: 10, description: Autonomous write/review cycles when gating is off, counted after the first review}
+        minRating: {type: integer, minimum: 0, maximum: 100, description: Minimum overall rating for the run to stop revising early}
+        maxBlockers: {type: integer, minimum: 0, maximum: 20, description: Blockers tolerated before revising again}
+        maxMajor: {type: integer, minimum: 0, maximum: 50, description: Major findings tolerated before revising again}
     ResolvedStageSettings:
       allOf:
         - $ref: '#/components/schemas/PlanningStageSettings'
@@ -2487,6 +2530,20 @@ components:
         findings:
           type: array
           items: {type: object, additionalProperties: true}
+        rating: {type: [number, 'null'], description: Overall document rating 0-100, null when the reviewer did not rate}
+        counts:
+          type: object
+          properties:
+            blockers: {type: integer}
+            major: {type: integer}
+            minor: {type: integer}
+        accepted: {type: boolean, description: Whether the review met the acceptance criteria}
+        criteria:
+          type: object
+          properties:
+            minRating: {type: integer}
+            maxBlockers: {type: integer}
+            maxMajor: {type: integer}
         waitingSince: {type: string, format: date-time}
     RunTelemetry:
       type: object

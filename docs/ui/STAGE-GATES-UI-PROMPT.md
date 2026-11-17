@@ -40,6 +40,9 @@ Three rules drive everything:
 - `pendingGate: null` → not paused.
 - `pendingGate.kind` selects the panel; render from it, not from the status alone.
 - `cycle` / `maxReviewCycles` → show progress, e.g. "Review cycle 1 of 3".
+- `rating` / `counts` / `criteria` → show the score against the bar: "Rating 90/100 (needs ≥95) · 0 blockers (max 0) · 1 major (max 1)". `rating` may be `null` — show "not rated".
+- `accepted: true` means the review met the bar, which is why the final gate was reached without using the full budget. Say so: "Meets the acceptance criteria."
+- Note: a run can reach the **final** gate with `accepted: false` when the budget ran out — that is expected, not an error.
 
 ---
 
@@ -48,6 +51,7 @@ Three rules drive everything:
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ Reviewer requested changes            cycle 1 of 3           │
+│ Rating 90/100 · 0 blockers · 1 major   (needs ≥95, ≤0, ≤1)   │
 │                                                              │
 │ ● major · Economic — Budget not evidenced                    │
 │   Required: Add the budget                                   │
@@ -109,6 +113,7 @@ A **Stage settings** section: project-level under the planning stage (or project
 Planning & Feasibility — review settings
   ( ) Ask me after every review whether to apply the changes
   (•) Apply changes automatically for  [3]  review cycles
+  Stop revising early when: rating ≥ [95] · blockers ≤ [0] · major ≤ [1]
 
   Effective: Factory default           [Reset to Factory default]
 ```
@@ -127,7 +132,8 @@ Planning & Feasibility — review settings
 
 - Show `source` (`project` or `factory`) next to the controls so the user knows what they are overriding.
 - The number is only meaningful when gating is **off**; disable the input (with a hint) when gating is on, but still send it.
-- Range 1–10. Validate client-side and surface `INVALID_REVIEW_CYCLES` on the field.
+- Ranges: cycles 1–10, rating 0–100, blockers 0–20, major 0–50. Surface `INVALID_REVIEW_CYCLES`, `INVALID_MIN_RATING`, `INVALID_MAX_BLOCKERS`, `INVALID_MAX_MAJOR` on the fields.
+- Explain the early stop in one line: "The run stops revising as soon as all three hold, and asks you to approve." Setting `minRating: 0` with `0`/`0` means only the reviewer's own approval ends the loop.
 - `Reset to Factory default` → `DELETE`; then refresh and show `source: "factory"`.
 - Say clearly: **"Applies to new runs. A run that has already started keeps the settings it began with."**
 

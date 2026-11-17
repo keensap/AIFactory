@@ -554,22 +554,43 @@ How much review happens before a human is asked. Values resolve **project overri
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/settings/stage-defaults` | Factory defaults |
-| `PATCH` | `/api/settings/stage-defaults` | Update defaults |
+| `POST` / `PATCH` | `/api/settings/stage-defaults` | Update defaults |
 | `GET` | `/api/projects/:id/stages/planning/settings` | Effective settings and their source |
-| `PATCH` | `/api/projects/:id/stages/planning/settings` | Set a project override |
+| `POST` / `PATCH` | `/api/projects/:id/stages/planning/settings` | Set a project override |
 | `DELETE` | `/api/projects/:id/stages/planning/settings` | Clear the override (back to the Factory default) |
 
 ```json
-{ "stageDefaults": { "gateAfterEachReview": false, "maxReviewCycles": 3 } }
-{ "settings": { "gateAfterEachReview": true, "maxReviewCycles": 3, "source": "project" } }
+{ "stageDefaults": { "gateAfterEachReview": false, "maxReviewCycles": 3, "minRating": 0, "maxBlockers": 0, "maxMajor": 0 } }
+{ "settings": { "gateAfterEachReview": true, "maxReviewCycles": 3, "minRating": 95, "maxBlockers": 0, "maxMajor": 1, "source": "project" } }
 ```
 
 | Field | Meaning |
 |---|---|
 | `gateAfterEachReview` | `true`: pause after **every** review and ask before applying its changes. `false`: apply changes automatically. |
-| `maxReviewCycles` | Revision cycles run automatically when gating is off, counted **after** the first review (1–10). When the budget is spent, the run stops at the final gate instead of failing. |
+| `maxReviewCycles` | Autonomous write→review cycles when gating is off, counted **after** the first review (1–10). When the budget is spent, the run stops at the final gate instead of failing. |
+| `minRating` | Minimum overall document rating (0–100) for the run to stop revising early. |
+| `maxBlockers` | Blockers tolerated before the run keeps revising (0–20). |
+| `maxMajor` | Major findings tolerated before the run keeps revising (0–50). |
 
-Validation: `400 INVALID_GATE_SETTING`, `400 INVALID_REVIEW_CYCLES` (integer 1–10), `400 NO_FIELDS`. Settings exist only for `planning` so far (`501 STAGE_SETTINGS_NOT_IMPLEMENTED` otherwise). A corrupt stored value falls back to the defaults rather than blocking runs.
+**How the loop ends.** After each review the reviewer returns `rating` (0–100) and findings by severity. The run **stops revising immediately** — going straight to the final gate for human approval — when all of these hold:
+
+```
+blockers <= maxBlockers   AND   major <= maxMajor   AND   rating >= minRating
+```
+
+Otherwise it keeps revising (or gates, when `gateAfterEachReview` is on) until the `maxReviewCycles` budget is spent, then it asks for approval anyway. A reviewer that returns no rating (older/simpler reviewer) falls back to its `decision`: `approved` plus the issue limits.
+
+Severities count as: `blocker`/`critical`/`blocking` → blockers, `major` → major, everything else → minor.
+
+The gate payload reports the outcome, so the UI can show why the run stopped:
+
+```json
+{ "pendingGate": { "kind": "final", "accepted": true, "rating": 96,
+  "counts": { "blockers": 0, "major": 1, "minor": 2 },
+  "criteria": { "minRating": 95, "maxBlockers": 0, "maxMajor": 1 } } }
+```
+
+Validation: `400 INVALID_GATE_SETTING`, `400 INVALID_REVIEW_CYCLES` (1–10), `400 INVALID_MIN_RATING` (0–100), `400 INVALID_MAX_BLOCKERS` (0–20), `400 INVALID_MAX_MAJOR` (0–50), `400 NO_FIELDS`. Settings exist only for `planning` so far (`501 STAGE_SETTINGS_NOT_IMPLEMENTED` otherwise). A corrupt stored value falls back to the defaults rather than blocking runs.
 
 ### Stage event log
 

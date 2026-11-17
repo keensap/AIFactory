@@ -113,6 +113,10 @@ export interface StageContextPacket {
     maxReviewCycles: number
     /** Pause after every review and ask before applying its changes. */
     gateAfterEachReview: boolean
+    /** Acceptance criteria for stopping the revision loop early. */
+    minRating: number
+    maxBlockers: number
+    maxMajor: number
     documentKind: string
     cardinality: 'one'
   }
@@ -121,6 +125,52 @@ export interface StageContextPacket {
 export interface StageReviewResult {
   decision: StageReviewDecision
   findings: unknown[]
+  /** Overall document rating 0–100, when the reviewer provided one. */
+  rating?: number | null
+}
+
+export interface ReviewAcceptance {
+  rating: number | null
+  counts: { blockers: number; major: number; minor: number }
+  accepted: boolean
+  criteria: { minRating: number; maxBlockers: number; maxMajor: number }
+}
+
+/**
+ * Decide whether a review is good enough to stop revising.
+ *
+ * Findings are counted by severity (`blocker`/`critical`, `major`, everything
+ * else). When the reviewer supplies a rating, the numeric criteria decide. When
+ * it does not (an older or simpler reviewer), the reviewer's own `approved`
+ * decision still has to satisfy the issue counts, which keeps existing behaviour
+ * working.
+ */
+export function reviewAcceptance(review: StageReviewResult, settings: PlanningStageSettings): ReviewAcceptance {
+  const counts = { blockers: 0, major: 0, minor: 0 }
+  for (const finding of review.findings) {
+    const severity = finding !== null && typeof finding === 'object'
+      ? String((finding as Record<string, unknown>).severity ?? '').toLowerCase()
+      : ''
+    if (severity === 'blocker' || severity === 'critical' || severity === 'blocking') counts.blockers += 1
+    else if (severity === 'major') counts.major += 1
+    else counts.minor += 1
+  }
+  const rating = typeof review.rating === 'number' && Number.isFinite(review.rating)
+    ? Math.round(Math.min(100, Math.max(0, review.rating)))
+    : null
+  const issuesOk = counts.blockers <= settings.maxBlockers && counts.major <= settings.maxMajor
+  const accepted = issuesOk && (rating === null ? review.decision === 'approved' : rating >= settings.minRating)
+  return {
+    rating,
+    counts,
+    accepted,
+    criteria: { minRating: settings.minRating, maxBlockers: settings.maxBlockers, maxMajor: settings.maxMajor },
+  }
+}
+
+function acceptanceLine(acceptance: ReviewAcceptance): string {
+  const { rating, counts, criteria } = acceptance
+  return `rating ${rating === null ? 'not rated' : `${rating}/100`} (min ${criteria.minRating}), ${counts.blockers} blocker(s) (max ${criteria.maxBlockers}), ${counts.major} major (max ${criteria.maxMajor})`
 }
 
 export class StageRuntimeError extends Error {
@@ -195,6 +245,7 @@ export class PlanningStageRuntime {
       settings.maxReviewCycles,
       attachments,
       settings.gateAfterEachReview,
+      { minRating: settings.minRating, maxBlockers: settings.maxBlockers, maxMajor: settings.maxMajor },
     )
     const run = await this.workspace.createStageRun({
       projectId: project.id,
@@ -242,13 +293,16 @@ export class PlanningStageRuntime {
   /** The settings a run starts with: project override, else Factory default. */
   private async resolveSettings(projectId: string): Promise<PlanningStageSettings> {
     if (this.stageSettings === undefined) {
-      return { gateAfterEachReview: false, maxReviewCycles: this.maxReviewCycles }
+      return { ...DEFAULT_PLANNING_STAGE_SETTINGS, maxReviewCycles: this.maxReviewCycles }
     }
     try {
       const resolved = await this.stageSettings.resolve(projectId)
       return {
         gateAfterEachReview: resolved.gateAfterEachReview,
         maxReviewCycles: resolved.maxReviewCycles,
+        minRating: resolved.minRating,
+        maxBlockers: resolved.maxBlockers,
+        maxMajor: resolved.maxMajor,
       }
     } catch (error) {
       // Settings must never stop a run; fall back to the built-in defaults.
@@ -499,7 +553,7 @@ export class PlanningStageRuntime {
     cycle: number,
     settings: PlanningStageSettings,
   ): Promise<StageRunDetail> {
-    const review = await this.reviewOnce(ctx, draft)
+    const review = await this.reviewOnce(ctx, draft, settings)
     return this.afterReview(ctx, draft, analysis, cycle, settings, review)
   }
 
@@ -511,7 +565,9 @@ export class PlanningStageRuntime {
     settings: PlanningStageSettings,
     review: StageReviewResult,
   ): Promise<StageRunDetail> {
-    if (review.decision === 'approved') {
+    const acceptance = reviewAcceptance(review, settings)
+    if (acceptance.accepted) {
+      // The document meets the bar: stop revising and ask the human.
       return this.pauseAtFinalGate(ctx, draft, cycle, review, settings)
     }
     if (settings.gateAfterEachReview) {
@@ -531,8 +587,9 @@ export class PlanningStageRuntime {
   private async refineOnce(ctx: LeaseContext, _previous: StageReviewResult, settings: PlanningStageSettings): Promise<StageRunDetail> {
     let draft = ctx.run.draftMarkdown ?? ''
     let cycle = safeCycle(ctx.run.reviewCycles)
-    const review = await this.reviewOnce(ctx, draft)
-    if (review.decision !== 'approved') {
+    const review = await this.reviewOnce(ctx, draft, settings)
+    const acceptance = reviewAcceptance(review, settings)
+    if (!acceptance.accepted) {
       cycle += 1
       draft = await this.reviseOnce(ctx, draft, ctx.run.analysisMarkdown ?? '', review.findings)
       await ctx.update({ reviewCycles: cycle, draftMarkdown: draft })
@@ -540,10 +597,10 @@ export class PlanningStageRuntime {
     return this.pauseAtFinalGate(ctx, draft, cycle, review, settings)
   }
 
-  private async reviewOnce(ctx: LeaseContext, draft: string): Promise<StageReviewResult> {
+  private async reviewOnce(ctx: LeaseContext, draft: string, settings: PlanningStageSettings): Promise<StageReviewResult> {
     await ctx.update({ status: 'reviewing' })
     ctx.assertLease()
-    const rawReview = await this.runRole('reviewer', buildReviewerPrompt(ctx.project, ctx.context, draft), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span)
+    const rawReview = await this.runRole('reviewer', buildReviewerPrompt(ctx.project, ctx.context, draft, settings), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span)
     const review = parseStageReview(rawReview)
     await this.workspace.addStageReview({
       stageRunId: ctx.run.id,
@@ -551,10 +608,14 @@ export class PlanningStageRuntime {
       decision: review.decision,
       findings: review.findings,
     })
+    const acceptance = reviewAcceptance(review, settings)
     await this.appendRunEvent(ctx.project.id, ctx.run.id, 'review_decision', {
       decision: review.decision,
+      rating: acceptance.rating,
+      counts: acceptance.counts,
+      accepted: acceptance.accepted,
       findings: review.findings,
-    }, review.decision === 'approved' ? 'info' : 'warn')
+    }, acceptance.accepted ? 'info' : 'warn')
     this.traces.recordReview(ctx.span, review.decision, review.findings.length)
     return review
   }
@@ -583,6 +644,7 @@ export class PlanningStageRuntime {
     review: StageReviewResult,
     settings: PlanningStageSettings,
   ): Promise<StageRunDetail> {
+    const acceptance = reviewAcceptance(review, settings)
     const gate: PendingGate = {
       kind: 'review_changes',
       question: 'Apply the reviewer findings, or accept the draft as it is?',
@@ -591,12 +653,16 @@ export class PlanningStageRuntime {
       gateAfterEachReview: settings.gateAfterEachReview,
       reviewDecision: review.decision,
       findings: review.findings,
+      rating: acceptance.rating,
+      counts: acceptance.counts,
+      accepted: acceptance.accepted,
+      criteria: acceptance.criteria,
       waitingSince: new Date().toISOString(),
     }
     await this.workspace.updateStageRun(ctx.run.id, {
       status: 'awaiting_human',
       pendingGate: gate,
-      summaryMarkdown: buildGateSummary(ctx.run.analysisMarkdown ?? '', review, cycle, settings.maxReviewCycles, 'review'),
+      summaryMarkdown: buildGateSummary(ctx.run.analysisMarkdown ?? '', review, cycle, settings.maxReviewCycles, 'review', acceptance),
     })
     await this.appendRunEvent(ctx.project.id, ctx.run.id, 'review_gate', {
       cycle,
@@ -614,6 +680,7 @@ export class PlanningStageRuntime {
     review: StageReviewResult,
     settings: PlanningStageSettings,
   ): Promise<StageRunDetail> {
+    const acceptance = reviewAcceptance(review, settings)
     const gate: PendingGate = {
       kind: 'final',
       question: 'Complete the stage with this document, or refine it further?',
@@ -622,12 +689,16 @@ export class PlanningStageRuntime {
       gateAfterEachReview: settings.gateAfterEachReview,
       reviewDecision: review.decision,
       findings: review.findings,
+      rating: acceptance.rating,
+      counts: acceptance.counts,
+      accepted: acceptance.accepted,
+      criteria: acceptance.criteria,
       waitingSince: new Date().toISOString(),
     }
     await this.workspace.updateStageRun(ctx.run.id, {
       status: 'awaiting_human',
       pendingGate: gate,
-      summaryMarkdown: buildGateSummary(ctx.run.analysisMarkdown ?? '', review, cycle, settings.maxReviewCycles, 'final'),
+      summaryMarkdown: buildGateSummary(ctx.run.analysisMarkdown ?? '', review, cycle, settings.maxReviewCycles, 'final', acceptance),
     })
     await this.appendRunEvent(ctx.project.id, ctx.run.id, 'final_gate', { cycle, decision: review.decision })
     this.log.info({ event: 'stage.gate.final', cycle, decision: review.decision })
@@ -918,6 +989,7 @@ export function buildContextPacket(
   maxReviewCycles = DEFAULT_MAX_REVIEW_CYCLES,
   attachments: ContextAttachment[] = [],
   gateAfterEachReview = false,
+  acceptance: { minRating: number; maxBlockers: number; maxMajor: number } = { minRating: 0, maxBlockers: 0, maxMajor: 0 },
 ): StageContextPacket {
   return {
     schemaVersion: 1,
@@ -942,6 +1014,9 @@ export function buildContextPacket(
     constraints: {
       maxReviewCycles,
       gateAfterEachReview,
+      minRating: acceptance.minRating,
+      maxBlockers: acceptance.maxBlockers,
+      maxMajor: acceptance.maxMajor,
       documentKind: TELOS_DOCUMENT_KIND,
       cardinality: 'one',
     },
@@ -1020,7 +1095,13 @@ export function buildReviewerPrompt(
   project: Project,
   context: StageContextPacket,
   draft: string,
+  settings?: PlanningStageSettings,
 ): string {
+  const criteria = settings ?? { ...DEFAULT_PLANNING_STAGE_SETTINGS, ...settingsFromContext(context) }
+  const ratingRule = `Rate the document 0-100 for whether it is ready to send to the sponsor. The run stops revising as soon as ALL of these hold:
+- overall rating >= ${criteria.minRating}
+- blocker findings <= ${criteria.maxBlockers}
+- major findings <= ${criteria.maxMajor}`
   const reviewContext = {
     project: {
       name: project.name,
@@ -1053,9 +1134,12 @@ Evaluate the single TELOS report against the template and evidence. Check that:
 - the recommendation is justified by the evidence;
 - no SRS/functional specification has been substituted for the feasibility report.
 
+${ratingRule}
+
 Return ONLY JSON:
 {
   "decision": "approved" | "needs_revision" | "rejected",
+  "rating": <integer 0-100>,
   "findings": [
     {
       "id": "F-001",
@@ -1122,9 +1206,14 @@ export function parseStageReview(raw: string): StageReviewResult {
       const record = value as Record<string, unknown>
       if (!['approved', 'needs_revision', 'rejected'].includes(String(record.decision))) continue
       const findings = Array.isArray(record.findings) ? record.findings : []
+      const rawRating = record.rating
+      const rating = typeof rawRating === 'number' && Number.isFinite(rawRating)
+        ? Math.round(Math.min(100, Math.max(0, rawRating)))
+        : null
       return {
         decision: record.decision as StageReviewDecision,
         findings,
+        rating,
       }
     } catch {
       // Try the next candidate.
@@ -1159,6 +1248,7 @@ export function buildGateSummary(
   cycle: number,
   maxCycles: number,
   kind: 'review' | 'final',
+  acceptance?: ReviewAcceptance,
 ): string {
   const findings = review === undefined || review.findings.length === 0
     ? '- none'
@@ -1175,7 +1265,7 @@ ${analysis.trim()}
 
 ## Review
 
-Decision: ${review?.decision ?? 'unknown'}
+Decision: ${review?.decision ?? 'unknown'}${acceptance === undefined ? '' : `\n${acceptanceLine(acceptance)}${acceptance.accepted ? '\nAcceptance criteria: **met**' : '\nAcceptance criteria: not met'}`}
 
 Findings:
 ${findings}

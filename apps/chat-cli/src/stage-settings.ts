@@ -21,15 +21,30 @@ import { Pool } from 'pg'
 
 export const MIN_REVIEW_CYCLES = 1
 export const MAX_REVIEW_CYCLES = 10
+export const MAX_BLOCKERS_LIMIT = 20
+export const MAX_MAJOR_LIMIT = 50
 
 export interface PlanningStageSettings {
   gateAfterEachReview: boolean
   maxReviewCycles: number
+  /** Minimum overall document rating (0–100) for the run to stop revising. */
+  minRating: number
+  /** Blockers tolerated before the run keeps revising. */
+  maxBlockers: number
+  /** Major findings tolerated before the run keeps revising. */
+  maxMajor: number
 }
 
+/**
+ * Defaults preserve the previous behaviour: the reviewer's own approval decides,
+ * and any blocker or major finding keeps the run revising.
+ */
 export const DEFAULT_PLANNING_STAGE_SETTINGS: PlanningStageSettings = {
   gateAfterEachReview: false,
   maxReviewCycles: 3,
+  minRating: 0,
+  maxBlockers: 0,
+  maxMajor: 0,
 }
 
 export type SettingsSource = 'project' | 'factory'
@@ -77,6 +92,28 @@ export function parseStageSettings(input: unknown, options: { partial?: boolean 
     out.maxReviewCycles = value
   }
 
+  if (input.minRating !== undefined) {
+    const value = input.minRating
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 100) {
+      throw new StageSettingsError(400, 'INVALID_MIN_RATING', 'minRating must be an integer between 0 and 100')
+    }
+    out.minRating = value
+  }
+  if (input.maxBlockers !== undefined) {
+    const value = input.maxBlockers
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_BLOCKERS_LIMIT) {
+      throw new StageSettingsError(400, 'INVALID_MAX_BLOCKERS', `maxBlockers must be an integer between 0 and ${MAX_BLOCKERS_LIMIT}`)
+    }
+    out.maxBlockers = value
+  }
+  if (input.maxMajor !== undefined) {
+    const value = input.maxMajor
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_MAJOR_LIMIT) {
+      throw new StageSettingsError(400, 'INVALID_MAX_MAJOR', `maxMajor must be an integer between 0 and ${MAX_MAJOR_LIMIT}`)
+    }
+    out.maxMajor = value
+  }
+
   if (options.partial !== true && (out.gateAfterEachReview === undefined || out.maxReviewCycles === undefined)) {
     throw new StageSettingsError(400, 'INVALID_SETTINGS', 'gateAfterEachReview and maxReviewCycles are both required')
   }
@@ -93,7 +130,15 @@ export function settingsFromContext(context: unknown): PlanningStageSettings {
   const cycles = typeof constraints.maxReviewCycles === 'number' && Number.isInteger(constraints.maxReviewCycles)
     ? Math.min(MAX_REVIEW_CYCLES, Math.max(MIN_REVIEW_CYCLES, constraints.maxReviewCycles))
     : DEFAULT_PLANNING_STAGE_SETTINGS.maxReviewCycles
-  return { gateAfterEachReview: gate, maxReviewCycles: cycles }
+  const int = (value: unknown, fallback: number, min: number, max: number): number =>
+    typeof value === 'number' && Number.isInteger(value) ? Math.min(max, Math.max(min, value)) : fallback
+  return {
+    gateAfterEachReview: gate,
+    maxReviewCycles: cycles,
+    minRating: int(constraints.minRating, DEFAULT_PLANNING_STAGE_SETTINGS.minRating, 0, 100),
+    maxBlockers: int(constraints.maxBlockers, DEFAULT_PLANNING_STAGE_SETTINGS.maxBlockers, 0, MAX_BLOCKERS_LIMIT),
+    maxMajor: int(constraints.maxMajor, DEFAULT_PLANNING_STAGE_SETTINGS.maxMajor, 0, MAX_MAJOR_LIMIT),
+  }
 }
 
 export interface StageSettingsStore {
@@ -125,10 +170,25 @@ export class PostgresStageSettingsStore implements StageSettingsStore {
         stage TEXT NOT NULL,
         gate_after_each_review BOOLEAN NOT NULL,
         max_review_cycles INTEGER NOT NULL,
+        min_rating INTEGER NOT NULL DEFAULT 0,
+        max_blockers INTEGER NOT NULL DEFAULT 0,
+        max_major INTEGER NOT NULL DEFAULT 0,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         PRIMARY KEY (project_id, stage)
       );
     `)
+    // Existing installations predate the acceptance criteria columns.
+    for (const [column, definition] of [
+      ['min_rating', 'INTEGER NOT NULL DEFAULT 0'],
+      ['max_blockers', 'INTEGER NOT NULL DEFAULT 0'],
+      ['max_major', 'INTEGER NOT NULL DEFAULT 0'],
+    ] as const) {
+      const existing = await this.pool.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'project_stage_settings' AND column_name = $1`,
+        [column],
+      )
+      if ((existing.rowCount ?? 0) === 0) await this.pool.query(`ALTER TABLE project_stage_settings ADD COLUMN ${column} ${definition}`)
+    }
   }
 
   async loadDefaults(): Promise<PlanningStageSettings> {
@@ -136,7 +196,7 @@ export class PostgresStageSettingsStore implements StageSettingsStore {
     const value = result.rows[0]?.value
     if (!isRecord(value) || !isRecord(value.planning)) return { ...DEFAULT_PLANNING_STAGE_SETTINGS }
     try {
-      const parsed = parseStageSettings(value.planning)
+      const parsed = parseStageSettings({ ...DEFAULT_PLANNING_STAGE_SETTINGS, ...value.planning }, { partial: true })
       return { ...DEFAULT_PLANNING_STAGE_SETTINGS, ...parsed }
     } catch {
       // Corrupt settings must not stop the Factory; defaults are safe.
@@ -154,13 +214,22 @@ export class PostgresStageSettingsStore implements StageSettingsStore {
   }
 
   async getProject(projectId: string): Promise<PlanningStageSettings | undefined> {
-    const result = await this.pool.query<{ gate: boolean; cycles: number }>(
-      `SELECT gate_after_each_review AS gate, max_review_cycles AS cycles
+    const result = await this.pool.query<{ gate: boolean; cycles: number; minRating: number; maxBlockers: number; maxMajor: number }>(
+      `SELECT gate_after_each_review AS "gate", max_review_cycles AS "cycles",
+              min_rating AS "minRating", max_blockers AS "maxBlockers", max_major AS "maxMajor"
        FROM project_stage_settings WHERE project_id = $1 AND stage = 'planning'`,
       [projectId],
     )
     const row = result.rows[0]
-    return row === undefined ? undefined : { gateAfterEachReview: row.gate, maxReviewCycles: row.cycles }
+    return row === undefined
+      ? undefined
+      : {
+          gateAfterEachReview: row.gate,
+          maxReviewCycles: row.cycles,
+          minRating: row.minRating,
+          maxBlockers: row.maxBlockers,
+          maxMajor: row.maxMajor,
+        }
   }
 
   async setProject(projectId: string, settings: PlanningStageSettings | null): Promise<void> {
@@ -169,13 +238,17 @@ export class PostgresStageSettingsStore implements StageSettingsStore {
       return
     }
     await this.pool.query(
-      `INSERT INTO project_stage_settings (project_id, stage, gate_after_each_review, max_review_cycles, updated_at)
-       VALUES ($1, 'planning', $2, $3, now())
+      `INSERT INTO project_stage_settings
+         (project_id, stage, gate_after_each_review, max_review_cycles, min_rating, max_blockers, max_major, updated_at)
+       VALUES ($1, 'planning', $2, $3, $4, $5, $6, now())
        ON CONFLICT (project_id, stage) DO UPDATE SET
          gate_after_each_review = EXCLUDED.gate_after_each_review,
          max_review_cycles = EXCLUDED.max_review_cycles,
+         min_rating = EXCLUDED.min_rating,
+         max_blockers = EXCLUDED.max_blockers,
+         max_major = EXCLUDED.max_major,
          updated_at = now()`,
-      [projectId, settings.gateAfterEachReview, settings.maxReviewCycles],
+      [projectId, settings.gateAfterEachReview, settings.maxReviewCycles, settings.minRating, settings.maxBlockers, settings.maxMajor],
     )
   }
 

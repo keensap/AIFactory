@@ -24,7 +24,10 @@ Now a run **pauses at gates** and resumes when a human answers:
 | Field | Default | Meaning |
 |---|---|---|
 | `gateAfterEachReview` | `false` | Pause after every non-approved review and ask before applying changes |
-| `maxReviewCycles` | `3` | Revision cycles applied automatically when gating is off, counted **after** the first review (1–10) |
+| `maxReviewCycles` | `3` | Autonomous write/review cycles when gating is off, counted **after** the first review (1–10) |
+| `minRating` | `0` | Minimum overall document rating (0–100) for the run to stop revising early |
+| `maxBlockers` | `0` | Blockers tolerated |
+| `maxMajor` | `0` | Major findings tolerated |
 
 Resolution is **project override → Factory default**. Endpoints:
 
@@ -32,6 +35,16 @@ Resolution is **project override → Factory default**. Endpoints:
 - `GET/PATCH/DELETE /api/projects/:id/stages/planning/settings`
 
 A run **snapshots** the resolved values into its context packet at start, so changing settings mid-run cannot alter an in-flight run. A corrupt stored value falls back to the defaults rather than blocking runs.
+
+**Acceptance criteria.** The reviewer rates the document (0–100) and reports findings by severity. After each review the runtime evaluates:
+
+```
+accepted = blockers <= maxBlockers AND major <= maxMajor AND rating >= minRating
+```
+
+When accepted, the run **stops revising immediately** and asks for approval at the final gate, even with cycles left in the budget. When not accepted, it revises (or gates) until `maxReviewCycles` is spent, then asks for approval anyway. A review without a rating falls back to the reviewer's `decision`, keeping older reviewers working.
+
+Defaults (`0`/`0`/`0`) mean: any blocker or major finding keeps the run revising, and the reviewer's `approved` decision governs — the behaviour before this feature.
 
 ---
 
@@ -52,7 +65,7 @@ execute ─► analyze ─► draft ─► review ─► [needs changes?] ─►
                                    complete + document + PDF
 ```
 
-Gating off replaces the review gate with an automatic revision while `cycle < maxReviewCycles`; when the budget is spent the run stops at the **final gate** instead of failing with `REVIEW_CYCLE_LIMIT`.
+Gating off replaces the review gate with an automatic revision while `cycle < maxReviewCycles`; when the budget is spent the run stops at the **final gate** instead of failing with `REVIEW_CYCLE_LIMIT`. A review that meets the acceptance criteria leaves the loop earlier and goes straight to the final gate.
 
 **Pausing.** A paused run has status `awaiting_human` and a persisted `pendingGate` (`review_changes` or `final`) with the cycle count, review decision and findings. It releases its worker lease, so it can wait hours or days and resume on any API instance.
 

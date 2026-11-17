@@ -239,8 +239,8 @@ async function route(
         stageTelemetry: 'GET /api/stage-runs/:runId/telemetry',
         stageExport: 'POST /api/stage-runs/:runId/export',
         stageGate: 'POST /api/stage-runs/:runId/gate',
-        stageSettings: 'GET/PATCH/DELETE /api/projects/:id/stages/planning/settings',
-        stageDefaults: 'GET/PATCH /api/settings/stage-defaults',
+        stageSettings: 'GET/POST/PATCH/DELETE /api/projects/:id/stages/planning/settings',
+        stageDefaults: 'GET/POST/PATCH /api/settings/stage-defaults',
         attachments: 'GET/POST /api/projects/:id/attachments',
         documentExport: 'GET /api/projects/:id/documents/:documentId/export',
         semanticIndex: 'POST /api/projects/:id/index',
@@ -437,7 +437,7 @@ async function route(
       sendJson(response, 200, { stageDefaults: await stageSettings.factoryDefaults() })
       return
     }
-    if (request.method === 'PATCH') {
+    if (request.method === 'PATCH' || request.method === 'POST') {
       sendJson(response, 200, { stageDefaults: await stageSettings.updateFactoryDefaults(await readJson(request)) })
       return
     }
@@ -1151,7 +1151,7 @@ async function handleProjects(
       sendJson(response, 200, { settings: await stageSettings.resolve(id) })
       return
     }
-    if (request.method === 'PATCH') {
+    if (request.method === 'PATCH' || request.method === 'POST') {
       sendJson(response, 200, { settings: await stageSettings.setProject(id, await readJson(request)) })
       return
     }

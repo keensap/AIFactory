@@ -36,7 +36,13 @@ test('builds a planning context packet with prior outcomes and input', async () 
 })
 
 test('parses reviewer JSON and strips Markdown fences', () => {
-  assert.deepEqual(parseStageReview('{"decision":"approved","findings":[]}'), { decision: 'approved', findings: [] })
+  assert.deepEqual(parseStageReview('{"decision":"approved","findings":[]}'), { decision: 'approved', findings: [], rating: null })
+  assert.deepEqual(
+    parseStageReview('{"decision":"needs_revision","rating":87,"findings":[]}'),
+    { decision: 'needs_revision', findings: [], rating: 87 },
+  )
+  assert.equal(parseStageReview('{"decision":"approved","rating":150}').rating, 100, 'ratings are clamped')
+  assert.equal(parseStageReview('{"decision":"approved","rating":"high"}').rating, null)
   assert.equal(parseStageReview('```json\n{"decision":"needs_revision","findings":[{"id":"F-1"}]}\n```').decision, 'needs_revision')
   assert.equal(cleanMarkdown('```markdown\n# TELOS\n```'), '# TELOS')
   assert.throws(() => parseStageReview('not json'), /valid JSON/)

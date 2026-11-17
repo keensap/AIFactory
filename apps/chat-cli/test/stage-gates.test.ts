@@ -20,6 +20,11 @@ const REVIEWS = {
   }),
 }
 
+/** Settings with every field filled; the tests only vary the gating knobs. */
+const withSettings = (overrides: Partial<PlanningStageSettings>): PlanningStageSettings => ({
+  gateAfterEachReview: false, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, ...overrides,
+})
+
 interface Script {
   /** Reviewer decisions, consumed in order; the last repeats. */
   reviews: string[]
@@ -34,7 +39,7 @@ function harness(script: Script) {
   let reviews = 0
   let authors = 0
   let reviewIndex = 0
-  let settings = script.settings ?? { gateAfterEachReview: false, maxReviewCycles: 3 }
+  let settings = script.settings ?? withSettings({})
 
   const runtime = new PlanningStageRuntime({
     projects,
@@ -80,7 +85,7 @@ async function withHarness(script: Script, fn: (h: ReturnType<typeof harness>) =
 // ---- gating off: automatic cycles ------------------------------------
 
 test('gating off applies up to the configured cycles, then asks at the final gate', async () => {
-  await withHarness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.revise('F-2'), REVIEWS.revise('F-3'), REVIEWS.approved], settings: { gateAfterEachReview: false, maxReviewCycles: 3 } }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.revise('F-2'), REVIEWS.revise('F-3'), REVIEWS.approved], settings: withSettings({ gateAfterEachReview: false, maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     const gated = await h.runtime.execute(run.id)
 
@@ -94,7 +99,7 @@ test('gating off applies up to the configured cycles, then asks at the final gat
 })
 
 test('gating off stops after the cycle budget instead of failing, and keeps the last findings', async () => {
-  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: { gateAfterEachReview: false, maxReviewCycles: 2 } }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: withSettings({ gateAfterEachReview: false, maxReviewCycles: 2 }) }, async (h) => {
     const { run } = await h.start()
     const gated = await h.runtime.execute(run.id)
     assert.deepEqual(h.counters(), { reviews: 3, authors: 3 }, 'first review plus two revision cycles')
@@ -108,7 +113,7 @@ test('gating off stops after the cycle budget instead of failing, and keeps the 
 // ---- gating on: a question after every review ------------------------
 
 test('gating on pauses after each review and applies changes on request', async () => {
-  await withHarness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.revise('F-2'), REVIEWS.approved], settings: { gateAfterEachReview: true, maxReviewCycles: 3 } }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.revise('F-2'), REVIEWS.approved], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     const first = await h.runtime.execute(run.id)
     assert.equal(first.pendingGate?.kind, 'review_changes', 'the first review asks before changing anything')
@@ -127,7 +132,7 @@ test('gating on pauses after each review and applies changes on request', async 
 })
 
 test('accepting a review skips its changes and moves to the final gate', async () => {
-  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: { gateAfterEachReview: true, maxReviewCycles: 3 } }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     await h.runtime.execute(run.id)
     const accepted = await h.runtime.answerGate(run.id, 'accept')
@@ -139,7 +144,7 @@ test('accepting a review skips its changes and moves to the final gate', async (
 })
 
 test('an approved review goes straight to the final gate even when gating is on', async () => {
-  await withHarness({ reviews: [REVIEWS.approved], settings: { gateAfterEachReview: true, maxReviewCycles: 3 } }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.approved], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     const gated = await h.runtime.execute(run.id)
     assert.equal(gated.pendingGate?.kind, 'final')
@@ -148,7 +153,7 @@ test('an approved review goes straight to the final gate even when gating is on'
 })
 
 test('gate actions are validated against the pending gate', async () => {
-  await withHarness({ reviews: [REVIEWS.approved], settings: { gateAfterEachReview: true, maxReviewCycles: 3 } }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.approved], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     await h.runtime.execute(run.id)
     // The run is at the final gate, so a review-gate action is refused.
@@ -163,7 +168,7 @@ test('gate actions are validated against the pending gate', async () => {
   })
 
   // A run paused at a review gate cannot be completed directly.
-  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: { gateAfterEachReview: true, maxReviewCycles: 3 } }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     const gated = await h.runtime.execute(run.id)
     assert.equal(gated.pendingGate?.kind, 'review_changes')
@@ -181,7 +186,7 @@ test('gate actions are validated against the pending gate', async () => {
 // ---- final gate ------------------------------------------------------
 
 test('refining once runs another review and revision, then asks again', async () => {
-  await withHarness({ reviews: [REVIEWS.approved, REVIEWS.revise('F-9')], settings: { gateAfterEachReview: false, maxReviewCycles: 3 } }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.approved, REVIEWS.revise('F-9')], settings: withSettings({ gateAfterEachReview: false, maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     const gated = await h.runtime.execute(run.id)
     assert.equal(gated.pendingGate?.kind, 'final')
@@ -196,7 +201,7 @@ test('refining once runs another review and revision, then asks again', async ()
 })
 
 test('refining when the review approves changes nothing but asks again', async () => {
-  await withHarness({ reviews: [REVIEWS.approved], settings: { gateAfterEachReview: false, maxReviewCycles: 3 } }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.approved], settings: withSettings({ gateAfterEachReview: false, maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     await h.runtime.execute(run.id)
     const refined = await h.runtime.decide(run.id, { refine: true })
@@ -207,7 +212,7 @@ test('refining when the review approves changes nothing but asks again', async (
 })
 
 test('only approval completes the stage and produces the document and PDF', async () => {
-  await withHarness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.approved], settings: { gateAfterEachReview: true, maxReviewCycles: 3 } }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.approved], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     await h.runtime.execute(run.id)
     await h.runtime.answerGate(run.id, 'apply')
@@ -224,7 +229,7 @@ test('only approval completes the stage and produces the document and PDF', asyn
 })
 
 test('a decision needs go, conditional_go or no_go unless refining', async () => {
-  await withHarness({ reviews: [REVIEWS.approved], settings: { gateAfterEachReview: false, maxReviewCycles: 3 } }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.approved], settings: withSettings({ gateAfterEachReview: false, maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     await h.runtime.execute(run.id)
     await assert.rejects(
@@ -241,18 +246,18 @@ test('a decision needs go, conditional_go or no_go unless refining', async () =>
 // ---- settings snapshot ----------------------------------------------
 
 test('a run keeps the settings it started with, even if they change mid-run', async () => {
-  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: { gateAfterEachReview: true, maxReviewCycles: 3 } }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     await h.runtime.execute(run.id)
     // The operator switches gating off while the run is paused.
-    h.setSettings({ gateAfterEachReview: false, maxReviewCycles: 1 })
+    h.setSettings(withSettings({ gateAfterEachReview: false, maxReviewCycles: 1 }))
     const applied = await h.runtime.answerGate(run.id, 'apply')
     assert.equal(applied.pendingGate?.kind, 'review_changes', 'the run still gates: it snapshotted the setting')
   })
 })
 
 test('the cycle budget comes from settings, not the constructor default', async () => {
-  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: { gateAfterEachReview: false, maxReviewCycles: 1 } }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: withSettings({ gateAfterEachReview: false, maxReviewCycles: 1 }) }, async (h) => {
     const { run } = await h.start()
     const gated = await h.runtime.execute(run.id)
     assert.deepEqual(h.counters(), { reviews: 2, authors: 2 }, 'one revision cycle as configured')
@@ -263,7 +268,7 @@ test('the cycle budget comes from settings, not the constructor default', async 
 // ---- HTTP surface ------------------------------------------------------
 
 test('the gate and decision endpoints drive the pause/resume lifecycle', async () => {
-  const h = harness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.approved], settings: { gateAfterEachReview: true, maxReviewCycles: 3 } })
+  const h = harness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.approved], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) })
   const { createChatServer, serverPort } = await import('../src/server.ts')
   const { DshHarness } = await import('../src/harness.ts')
   const { SessionStore } = await import('../src/store.ts')
