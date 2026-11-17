@@ -1,7 +1,7 @@
 # Stage Runtime and Project Isolation — Design Proposal
 
-**Status:** proposed, not implemented  
-**Date:** 2026-11-10  
+**Status:** implemented (planning stage); the current system is described in [`../ARCHITECTURE.md`](../ARCHITECTURE.md)  
+**Date:** 2026-11-10 (status updated 2026-11-17)  
 **Scope:** stage-scoped execution, stage coordination, role agents, document review loops, per-project harness configuration, project security and isolation
 
 This document turns the current project/status implementation into a stage-oriented runtime. It records the design decisions, data model, API shape, agent orchestration and security boundaries before implementation. Diagrams are in [`diagrams/`](diagrams/).

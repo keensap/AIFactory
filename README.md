@@ -2,6 +2,8 @@
 
 Detailed requirements for an autonomous, human-governed software delivery platform.
 
+**Architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the implemented system, with diagrams for the runtime, stage lifecycle, gates, model layer, agents, prerequisites, data model and trust boundaries.
+
 **Primary document:** [docs/AI-Factory-Requirements.md](docs/AI-Factory-Requirements.md) — version 1.0 (draft for review), 2026-11-09.
 
 ## Implementation
