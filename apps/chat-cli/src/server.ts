@@ -42,6 +42,7 @@ import { SDLC_STAGES, type ProjectStage } from './sdlc.ts'
 import { SettingsError, type SettingsService } from './settings.ts'
 import { StageSettingsError, type StageSettingsService } from './stage-settings.ts'
 import { PrerequisiteError, type StagePrerequisiteService } from './stage-prerequisites.ts'
+import { AgentError, type AgentService } from './agents.ts'
 import { SemanticIndexError, type SemanticIndexService } from './semantic-index.ts'
 import { VectorStoreError } from './vector-store.ts'
 import { PlanningStageRuntime, StageRuntimeError } from './stage-runtime.ts'
@@ -74,6 +75,8 @@ export interface ChatApiOptions {
   stageSettings?: StageSettingsService
   /** Stage prerequisite catalogue and readiness. */
   prerequisites?: StagePrerequisiteService
+  /** Named agents and their stage-process assignments. */
+  agents?: AgentService
   /** PDF requirement review. When omitted, the PDF route returns 503. */
   pdfReview?: PdfReviewService
   /** SDLC stage, documents and checklist storage. */
@@ -247,6 +250,9 @@ async function route(
         stageCatalogue: 'GET /api/stages',
         stageReadiness: 'GET /api/projects/:id/stages/:stage/readiness',
         stageWaiver: 'POST/DELETE /api/projects/:id/stages/:stage/waivers',
+        agents: 'GET/POST /api/agents',
+        agent: 'GET/PATCH/DELETE /api/agents/:id',
+        agentAssignments: 'GET /api/stages/:stage/assignments, PUT/DELETE /api/stages/:stage/assignments/:process',
         attachments: 'GET/POST /api/projects/:id/attachments',
         documentExport: 'GET /api/projects/:id/documents/:documentId/export',
         semanticIndex: 'POST /api/projects/:id/index',
@@ -432,6 +438,88 @@ async function route(
       postgresEnabled: options.loggingManager?.view().postgresActive ?? false,
     })
     return
+  }
+
+  if (resource === 'agents') {
+    const agents = options.agents
+    if (agents === undefined) {
+      throw new HttpError(503, 'agents are disabled; set DATABASE_URL', 'AGENTS_NOT_CONFIGURED')
+    }
+    if (rest.length === 0 && request.method === 'GET') {
+      sendJson(response, 200, { agents: await agents.list() })
+      return
+    }
+    if (rest.length === 0 && request.method === 'POST') {
+      requireAdmin(request, options)
+      sendJson(response, 201, { agent: await agents.create(await readJson(request)) })
+      return
+    }
+    if (rest.length === 1) {
+      const agentId = decodeURIComponent(rest[0]!)
+      if (request.method === 'GET') {
+        sendJson(response, 200, { agent: await agents.get(agentId) })
+        return
+      }
+      if (request.method === 'PATCH' || request.method === 'POST') {
+        requireAdmin(request, options)
+        sendJson(response, 200, { agent: await agents.update(agentId, await readJson(request)) })
+        return
+      }
+      if (request.method === 'DELETE') {
+        requireAdmin(request, options)
+        await agents.remove(agentId)
+        response.writeHead(204)
+        response.end()
+        return
+      }
+    }
+    throw new HttpError(404, 'not found', 'NOT_FOUND')
+  }
+
+  if (resource === 'stages' && rest.length >= 2 && rest[1] === 'assignments') {
+    const agents = options.agents
+    if (agents === undefined) {
+      throw new HttpError(503, 'agents are disabled; set DATABASE_URL', 'AGENTS_NOT_CONFIGURED')
+    }
+    const stage = decodeURIComponent(rest[0]!)
+    const projectId = new URL(request.url ?? '/', 'http://localhost').searchParams.get('projectId') ?? undefined
+    if (rest.length === 2 && request.method === 'GET') {
+      sendJson(response, 200, { stage, assignments: await agents.assignments(stage, projectId) })
+      return
+    }
+    if (rest.length === 3) {
+      const processName = decodeURIComponent(rest[2]!)
+      if (request.method === 'PUT' || request.method === 'POST') {
+        requireAdmin(request, options)
+        const body = await readJson(request)
+        const record = body !== null && typeof body === 'object' ? body as Record<string, unknown> : {}
+        if (typeof record.agentId !== 'string') {
+          throw new HttpError(400, 'agentId is required', 'INVALID_ASSIGNMENT')
+        }
+        const target = typeof record.projectId === 'string' ? record.projectId : projectId
+        sendJson(response, 200, {
+          assignments: await agents.setAssignment({
+            stage,
+            process: processName,
+            agentId: record.agentId,
+            ...(target !== undefined ? { projectId: target } : {}),
+          }),
+        })
+        return
+      }
+      if (request.method === 'DELETE') {
+        requireAdmin(request, options)
+        sendJson(response, 200, {
+          assignments: await agents.clearAssignment({
+            stage,
+            process: processName,
+            ...(projectId !== undefined ? { projectId } : {}),
+          }),
+        })
+        return
+      }
+    }
+    throw new HttpError(404, 'not found', 'NOT_FOUND')
   }
 
   if (resource === 'stages' && rest.length === 0 && request.method === 'GET') {
@@ -1865,6 +1953,7 @@ function toHttpError(error: unknown): HttpError {
   if (error instanceof AttachmentError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof ExportError) return new HttpError(500, error.message, error.code)
   if (error instanceof ReportPdfError) return new HttpError(500, error.message, error.code)
+  if (error instanceof AgentError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof PrerequisiteError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof StageSettingsError) return new HttpError(error.status, error.message, error.code)
   if (error instanceof ModelSettingsError) return new HttpError(error.status, error.message, error.code)

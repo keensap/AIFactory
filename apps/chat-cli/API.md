@@ -547,6 +547,48 @@ curl -X POST /api/stage-runs/<runId>/decision -d '{"refine":true}'
 
 Errors: `409 STAGE_RUN_NOT_AT_REVIEW_GATE` (wrong gate kind for `/gate`), `409 STAGE_RUN_NOT_AWAITING_DECISION` (wrong gate kind for `/decision`), `400 INVALID_GATE_ACTION`, `400 INVALID_HUMAN_DECISION`.
 
+### Agents
+
+A named agent is a composition (persona, tool allowlist, skills, model) assigned to a **stage process**. Planning runs `analyzer`, `author` and `reviewer`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/agents` | List agents |
+| `POST` | `/api/agents` | Create (admin) |
+| `GET` | `/api/agents/:id` | One agent (UUID or name) |
+| `PATCH` | `/api/agents/:id` | Update (admin) |
+| `DELETE` | `/api/agents/:id` | Delete (admin) |
+| `GET` | `/api/stages/:stage/assignments?projectId=` | Resolved assignments |
+| `PUT` | `/api/stages/:stage/assignments/:process` | Assign (admin) |
+| `DELETE` | `/api/stages/:stage/assignments/:process` | Clear (admin) |
+
+```bash
+curl -X POST /api/agents -H 'Content-Type: application/json' -d '{
+  "name": "feasibility-author",
+  "persona": "You are the AI Factory planning author.",
+  "model": "deepseek-chat",
+  "tools": ["tool-fs", "tool-todo"],
+  "skills": [{ "name": "telos-writing", "description": "Write TELOS sections", "instructions": "# Write TELOS" }]
+}'
+
+curl -X PUT /api/stages/planning/assignments/author \
+  -H 'Content-Type: application/json' -d '{"agentId":"<id>"}'
+```
+
+```json
+{ "stage": "planning", "assignments": [
+  { "process": "analyzer", "agent": null, "source": "none" },
+  { "process": "author", "agent": { "id": "…", "name": "feasibility-author", "model": "deepseek-chat" }, "source": "factory" } ] }
+```
+
+**Precedence:** project override → Factory default → none (no agent, stage defaults). `source` reports which applied. A disabled agent is skipped.
+
+**Model constraint:** an agent chooses a model *inside the Factory provider*, never a provider. The run declares the model on the Factory's own route, so there is still one credential and one fallback path.
+
+**Validation:** `400 INVALID_AGENT` (shape), `400 INVALID_AGENT_NAME` (not kebab-case), `400 INVALID_AGENT_TOOLS` (unknown tool id), `400 INVALID_AGENT_SKILLS`, `409 AGENT_NAME_TAKEN`, `404 AGENT_NOT_FOUND`, `400 INVALID_PROCESS`, `400 NO_PROCESSES` (stage has no processes yet), `400 AGENT_DISABLED` (assigning a disabled agent).
+
+**In a run:** each role resolves its agent at start, materialises its skills as `SKILL.md` under `.aifactory/agents/<id>/skills/`, and launches with a patch carrying persona, tool allowlist and model. `role_start` events record `agent`, `agentId` and the effective `model`.
+
 ### Stage prerequisites and readiness
 
 Every stage declares what it needs before it can run. A prerequisite is satisfied by a brief, an uploaded document, a project document of a given kind, or an **admin waiver with a reason** — so a project can start at any stage when the evidence exists.

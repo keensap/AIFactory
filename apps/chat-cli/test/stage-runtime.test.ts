@@ -114,6 +114,7 @@ interface FakePin extends ModelPin { released: number }
 function fakePin(attribution: ModelPin['attribution'], env: Record<string, string> = {}): FakePin {
   const pin: FakePin = {
     attribution,
+    routes: null,
     released: 0,
     harness: (cwd) => scriptHarness(cwd, env),
     release() { pin.released += 1 },

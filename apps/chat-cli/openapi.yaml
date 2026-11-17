@@ -1866,6 +1866,188 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
 
+  /api/agents:
+    get:
+      tags: [agents]
+      summary: List agent definitions
+      responses:
+        '200':
+          description: Agents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agents:
+                    type: array
+                    items: {$ref: '#/components/schemas/Agent'}
+        '503':
+          description: AGENTS_NOT_CONFIGURED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags: [agents]
+      summary: Create an agent (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AgentInput'}
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent: {$ref: '#/components/schemas/Agent'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: ADMIN_FORBIDDEN
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: AGENT_NAME_TAKEN
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/agents/{agentId}:
+    parameters:
+      - {name: agentId, in: path, required: true, schema: {type: string}, description: UUID or name}
+    get:
+      tags: [agents]
+      summary: One agent
+      responses:
+        '200':
+          description: The agent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent: {$ref: '#/components/schemas/Agent'}
+        '404':
+          description: AGENT_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      tags: [agents]
+      summary: Update an agent (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AgentInput'}
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent: {$ref: '#/components/schemas/Agent'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: AGENT_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [agents]
+      summary: Delete an agent and its assignments (admin)
+      responses:
+        '204': {description: Deleted}
+        '404':
+          description: AGENT_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/stages/{stage}/assignments:
+    get:
+      tags: [agents]
+      summary: Resolved agent assignments for a stage's processes
+      parameters:
+        - {name: stage, in: path, required: true, schema: {$ref: '#/components/schemas/ProjectStage'}}
+        - {name: projectId, in: query, required: false, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Assignments with their source
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stage: {$ref: '#/components/schemas/ProjectStage'}
+                  assignments:
+                    type: array
+                    items: {$ref: '#/components/schemas/AgentAssignment'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/stages/{stage}/assignments/{process}:
+    parameters:
+      - {name: stage, in: path, required: true, schema: {$ref: '#/components/schemas/ProjectStage'}}
+      - {name: process, in: path, required: true, schema: {type: string}}
+    put:
+      tags: [agents]
+      summary: Assign an agent to a process (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agentId]
+              properties:
+                agentId: {type: string}
+                projectId: {type: string, format: uuid, description: Omit for the Factory default}
+      responses:
+        '200':
+          description: Assignments after the change
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  assignments:
+                    type: array
+                    items: {$ref: '#/components/schemas/AgentAssignment'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    delete:
+      tags: [agents]
+      summary: Clear an assignment (admin)
+      parameters:
+        - {name: projectId, in: query, required: false, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Assignments after clearing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  assignments:
+                    type: array
+                    items: {$ref: '#/components/schemas/AgentAssignment'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
   /api/stages:
     get:
       tags: [stage-runs]
@@ -2721,6 +2903,47 @@ components:
         usd: {type: [number, 'null']}
         pricedTokens: {type: integer}
         unpricedTokens: {type: integer}
+    AgentInput:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, description: lower-case words joined by hyphens}
+        description: {type: string}
+        persona: {type: string, maxLength: 8000, description: Replaces the deployment persona for this process}
+        model: {type: [string, 'null'], description: A model inside the Factory provider only}
+        reasoningEffort: {type: [string, 'null']}
+        tools:
+          type: array
+          items: {type: string}
+          description: Harness tool ids the agent may use; empty means no restriction
+        skills:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            required: [name, instructions]
+            properties:
+              name: {type: string}
+              description: {type: string}
+              instructions: {type: string}
+        enabled: {type: boolean}
+    Agent:
+      allOf:
+        - $ref: '#/components/schemas/AgentInput'
+        - type: object
+          properties:
+            id: {type: string, format: uuid}
+            createdAt: {type: string, format: date-time}
+            updatedAt: {type: string, format: date-time}
+    AgentAssignment:
+      type: object
+      properties:
+        process: {type: string}
+        agent:
+          oneOf:
+            - $ref: '#/components/schemas/Agent'
+            - type: 'null'
+        source: {type: string, enum: [project, factory, none]}
     StagePrerequisite:
       type: object
       properties:

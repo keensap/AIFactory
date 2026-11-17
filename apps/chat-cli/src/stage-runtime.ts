@@ -8,7 +8,10 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { access, stat } from 'node:fs/promises'
+import { access, mkdir, rm, stat, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { buildAgentPatch } from './agent-patch.ts'
+import type { AgentComposition } from './agents.ts'
 import type { DshHarness } from './harness.ts'
 import { StageEventSink } from './stage-event-sink.ts'
 import { attributeUsage, roleModel, type ModelPin } from './models/index.ts'
@@ -51,6 +54,8 @@ export interface StageRuntimeDeps {
   harnessFactory: (cwd?: string, timeoutMs?: number) => DshHarness
   /** Test seam: replace a harness role call with a deterministic response. */
   runPrompt?: (role: StageRole, prompt: string, cwd: string) => Promise<string>
+  /** Resolves the named agent (if any) that runs a stage process. */
+  agents?: { composition(input: { projectId: string; stage: string; process: string }): Promise<AgentComposition | undefined> }
   maxReviewCycles?: number
   /** Per-role harness timeout. Chat keeps its shorter timeout. */
   roleTimeoutMs?: number
@@ -192,6 +197,7 @@ export class PlanningStageRuntime {
   private readonly workspace: PostgresProjectWorkspace
   private readonly harnessFactory: (cwd?: string, timeoutMs?: number) => DshHarness
   private readonly runPrompt?: (role: StageRole, prompt: string, cwd: string) => Promise<string>
+  private readonly agents?: { composition(input: { projectId: string; stage: string; process: string }): Promise<AgentComposition | undefined> }
   private readonly maxReviewCycles: number
   private readonly roleTimeoutMs: number
   private readonly workerId: string
@@ -217,6 +223,7 @@ export class PlanningStageRuntime {
     this.workspace = deps.workspace
     this.harnessFactory = deps.harnessFactory
     this.runPrompt = deps.runPrompt
+    if (deps.agents !== undefined) this.agents = deps.agents
     this.maxReviewCycles = deps.maxReviewCycles ?? DEFAULT_MAX_REVIEW_CYCLES
     this.roleTimeoutMs = deps.roleTimeoutMs ?? 300_000
     this.workerId = deps.workerId ?? `${process.pid}-${randomUUID().slice(0, 8)}`
@@ -842,8 +849,17 @@ ${trimmedNote !== undefined && trimmedNote !== '' ? `\n${trimmedNote}\n` : ''}
       logger: this.log.child({ component: 'stage-event-sink' }),
     })
     const pin = this.pins.get(runId)
-    await sink.append('role_start', { role, timeoutMs: this.roleTimeoutMs, model: roleModel(pin?.attribution) })
-    this.log.info({ event: 'stage.role.started', role, timeoutMs: this.roleTimeoutMs })
+    const composition = this.agents === undefined
+      ? undefined
+      : await this.agents.composition({ projectId, stage: PLANNING_STAGE, process: role })
+    await sink.append('role_start', {
+      role,
+      timeoutMs: this.roleTimeoutMs,
+      model: composition?.model ?? roleModel(pin?.attribution),
+      ...(composition === undefined ? {} : { agent: composition.name, agentId: composition.id }),
+    })
+    this.log.info({ event: 'stage.role.started', role, timeoutMs: this.roleTimeoutMs, agent: composition?.name })
+    let agentPatch: string | null = null
     try {
       if (this.runPrompt !== undefined) {
         const text = await this.runPrompt(role, prompt, cwd)
@@ -851,8 +867,11 @@ ${trimmedNote !== undefined && trimmedNote !== '' ? `\n${trimmedNote}\n` : ''}
         this.traces.completeRole(roleSpan, text)
         return text
       }
+      if (composition !== undefined) {
+        agentPatch = await this.writeAgentPatch(cwd, composition, pin)
+      }
       const harness = pin !== undefined
-        ? pin.harness(cwd, this.roleTimeoutMs)
+        ? pin.harness(cwd, this.roleTimeoutMs, agentPatch)
         : this.harnessFactory(cwd, this.roleTimeoutMs)
       const result = await harness.run(prompt, {
         onEvent: (event) => {
@@ -883,8 +902,44 @@ ${trimmedNote !== undefined && trimmedNote !== '' ? `\n${trimmedNote}\n` : ''}
       this.log.error({ event: 'stage.role.failed', role, durationMs: Date.now() - started, err: error })
       throw new StageRuntimeError(502, 'STAGE_ROLE_FAILED', `${role} failed: ${message}`)
     } finally {
+      if (agentPatch !== null) await rm(agentPatch, { force: true }).catch(() => {})
       await sink.flush()
     }
+  }
+
+  /**
+   * Materialise an agent's composition into a patch file for one role run, and
+   * its skills as `SKILL.md` bundles the harness can discover.
+   */
+  private async writeAgentPatch(cwd: string, composition: AgentComposition, pin: ModelPin | undefined): Promise<string> {
+    const base = join(cwd, '.aifactory', 'agents', composition.id)
+    let skillsDir: string | undefined
+    if (composition.skills.length > 0) {
+      skillsDir = join(base, 'skills')
+      for (const skill of composition.skills) {
+        const dir = join(skillsDir, skill.name)
+        await mkdir(dir, { recursive: true })
+        const description = skill.description === '' ? skill.name : skill.description
+        await writeFile(
+          join(dir, 'SKILL.md'),
+          `---\nname: ${skill.name}\ndescription: ${JSON.stringify(description)}\n---\n\n${skill.instructions}\n`,
+          'utf8',
+        )
+      }
+    }
+    const content = buildAgentPatch({
+      composition,
+      ...(pin?.attribution !== null && pin?.attribution !== undefined
+        ? { provider: pin.attribution.provider, model: pin.attribution.model }
+        : {}),
+      ...(pin?.routes !== null && pin?.routes !== undefined ? { routes: pin.routes } : {}),
+      ...(skillsDir !== undefined ? { skillsDir } : {}),
+    })
+    const dir = join(base, 'tmp')
+    await mkdir(dir, { recursive: true })
+    const path = join(dir, `role-${Date.now()}-${randomUUID().slice(0, 8)}.json`)
+    await writeFile(path, content, 'utf8')
+    return path
   }
 
   /**

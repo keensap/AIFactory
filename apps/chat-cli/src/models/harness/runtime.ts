@@ -15,7 +15,7 @@ import { chmod, mkdir, readdir, rename, unlink, writeFile } from 'node:fs/promis
 import { join } from 'node:path'
 import { DshHarness } from '../../harness.ts'
 import { noopLogger, type Logger } from '../../logging/index.ts'
-import { buildModelPatch, keysToScrub, type ModelPatch } from './patch.ts'
+import { buildModelPatch, keysToScrub, type ModelPatch, type RouteProfile } from './patch.ts'
 import type { ModelAttribution } from '../attribution.ts'
 import type { ModelPrice, ModelRecord } from '../catalog/types.ts'
 import type { ModelService } from '../service.ts'
@@ -63,7 +63,10 @@ const KEEP_PATCH_FILES = 5
 export interface ModelPin {
   /** Null when no target was configured and the harness profile default is used. */
   readonly attribution: ModelAttribution | null
-  harness(cwd?: string, timeoutMs?: number): DshHarness
+  /** Routes of the pinned patch, so an agent model can be declared on the same provider. */
+  readonly routes: Record<string, RouteProfile> | null
+  /** `extraPatchPath` is applied after the pinned patch (agent composition wins). */
+  harness(cwd?: string, timeoutMs?: number, extraPatchPath?: string | null): DshHarness
   /** Idempotent. */
   release(): void
 }
@@ -181,7 +184,14 @@ export class ModelRuntime {
     }
   }
 
-  private buildHarness(patchPath: string | null, scrub: string[], cwd?: string, timeoutMs?: number): DshHarness {
+  private buildHarness(
+    patchPath: string | null,
+    scrub: string[],
+    cwd?: string,
+    timeoutMs?: number,
+    extraPatchPath?: string | null,
+  ): DshHarness {
+    const patches = [patchPath, extraPatchPath].filter((entry): entry is string => typeof entry === 'string' && entry !== '')
     return new DshHarness({
       command: this.command,
       ...(this.commandArgs.length > 0 ? { commandArgs: this.commandArgs } : {}),
@@ -189,7 +199,7 @@ export class ModelRuntime {
       ...(cwd !== undefined ? { cwd } : {}),
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(this.permissionMode !== undefined ? { permissionMode: this.permissionMode } : {}),
-      ...(patchPath !== null ? { patches: [patchPath] } : {}),
+      ...(patches.length > 0 ? { patches } : {}),
       ...(scrub.length > 0 ? { envDelete: scrub } : {}),
     })
   }
@@ -208,7 +218,8 @@ export class ModelRuntime {
     let released = false
     return {
       attribution,
-      harness: (cwd, timeoutMs) => this.buildHarness(patchPath, scrub, cwd, timeoutMs),
+      routes: this.patch === null ? null : { ...this.patch.routes },
+      harness: (cwd, timeoutMs, extraPatchPath) => this.buildHarness(patchPath, scrub, cwd, timeoutMs, extraPatchPath),
       release: () => {
         if (released) return
         released = true
