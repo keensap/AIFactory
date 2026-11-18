@@ -1,6 +1,10 @@
 # AI Factory — Architecture
 
-**Status:** current state, 2026-11-18; corrected after the code review; all four remediation phases applied — hotfixes, foundations, run integrity and the stage engine  
+> **Superseded by [v2](ARCHITECTURE-v2.md).** This version is kept unchanged as a reference.
+> v2 covers the same system with deeper explanation and diagrams designed to be read; where the
+> two disagree, v2 is correct because it was written against the code after the remediation work.
+
+**Status:** superseded, 2026-11-18. The current description is [v2](ARCHITECTURE-v2.md).  
 **Scope:** the backend as implemented (`apps/chat-cli`). The UI is a separate workstream; its contracts are described in [`docs/ui/`](ui/).  
 **Related:** [`AI-Factory-Requirements.md`](AI-Factory-Requirements.md) (what to build), [`design/`](design/) (per-area decisions), [`design/ARCHITECTURE-REMEDIATION.md`](design/ARCHITECTURE-REMEDIATION.md) (known defects and the plan to fix them).
 
