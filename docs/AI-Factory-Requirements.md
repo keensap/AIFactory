@@ -3,6 +3,7 @@
 > **Superseded by [v2](AI-Factory-Requirements-v2.md).** This version is kept unchanged as a
 > reference: it holds the original 609-requirement baseline and its diagrams. v2 carries the
 > same identifiers with a delivery status on each, and adds a future-enhancements part.
+> **The diagrams here are Mermaid source; v2 embeds rendered images.**
 
 **Autonomous, human-governed software delivery, from a one-paragraph idea to a monitored production service.**
 

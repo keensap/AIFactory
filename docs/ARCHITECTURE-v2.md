@@ -24,10 +24,16 @@ your symptom via the index below.
 | operating it | 3, 16, 17, 18 |
 | writing the UI | 4, 5, 10, 12 |
 
-**Diagram conventions.** Every diagram answers exactly one question, and the question is
-its title. Diagrams are small on purpose: a diagram that needs scrolling is a diagram that
-will not be read. Where a flow is long, it is a `sequenceDiagram` with numbered steps rather
-than a flowchart with crossing arrows.
+**Diagram conventions.** Every diagram answers exactly one question, and the question is its
+title. Diagrams are small on purpose: a diagram that needs scrolling is a diagram that will not
+be read. Where a flow is long it is a sequence diagram with numbered steps rather than a
+flowchart with crossing arrows.
+
+**The diagrams are embedded as images**, not as Mermaid source, so they render in any viewer —
+a plain Markdown pane, a code review, a PDF export. The editable source for each one lives in
+[`diagrams/src/`](diagrams/src/) as a `.mmd` file, and [`diagrams/README.md`](diagrams/README.md)
+explains how to re-render them. A vector `.svg` of every diagram sits next to the `.png` if you
+want to zoom or print.
 
 ---
 
@@ -93,31 +99,7 @@ API and is not part of this document.
 
 ### 2.1 Context
 
-```mermaid
-flowchart LR
-  user["Operator<br/>(browser or curl)"]
-  ui["UI client<br/>(separate repo/thread)"]
-  subgraph factory["AI Factory"]
-    api["HTTP API"]
-    cli["CLI"]
-  end
-  harness["DeepSeek Harness<br/>(one process per role)"]
-  db[("PostgreSQL<br/>+ pgvector")]
-  providers["Model providers<br/>(Anthropic,<br/>OpenAI-compatible,<br/>local llama.cpp)"]
-  phoenix["Phoenix<br/>(traces)"]
-  fs[("Project workspace<br/>on disk")]
-
-  user --> api
-  user --> cli
-  ui --> api
-  api --> db
-  cli --> db
-  api --> harness
-  harness --> providers
-  api --> fs
-  harness --> fs
-  api -.-> phoenix
-```
+![2.1 Context](diagrams/arch--2-1-context.png)
 
 **What this tells you.** The API is the only component that owns state; the harness is
 *stateless and disposable* — it is spawned per role run and its output is captured as text.
@@ -136,34 +118,7 @@ who is allowed to call what. Sections 6–8 and 15 cover those.
 
 Three processes and two stateful services. Everything else is a library.
 
-```mermaid
-flowchart TB
-  subgraph api_proc["apps/chat-cli — api process (node src/api.ts)"]
-    routes["HTTP routes<br/>src/routes"]
-    services["Services<br/>stage engine, agents, models,<br/>prerequisites, settings"]
-    store["Workspace<br/>src/workspace.ts"]
-    routes --> services --> store
-  end
-
-  subgraph cli_proc["apps/chat-cli — cli process"]
-    repl["REPL + commands"]
-    repl --> services2["same services"]
-  end
-
-  subgraph harness_proc["dsh per role (child process)"]
-    dsh["harness turn"]
-  end
-
-  pg[("PostgreSQL<br/>aifactory")]
-  files[("project roots<br/>documents, attachments")]
-  ext["model providers"]
-
-  routes --> harness_proc
-  store --> pg
-  store --> files
-  dsh --> ext
-  services2 --> pg
-```
+![3.1 Containers](diagrams/arch--3-1-containers.png)
 
 **Why two entry points.** The CLI and the API share every service, so behaviour cannot drift
 between "what the UI does" and "what the shell does". The CLI is not a client of the HTTP API;
@@ -171,20 +126,7 @@ it constructs the same objects.
 
 ### 3.2 Deployment
 
-```mermaid
-flowchart LR
-  subgraph optional["optional, degrade gracefully"]
-    phoenix["Phoenix :6006<br/>OTLP :4317"]
-    embed["llama.cpp embeddings :8081"]
-  end
-  subgraph required["required"]
-    pg[("PostgreSQL 16<br/>+ pgvector")]
-    api["api :8787"]
-  end
-  api --> pg
-  api -.-> phoenix
-  api -.-> embed
-```
+![3.2 Deployment](diagrams/arch--3-2-deployment.png)
 
 Each optional dependency fails **closed but not fatally**: with no embeddings the semantic
 index answers `503 SEMANTIC_INDEX_DISABLED`; with no Phoenix, traces are dropped and nothing
@@ -207,45 +149,7 @@ and the router wiring. Everything else is a module.
 
 ### 4.1 What happens to one request
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant C as Client
-  participant S as server.ts
-  participant H as http.ts
-  participant R as routes/index.ts
-  participant M as routes/router.ts
-  participant Hd as route handler
-  participant Svc as service
-  participant DB as PostgreSQL
-
-  C->>S: HTTP request
-  S->>H: applyCors()
-  alt OPTIONS
-    H-->>C: 204 preflight
-  else everything else
-    S->>H: requireToken() if /api/*
-    S->>R: dispatchRoutes(table)
-    R->>M: matchRoute(method, path)
-    alt no route matches
-      M-->>S: matched = false
-      S-->>C: 404 NOT_FOUND
-    else route matched
-      M->>M: assertAuthorised(route.auth)
-      alt role insufficient
-        M-->>C: 403 FORBIDDEN / ADMIN_FORBIDDEN
-      else allowed
-        M->>Hd: handler(context)
-        Hd->>Svc: call the service
-        Svc->>DB: SQL
-        DB-->>Svc: rows
-        Svc-->>Hd: domain object
-        Hd-->>C: 2xx JSON
-      end
-    end
-  end
-  Note over S: finally: log method, path, status, duration
-```
+![4.1 What happens to one request](diagrams/arch--4-1-what-happens-to-one-request.png)
 
 Two properties are worth noting because they are enforced, not conventional:
 
@@ -259,20 +163,7 @@ Two properties are worth noting because they are enforced, not conventional:
 The table is an ordered array; matching compares segment count, then literals, then
 parameters, so `/api/projects/:id/documents` cannot swallow `/api/projects/:id/stages/:stage/runs`.
 
-```mermaid
-flowchart TB
-  url["GET /api/projects/abc/stages/planning/runs"] --> split["split into 6 segments"]
-  split --> table["for each route in table"]
-  table --> len{"segment count<br/>equal?"}
-  len -->|no| next["next route"]
-  len -->|yes| lit{"literal segments<br/>equal?"}
-  lit -->|no| next
-  lit -->|yes| method{"method<br/>equal?"}
-  method -->|no| next
-  method -->|yes| auth["assertAuthorised"]
-  auth --> handler["handler with params"]
-  next --> table
-```
+![4.2 Route resolution](diagrams/arch--4-2-route-resolution.png)
 
 The table is also the source of two invariants enforced by tests: **every route declares a
 role**, and **the table and `openapi.yaml` are the same set**. Both are asserted in
@@ -314,37 +205,7 @@ thousand lines, and copies drift.
 
 ### 6.1 Engine and definitions
 
-```mermaid
-flowchart TB
-  subgraph definitions["src/stages — one file per stage"]
-    planning["planning<br/>TELOS feasibility report"]
-    requirements["requirements<br/>requirements specification"]
-    add["new stage = new file<br/>+ one line in the registry"]
-  end
-
-  registry["src/stages/index.ts<br/>STAGE_DEFINITIONS"]
-
-  subgraph engine["StageEngine (src/stage-runtime.ts)"]
-    direction TB
-    lease["lease + heartbeat"]
-    loop["analyze → author → review"]
-    accept["acceptance rule"]
-    complete["completion + export"]
-    binds["bindings + failover"]
-  end
-
-  subgraph derived["derived from the registry"]
-    processes["STAGE_PROCESSES<br/>(agent assignments)"]
-    settings["stage settings definitions"]
-    engines["one engine per stage"]
-  end
-
-  definitions --> registry
-  registry --> engine
-  registry --> processes
-  registry --> settings
-  registry --> engines
-```
+![6.1 Engine and definitions](diagrams/arch--6-1-engine-and-definitions.png)
 
 **The split, stated plainly.**
 
@@ -387,53 +248,7 @@ definition yet and answer `501`.
 This is the whole loop for one planning run with one review cycle. Read it top to bottom;
 each step names the module that does it.
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant C as Client
-  participant RT as StageEngine
-  participant WS as Workspace
-  participant A as AgentService
-  participant P as PrerequisiteService
-  participant H as Harness
-  participant M as ModelRuntime
-
-  C->>RT: POST /api/projects/:id/stages/planning/runs
-  RT->>P: ensureReady(project, planning)
-  P-->>RT: readiness (evidence, or 409)
-  RT->>WS: snapshot + prior stage summaries
-  RT->>RT: resolve settings (project → Factory → defaults)
-  RT->>A: composition per process
-  RT->>RT: snapshotBindings(model + agents)
-  RT->>WS: createStageRun(context, readiness)
-  RT->>WS: updateStageRun(bindings)
-  RT-->>C: 201 run{pending}
-
-  C->>RT: POST /api/stage-runs/:id/execute
-  RT->>WS: claimStageRun (lease, workerId)
-  RT->>M: pin the bound target
-  M-->>RT: pin (patch file, attribution)
-  Note over RT: analyzer
-  RT->>H: prompt (context + brief + attachments)
-  H-->>RT: analysis text
-  RT->>WS: append analysis
-  Note over RT: author
-  RT->>H: prompt (context + analysis)
-  H-->>RT: draft text
-  RT->>WS: append draft
-  Note over RT: reviewer
-  RT->>H: prompt (context + draft + thresholds)
-  H-->>RT: JSON verdict
-  RT->>RT: parse + acceptance rule
-  alt accepted
-    RT->>WS: pendingGate = final, release lease
-    RT-->>C: awaiting_human
-  else needs revision
-    RT->>H: revision prompt (findings)
-    H-->>RT: revised draft
-    RT->>RT: cycle++ (until maxReviewCycles)
-  end
-```
+![7.1 A run, in order](diagrams/arch--7-1-a-run-in-order.png)
 
 **Why the lease exists.** Two API processes may receive an execute for the same run. The
 lease is a `UPDATE … WHERE locked_by IS NULL OR lease_expires_at < now()` — one winner, and
@@ -444,30 +259,7 @@ flag that `assertLease` checks *before every write that matters*.
 
 A single role call is where the model, the agent, the tools and the telemetry meet.
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant RT as StageEngine
-  participant A as AgentService
-  participant AP as agent-patch.ts
-  participant H as Harness
-  participant S as StageEventSink
-  participant WS as Workspace
-
-  RT->>A: composition(project, stage, process)
-  A-->>RT: persona, model, tools, skills
-  RT->>AP: write .aifactory/agents/<id>/skills/**
-  AP-->>RT: patch path + cleanup
-  RT->>S: role_start {role, model, agent}
-  RT->>H: spawn dsh --profile headless --patch model --patch agent
-  loop harness events
-    H-->>RT: session, status, thinking, text, tool_call, tool_result
-    RT->>S: append event (usage stamped with the model that ran)
-  end
-  H-->>RT: final text
-  RT->>S: role_end {durationMs, textLength}
-  RT->>AP: cleanup patch
-```
+![7.2 One role turn](diagrams/arch--7-2-one-role-turn.png)
 
 The agent is **composed, not configured**: its persona becomes an instruction layer, its
 skills are materialised as files on disk, and its tools are enforced by the harness profile —
@@ -482,29 +274,7 @@ which is why a skill without `tool-skill` is rejected at creation rather than fa
 The eight statuses are the only ones the database accepts (a `CHECK` constraint, so a typo
 fails at write time rather than living in the table forever).
 
-```mermaid
-stateDiagram-v2
-  [*] --> pending: created
-  pending --> analyzing: execute
-  analyzing --> drafting: analysis stored
-  drafting --> reviewing: draft stored
-  reviewing --> revising: findings to apply
-  revising --> reviewing: revised
-  reviewing --> awaiting_human: accepted
-  drafting --> awaiting_human: review gate skipped
-  awaiting_human --> analyzing: apply findings
-  awaiting_human --> completed: decision recorded
-  awaiting_human --> cancelled: cancel
-  pending --> cancelled: cancel
-  analyzing --> failed: role failed
-  drafting --> failed: role failed
-  reviewing --> failed: role failed
-  failed --> pending: retry
-  analyzing --> pending: lease lost, re-claimable
-  completed --> [*]
-  failed --> [*]
-  cancelled --> [*]
-```
+![8.1 Run lifecycle](diagrams/arch--8-1-run-lifecycle.png)
 
 **Where artifacts appear.** Nothing is written to `project_documents` until `completed`. A
 paused run holds its draft in `draft_markdown` and has **no document and no PDF** — so a gate
@@ -515,20 +285,7 @@ cannot be confused with an approved artifact, and a rejected draft leaves no lit
 Two gates, two shapes. The distinction matters for the UI: one asks a question, the other
 asks for a verdict.
 
-```mermaid
-flowchart TB
-  review{"reviewer verdict<br/>accepted?"}
-  review -->|yes| finalGate["gate: final<br/>kind = final"]
-  review -->|no, cycles left| revise["revise with findings<br/>cycle++"]
-  review -->|no, cycles exhausted| finalGate
-  revise --> review
-
-  finalGate --> human{"human answers"}
-  human -->|"apply (review gate)"| revise
-  human -->|"accept (review gate)"| finalGate
-  human -->|"refine: true (final)"| revise
-  human -->|"decision (final)"| complete["write document<br/>+ PDF + checklist<br/>status = completed"]
-```
+![8.2 Gate decision](diagrams/arch--8-2-gate-decision.png)
 
 **The acceptance rule**, in one line, is the reason a reviewer's opinion is auditable:
 
@@ -558,30 +315,7 @@ gets one `gate_stale` event. It is never auto-approved — completion stays a hu
 A run cannot be switched off from outside, because the harness is a separate process that
 only its owner can abort. So cancellation is a **request the owner observes**.
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant C as Client
-  participant WS as Workspace
-  participant RT as StageEngine (owner)
-  participant HB as heartbeat timer
-  participant H as Harness
-
-  C->>WS: POST /stage-runs/:id/cancel {reason}
-  alt not leased
-    WS-->>C: status = cancelled (gate cleared, reason kept)
-  else leased
-    WS->>WS: cancel_requested_at = now(), cancel_reason = reason
-    WS-->>C: 200 (request recorded)
-    loop every 30s
-      HB->>WS: heartbeat + isCancelRequested()
-      WS-->>HB: true
-      HB->>H: cancel()
-      H-->>RT: throws "harness turn cancelled"
-      RT->>WS: status = cancelled, event run_cancelled
-    end
-  end
-```
+![9. Cancellation](diagrams/arch--9-cancellation.png)
 
 **Why not just set the status.** Flipping the row to `cancelled` while a harness is mid-turn
 would leave the worker writing into a finished run — the classic lost-update. The request
@@ -600,17 +334,7 @@ two roles does not write a third.
 A run freezes the model it started with. This is what makes a review meaningful: a document
 drafted by one model and reviewed by another is not a review, it is two opinions.
 
-```mermaid
-stateDiagram-v2
-  [*] --> Unbound: stage created
-  Unbound --> Bound: start() snapshots target + agents
-  Bound --> Bound: every resume pins the same target
-  Bound --> Rebound: POST /rebind (admin)
-  Rebound --> Bound: run_rebound recorded
-  Bound --> Unavailable: bound provider or model removed
-  Unavailable --> Bound: rebind, then resume
-  Bound --> [*]: completed / cancelled
-```
+![10.1 Binding lifecycle](diagrams/arch--10-1-binding-lifecycle.png)
 
 | Situation | Behaviour |
 |---|---|
@@ -626,22 +350,7 @@ are different facts, and only one of them is true.
 
 The fallback chain is declared in the model settings. A role walks it one candidate at a time.
 
-```mermaid
-flowchart TB
-  start["role attempt"] --> breaker{"breaker<br/>closed?"}
-  breaker -->|no| skip["role_fallback_skipped<br/>try next candidate"]
-  breaker -->|yes| run["run the harness"]
-  run --> ok{"succeeded?"}
-  ok -->|yes| done["return text<br/>record success"]
-  ok -->|no| classify["classify the error"]
-  classify --> retry{"retryable?"}
-  retry -->|no| fail["throw STAGE_ROLE_FAILED"]
-  retry -->|yes| more{"another<br/>candidate?"}
-  more -->|yes| fallback["role_fallback event<br/>try next"]
-  more -->|no| fail
-  skip --> more
-  fallback --> start
-```
+![10.2 Failover](diagrams/arch--10-2-failover.png)
 
 **Two errors never fall back**: `aborted` (a cancel is a decision) and `content_filter`
 (another model would make the same decision about the same text). Everything else — transport,
@@ -663,14 +372,7 @@ price. A fallback is never billed as the primary, and an unpriced model gets a
 Three layers, most specific first. A run snapshots the result, so the numbers it was judged
 by never move underneath it.
 
-```mermaid
-flowchart LR
-  def["stage definition<br/>defaults"] --> factory["Factory default<br/>(settings table)"]
-  factory --> project["project override<br/>(per project, per stage)"]
-  project --> resolved["resolved settings"]
-  resolved --> snapshot["snapshotted into<br/>context.constraints"]
-  snapshot --> run["every gate reads<br/>this run's copy"]
-```
+![11. Settings resolution](diagrams/arch--11-settings-resolution.png)
 
 | Layer | Set by | Scope |
 |---|---|---|
@@ -687,24 +389,7 @@ object would look like "all defaults", which is a different claim.
 
 An agent is **data plus a composition step**, not a prompt template with a name.
 
-```mermaid
-flowchart LR
-  subgraph data["stored"]
-    a1["agent_definitions<br/>name, persona, model,<br/>tools, skills"]
-    a2["agent_assignments<br/>stage + process → agent<br/>(project_id NULL = factory)"]
-  end
-  subgraph compose["per role run"]
-    c1["read composition"]
-    c2["persona → instruction layer"]
-    c3["skills → .aifactory/agents/id/skills/<name>/SKILL.md"]
-    c4["tools → verified against profile rows"]
-    c5["model → agent override, else run target"]
-  end
-  a1 --> c1
-  a2 --> c1
-  c1 --> c2 --> c3 --> c4 --> c5
-  c5 --> h["dsh --patch model --patch agent"]
-```
+![12. Agents and composition](diagrams/arch--12-agents-and-composition.png)
 
 **Rules that are enforced, not documented:**
 
@@ -728,21 +413,7 @@ failure rather than a pass.
 A stage may only start when its **evidence** exists. That is deliberately not "the previous
 stage ran": a project can start at requirements if it arrives with a specification.
 
-```mermaid
-flowchart TB
-  start["POST .../runs"] --> gate{"prerequisite<br/>satisfied?"}
-  gate --> sources{"which source?"}
-  sources -->|brief| b["brief on this run,<br/>non-empty"]
-  sources -->|attachment| at["N attachments<br/>uploaded"]
-  sources -->|document| d["document of an accepted kind,<br/>status uploaded/in_review/approved,<br/>newest version"]
-  sources -->|waiver| w["waiver with a reason"]
-  b --> ok["ready"]
-  at --> ok
-  d --> ok
-  w --> ok
-  gate -->|none| no["409 STAGE_NOT_READY<br/>missing[] listed"]
-  ok --> snapshot["readiness snapshotted<br/>into context.readiness"]
-```
+![13. Prerequisites and readiness](diagrams/arch--13-prerequisites-and-readiness.png)
 
 **Why snapshot readiness.** A gate must be auditable against the evidence that existed when
 the run started. If someone deletes the brief an hour later, the run's record still shows it
@@ -759,30 +430,7 @@ Twenty-four tables. The core is six; the rest are configuration or derived.
 
 ### 14.1 Entity model
 
-```mermaid
-erDiagram
-  projects ||--o{ project_stages : "has 8 stages"
-  projects ||--o{ project_stage_runs : "runs"
-  projects ||--o{ project_documents : "documents"
-  projects ||--o{ project_attachments : "attachments"
-  projects ||--o{ project_checklist_items : "checklist"
-  projects ||--o{ project_stage_settings : "overrides"
-  projects ||--o{ project_stage_evidence : "waivers"
-  projects ||--o{ project_chunks : "embeddings"
-
-  project_stage_runs ||--o{ stage_run_events : "event log"
-  project_stage_runs ||--o{ stage_reviews : "reviews"
-  project_stage_runs ||--o{ stage_run_attachments : "inputs"
-  project_stage_runs ||--o{ project_documents : "produces"
-
-  project_documents ||--o{ stage_document_exports : "PDF"
-  project_documents ||--o{ stage_document_requirements : "traceability"
-
-  stage_prerequisites }o--|| projects : "catalogue, per stage"
-
-  agent_definitions ||--o{ agent_assignments : "assigned"
-  model_providers ||--o{ model_catalog : "offers"
-```
+![14.1 Entity model](diagrams/arch--14-1-entity-model.png)
 
 ### 14.2 The tables that matter, and why
 
@@ -811,35 +459,7 @@ The baseline (`0001`) is fully idempotent — `CREATE TABLE IF NOT EXISTS`, guar
 
 ## 15. Trust boundaries and authorisation
 
-```mermaid
-flowchart LR
-  subgraph untrusted["untrusted"]
-    client["client"]
-    prompt["uploaded documents<br/>and model output"]
-  end
-  subgraph boundary1["boundary: HTTP"]
-    auth["token check<br/>timingSafeEqual over SHA-256"]
-    admin["admin check<br/>for reconfiguration"]
-  end
-  subgraph trusted["trusted"]
-    api["api process"]
-    db[("PostgreSQL")]
-  end
-  subgraph boundary2["boundary: child process"]
-    harness["harness"]
-    fs[("project root")]
-  end
-  subgraph external["external"]
-    provider["model provider"]
-  end
-
-  client --> auth --> admin --> api
-  prompt --> api
-  api --> db
-  api --> harness
-  harness --> fs
-  harness --> provider
-```
+![15. Trust boundaries and authorisation](diagrams/arch--15-trust-boundaries-and-authorisation.png)
 
 **Four boundaries, four different controls.**
 
@@ -864,24 +484,7 @@ them.
 
 Three layers, each answering a different question.
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant RT as StageEngine
-  participant Sink as StageEventSink
-  participant WS as Workspace
-  participant Tr as TraceRecorder
-  participant Ph as Phoenix
-
-  RT->>Sink: event (role_start, status, tool_call, …)
-  Sink->>WS: INSERT stage_run_events
-  Note over WS: durable: the UI timeline<br/>and the telemetry endpoint read this
-  RT->>Tr: span (run, role, document)
-  Tr->>Ph: OTLP export (optional)
-  Note over Ph: traces: slow roles,<br/>model and token attribution
-  RT->>RT: log line (structured, levelled)
-  Note over RT: logs: the operator's<br/>grep-able record
-```
+![16. Observability](diagrams/arch--16-observability.png)
 
 | Layer | Question it answers | Where |
 |---|---|---|

@@ -1,0 +1,19 @@
+stateDiagram-v2
+  [*] --> pending
+  pending --> analyzing: execute
+  analyzing --> drafting
+  drafting --> reviewing
+  reviewing --> revising: findings
+  revising --> reviewing: revised
+  reviewing --> awaiting_human: accepted
+  awaiting_human --> analyzing: apply findings
+  awaiting_human --> completed: decision
+  pending --> cancelled: cancel
+  awaiting_human --> cancelled: cancel
+  analyzing --> failed: error
+  drafting --> failed: error
+  reviewing --> failed: error
+  failed --> pending: retry
+  completed --> [*]
+  failed --> [*]
+  cancelled --> [*]

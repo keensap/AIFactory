@@ -1,0 +1,12 @@
+flowchart TB
+  review{"reviewer verdict<br/>accepted?"}
+  review -->|yes| finalGate["gate: final<br/>kind = final"]
+  review -->|no, cycles left| revise["revise with findings<br/>cycle++"]
+  review -->|no, cycles exhausted| finalGate
+  revise --> review
+
+  finalGate --> human{"human answers"}
+  human -->|"apply (review gate)"| revise
+  human -->|"accept (review gate)"| finalGate
+  human -->|"refine: true (final)"| revise
+  human -->|"decision (final)"| complete["write document<br/>+ PDF + checklist<br/>status = completed"]

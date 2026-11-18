@@ -1,0 +1,12 @@
+flowchart LR
+  subgraph horizontal["Built — the horizontal platform"]
+    h["stages · models · agents<br/>gates · artifacts · telemetry"]
+  end
+  subgraph vertical["Not built — the verticals"]
+    v["git · trackers · CI/CD · cloud<br/>comms · sandboxes"]
+  end
+  subgraph envelope["Not built — the enterprise envelope"]
+    e["SSO · RBAC · multi-tenancy<br/>broker · Kubernetes"]
+  end
+  horizontal --> vertical
+  horizontal --> envelope

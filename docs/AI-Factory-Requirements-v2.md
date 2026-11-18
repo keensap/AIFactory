@@ -18,7 +18,7 @@
 | **`AR-` split into `AG-` (agent runtime) and `FR-`** | v1 used `AR-` for agent-runtime requirements while the remediation register uses `AR-` for *architecture review findings*. Two different things shared a prefix. `AG-` now means agent runtime; the old `AR-` numbers are mapped in Appendix D. |
 | **The stage catalog gained an "as built" column** | The catalog described 26 stages; two run today. The column makes that explicit instead of leaving a reader to discover it. |
 | **Part IV: future enhancements** | v1 listed a roadmap but no candidate scope beyond it. Part IV proposes concrete enhancements with rationale, cost and risk — and, as importantly, names the ideas that were rejected and why. |
-| **Diagrams redrawn** | v1's diagrams were dense flowcharts. This version uses state machines for lifecycles, sequence diagrams for flows, and one question per diagram. |
+| **Diagrams redrawn and rendered** | v1's diagrams were dense flowcharts shown as Mermaid source. This version uses state machines for lifecycles and sequence diagrams for flows, and embeds them as images so they display in any viewer (source in `diagrams/src/`). |
 | Consolidated prose | Long narrative sections became tables where a table is clearer. No requirement was dropped. |
 
 **Reading the status column.** `Built` means it works and a test covers it. `Partial` means the
@@ -225,19 +225,7 @@ mistaken for an approval.
 
 ### 3.2 Lifecycle overview
 
-```mermaid
-flowchart LR
-  d["Discovery<br/>S01 intake · S02 requirements<br/>S03 wireframes · S04 prototype"]
-  f["Definition<br/>S05 functional spec<br/>S06 architecture · S07 data · S08 roadmap"]
-  p["Proof<br/>S10 plan · S11 build"]
-  dl["Delivery<br/>S12 tasks · S13 code · S14 PR review<br/>S15–S17 tests · S18 readiness · S19 milestone"]
-  o["Operate<br/>S20 CI/CD · S21 deploy · S22 ops<br/>S23 backlog · S24 comms · S25 docs · S26 changes"]
-  review["S09 review, rating and rejection<br/>applied at every gate"]
-  d --> f --> p --> dl --> o
-  f -.-> review
-  dl -.-> review
-  o -.-> review
-```
+![3.2 Lifecycle overview](diagrams/req--3-2-lifecycle-overview.png)
 
 S09 is not a phase; it is the review discipline applied at every gate, which is why it sits
 across the bands rather than inside one.
@@ -286,16 +274,7 @@ two implemented stages; the numbering in the catalog is the lifecycle, not the b
 Autonomy is set per project and capped per stage and per risk tier. The **effective** autonomy
 at a gate is the minimum of the three.
 
-```mermaid
-flowchart LR
-  project["project level<br/>A0…A4"] --> min{"effective =<br/>minimum of"}
-  stage["stage cap"] --> min
-  risk["risk tier cap<br/>R1…R4"] --> min
-  min --> gate["gate behaviour"]
-  gate --> a2["A2: every gate<br/>needs a human"]
-  gate --> a3["A3: auto-pass only when<br/>risk low + checks green,<br/>20% sampled"]
-  gate --> a4["A4: audit after,<br/>hard stops still block"]
-```
+![3.4 Autonomy levels](diagrams/req--3-4-autonomy-levels.png)
 
 | Level | Name | Behaviour | Default use |
 |---|---|---|---|
@@ -319,27 +298,7 @@ it requires the Platform Owner and Security Officer.
 
 ### 3.5 Run lifecycle
 
-```mermaid
-stateDiagram-v2
-  [*] --> pending
-  pending --> analyzing: execute
-  analyzing --> drafting
-  drafting --> reviewing
-  reviewing --> revising: findings
-  revising --> reviewing: revised
-  reviewing --> awaiting_human: accepted
-  awaiting_human --> analyzing: apply findings
-  awaiting_human --> completed: decision
-  pending --> cancelled: cancel
-  awaiting_human --> cancelled: cancel
-  analyzing --> failed: error
-  drafting --> failed: error
-  reviewing --> failed: error
-  failed --> pending: retry
-  completed --> [*]
-  failed --> [*]
-  cancelled --> [*]
-```
+![3.5 Run lifecycle](diagrams/req--3-5-run-lifecycle.png)
 
 **AG-01 (M) — Built.** A run shall persist its phase, analysis, draft and review cycle after
 every agent step, so a process restart loses at most the in-flight step.
@@ -388,20 +347,7 @@ test, a commit with no task) as a quality finding.
 A single page that answers "what does this thing actually do today". The detailed requirement
 tables follow in §5–§17.
 
-```mermaid
-flowchart LR
-  subgraph horizontal["Built — the horizontal platform"]
-    h["stages · models · agents<br/>gates · artifacts · telemetry"]
-  end
-  subgraph vertical["Not built — the verticals"]
-    v["git · trackers · CI/CD · cloud<br/>comms · sandboxes"]
-  end
-  subgraph envelope["Not built — the enterprise envelope"]
-    e["SSO · RBAC · multi-tenancy<br/>broker · Kubernetes"]
-  end
-  horizontal --> vertical
-  horizontal --> envelope
-```
+![4. Delivery status at a glance](diagrams/req--4-delivery-status-at-a-glance.png)
 
 The shape matters more than the list: everything that is **shared by all stages** exists, and
 everything that **connects to the outside world** does not.
@@ -951,22 +897,7 @@ is marked accordingly rather than quietly rewritten to match what was built.
 
 ## 9. Model gateway
 
-```mermaid
-flowchart LR
-  subgraph config["configuration"]
-    prov["providers<br/>catalog, keys, egress rules"]
-    target["Factory target<br/>provider + model"]
-    chain["fallback chain"]
-  end
-  subgraph runtime["runtime"]
-    pin["pin a patch<br/>(one per run)"]
-    route["routes per provider"]
-    invoke["harness call"]
-    attr["attribution<br/>model, price, tokens"]
-  end
-  prov --> target --> chain --> pin --> route --> invoke --> attr
-  attr --> ledger["usage events + cost ledger"]
-```
+![9. Model gateway](diagrams/req--9-model-gateway.png)
 
 | ID | Requirement | Status |
 |---|---|---|
@@ -1024,15 +955,7 @@ flowchart LR
 
 ## 11. Data architecture
 
-```mermaid
-flowchart LR
-  app["API + CLI"] --> pg[("PostgreSQL<br/>system of record")]
-  app --> files[("project roots<br/>documents, attachments")]
-  app --> vec[("pgvector chunks<br/>in the same database")]
-  harness["harness"] --> files
-  pg -.-> replica["read replica<br/>(not deployed)"]
-  app -.-> broker["broker<br/>(not deployed)"]
-```
+![11. Data architecture](diagrams/req--11-data-architecture.png)
 
 **What is built:** PostgreSQL as the single system of record, `pgvector` embeddings in the same
 database, project files on disk, forward-only checksummed migrations, one shared connection
@@ -1072,27 +995,7 @@ tenancy.
 
 ## 12. Integrations
 
-```mermaid
-flowchart LR
-  subgraph factory["AI Factory"]
-    core["stage engine +<br/>artifact graph"]
-  end
-  subgraph connectors["connector plugins (none built)"]
-    git["Git hosts"]
-    tracker["Jira /<br/>Azure DevOps"]
-    cicd["CI/CD"]
-    cloud["Cloud"]
-    comms["Gmail / Chat"]
-    idp["SSO / SCIM"]
-  end
-  core -.-> connectors
-  connectors -.-> ext1["GitHub, GitLab,<br/>Bitbucket, Azure Repos"]
-  connectors -.-> ext2["Jira Cloud/DC,<br/>Azure Boards"]
-  connectors -.-> ext3["Actions, GitLab CI,<br/>Azure Pipelines, Jenkins"]
-  connectors -.-> ext4["AWS, Azure, GCP"]
-  connectors -.-> ext5["Google Workspace"]
-  connectors -.-> ext6["OIDC, SAML, SCIM"]
-```
+![12. Integrations](diagrams/req--12-integrations.png)
 
 **State: none built.** The connector framework is specified below and is the gate to every
 stage from S13 onward. Note the shape: webhooks **plus** scheduled reconciliation, because a
@@ -1149,30 +1052,7 @@ webhook that is missed is indistinguishable from an event that never happened.
 
 ## 13. Security, privacy and compliance
 
-```mermaid
-flowchart TB
-  subgraph untrusted["untrusted"]
-    docs["uploaded documents"]
-    model["model output"]
-  end
-  subgraph controls["controls in the current build"]
-    token["bearer token<br/>constant-time compare"]
-    admin["separate admin token"]
-    allow["tool allowlist<br/>verified against profile"]
-    scrub["child env scrubbed of<br/>provider keys"]
-    path["paths resolved inside<br/>the project root"]
-    gate["privileged actions<br/>require a human gate"]
-  end
-  subgraph missing["specified, not built"]
-    sso["SSO / MFA"]
-    rbac["RBAC / ABAC"]
-    sandbox["sandboxed execution"]
-    scanner["secret & dependency scanning"]
-  end
-  docs --> controls
-  model --> controls
-  controls -.-> missing
-```
+![13. Security, privacy and compliance](diagrams/req--13-security-privacy-and-compliance.png)
 
 | ID | Requirement | Status |
 |---|---|---|

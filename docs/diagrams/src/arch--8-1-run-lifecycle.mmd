@@ -1,0 +1,21 @@
+stateDiagram-v2
+  [*] --> pending: created
+  pending --> analyzing: execute
+  analyzing --> drafting: analysis stored
+  drafting --> reviewing: draft stored
+  reviewing --> revising: findings to apply
+  revising --> reviewing: revised
+  reviewing --> awaiting_human: accepted
+  drafting --> awaiting_human: review gate skipped
+  awaiting_human --> analyzing: apply findings
+  awaiting_human --> completed: decision recorded
+  awaiting_human --> cancelled: cancel
+  pending --> cancelled: cancel
+  analyzing --> failed: role failed
+  drafting --> failed: role failed
+  reviewing --> failed: role failed
+  failed --> pending: retry
+  analyzing --> pending: lease lost, re-claimable
+  completed --> [*]
+  failed --> [*]
+  cancelled --> [*]

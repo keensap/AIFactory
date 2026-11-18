@@ -1,0 +1,22 @@
+erDiagram
+  projects ||--o{ project_stages : "has 8 stages"
+  projects ||--o{ project_stage_runs : "runs"
+  projects ||--o{ project_documents : "documents"
+  projects ||--o{ project_attachments : "attachments"
+  projects ||--o{ project_checklist_items : "checklist"
+  projects ||--o{ project_stage_settings : "overrides"
+  projects ||--o{ project_stage_evidence : "waivers"
+  projects ||--o{ project_chunks : "embeddings"
+
+  project_stage_runs ||--o{ stage_run_events : "event log"
+  project_stage_runs ||--o{ stage_reviews : "reviews"
+  project_stage_runs ||--o{ stage_run_attachments : "inputs"
+  project_stage_runs ||--o{ project_documents : "produces"
+
+  project_documents ||--o{ stage_document_exports : "PDF"
+  project_documents ||--o{ stage_document_requirements : "traceability"
+
+  stage_prerequisites }o--|| projects : "catalogue, per stage"
+
+  agent_definitions ||--o{ agent_assignments : "assigned"
+  model_providers ||--o{ model_catalog : "offers"

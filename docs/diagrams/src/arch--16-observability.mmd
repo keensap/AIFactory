@@ -1,0 +1,16 @@
+sequenceDiagram
+  autonumber
+  participant RT as StageEngine
+  participant Sink as StageEventSink
+  participant WS as Workspace
+  participant Tr as TraceRecorder
+  participant Ph as Phoenix
+
+  RT->>Sink: event (role_start, status, tool_call, …)
+  Sink->>WS: INSERT stage_run_events
+  Note over WS: durable: the UI timeline<br/>and the telemetry endpoint read this
+  RT->>Tr: span (run, role, document)
+  Tr->>Ph: OTLP export (optional)
+  Note over Ph: traces: slow roles,<br/>model and token attribution
+  RT->>RT: log line (structured, levelled)
+  Note over RT: logs: the operator's<br/>grep-able record

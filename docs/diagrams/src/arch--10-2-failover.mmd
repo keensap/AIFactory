@@ -1,0 +1,14 @@
+flowchart TB
+  start["role attempt"] --> breaker{"breaker<br/>closed?"}
+  breaker -->|no| skip["role_fallback_skipped<br/>try next candidate"]
+  breaker -->|yes| run["run the harness"]
+  run --> ok{"succeeded?"}
+  ok -->|yes| done["return text<br/>record success"]
+  ok -->|no| classify["classify the error"]
+  classify --> retry{"retryable?"}
+  retry -->|no| fail["throw STAGE_ROLE_FAILED"]
+  retry -->|yes| more{"another<br/>candidate?"}
+  more -->|yes| fallback["role_fallback event<br/>try next"]
+  more -->|no| fail
+  skip --> more
+  fallback --> start

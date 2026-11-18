@@ -1,0 +1,23 @@
+flowchart LR
+  user["Operator<br/>(browser or curl)"]
+  ui["UI client<br/>(separate repo/thread)"]
+  subgraph factory["AI Factory"]
+    api["HTTP API"]
+    cli["CLI"]
+  end
+  harness["DeepSeek Harness<br/>(one process per role)"]
+  db[("PostgreSQL<br/>+ pgvector")]
+  providers["Model providers<br/>(Anthropic,<br/>OpenAI-compatible,<br/>local llama.cpp)"]
+  phoenix["Phoenix<br/>(traces)"]
+  fs[("Project workspace<br/>on disk")]
+
+  user --> api
+  user --> cli
+  ui --> api
+  api --> db
+  cli --> db
+  api --> harness
+  harness --> providers
+  api --> fs
+  harness --> fs
+  api -.-> phoenix

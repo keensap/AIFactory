@@ -1,0 +1,13 @@
+flowchart TB
+  start["POST .../runs"] --> gate{"prerequisite<br/>satisfied?"}
+  gate --> sources{"which source?"}
+  sources -->|brief| b["brief on this run,<br/>non-empty"]
+  sources -->|attachment| at["N attachments<br/>uploaded"]
+  sources -->|document| d["document of an accepted kind,<br/>status uploaded/in_review/approved,<br/>newest version"]
+  sources -->|waiver| w["waiver with a reason"]
+  b --> ok["ready"]
+  at --> ok
+  d --> ok
+  w --> ok
+  gate -->|none| no["409 STAGE_NOT_READY<br/>missing[] listed"]
+  ok --> snapshot["readiness snapshotted<br/>into context.readiness"]

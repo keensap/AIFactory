@@ -1,0 +1,22 @@
+flowchart TB
+  subgraph untrusted["untrusted"]
+    docs["uploaded documents"]
+    model["model output"]
+  end
+  subgraph controls["controls in the current build"]
+    token["bearer token<br/>constant-time compare"]
+    admin["separate admin token"]
+    allow["tool allowlist<br/>verified against profile"]
+    scrub["child env scrubbed of<br/>provider keys"]
+    path["paths resolved inside<br/>the project root"]
+    gate["privileged actions<br/>require a human gate"]
+  end
+  subgraph missing["specified, not built"]
+    sso["SSO / MFA"]
+    rbac["RBAC / ABAC"]
+    sandbox["sandboxed execution"]
+    scanner["secret & dependency scanning"]
+  end
+  docs --> controls
+  model --> controls
+  controls -.-> missing

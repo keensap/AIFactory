@@ -1,0 +1,45 @@
+sequenceDiagram
+  autonumber
+  participant C as Client
+  participant RT as StageEngine
+  participant WS as Workspace
+  participant A as AgentService
+  participant P as PrerequisiteService
+  participant H as Harness
+  participant M as ModelRuntime
+
+  C->>RT: POST /api/projects/:id/stages/planning/runs
+  RT->>P: ensureReady(project, planning)
+  P-->>RT: readiness (evidence, or 409)
+  RT->>WS: snapshot + prior stage summaries
+  RT->>RT: resolve settings (project → Factory → defaults)
+  RT->>A: composition per process
+  RT->>RT: snapshotBindings(model + agents)
+  RT->>WS: createStageRun(context, readiness)
+  RT->>WS: updateStageRun(bindings)
+  RT-->>C: 201 run{pending}
+
+  C->>RT: POST /api/stage-runs/:id/execute
+  RT->>WS: claimStageRun (lease, workerId)
+  RT->>M: pin the bound target
+  M-->>RT: pin (patch file, attribution)
+  Note over RT: analyzer
+  RT->>H: prompt (context + brief + attachments)
+  H-->>RT: analysis text
+  RT->>WS: append analysis
+  Note over RT: author
+  RT->>H: prompt (context + analysis)
+  H-->>RT: draft text
+  RT->>WS: append draft
+  Note over RT: reviewer
+  RT->>H: prompt (context + draft + thresholds)
+  H-->>RT: JSON verdict
+  RT->>RT: parse + acceptance rule
+  alt accepted
+    RT->>WS: pendingGate = final, release lease
+    RT-->>C: awaiting_human
+  else needs revision
+    RT->>H: revision prompt (findings)
+    H-->>RT: revised draft
+    RT->>RT: cycle++ (until maxReviewCycles)
+  end

@@ -1,0 +1,6 @@
+flowchart TB
+  def["stage definition<br/>defaults"] --> factory["Factory default<br/>(settings table)"]
+  factory --> project["project override<br/>(per project, per stage)"]
+  project --> resolved["resolved settings"]
+  resolved --> snapshot["snapshotted into<br/>context.constraints"]
+  snapshot --> run["every gate reads<br/>this run's copy"]

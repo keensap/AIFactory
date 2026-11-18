@@ -1,0 +1,19 @@
+flowchart LR
+  subgraph factory["AI Factory"]
+    core["stage engine +<br/>artifact graph"]
+  end
+  subgraph connectors["connector plugins (none built)"]
+    git["Git hosts"]
+    tracker["Jira /<br/>Azure DevOps"]
+    cicd["CI/CD"]
+    cloud["Cloud"]
+    comms["Gmail / Chat"]
+    idp["SSO / SCIM"]
+  end
+  core -.-> connectors
+  connectors -.-> ext1["GitHub, GitLab,<br/>Bitbucket, Azure Repos"]
+  connectors -.-> ext2["Jira Cloud/DC,<br/>Azure Boards"]
+  connectors -.-> ext3["Actions, GitLab CI,<br/>Azure Pipelines, Jenkins"]
+  connectors -.-> ext4["AWS, Azure, GCP"]
+  connectors -.-> ext5["Google Workspace"]
+  connectors -.-> ext6["OIDC, SAML, SCIM"]

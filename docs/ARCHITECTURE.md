@@ -3,6 +3,7 @@
 > **Superseded by [v2](ARCHITECTURE-v2.md).** This version is kept unchanged as a reference.
 > v2 covers the same system with deeper explanation and diagrams designed to be read; where the
 > two disagree, v2 is correct because it was written against the code after the remediation work.
+> **The diagrams here are Mermaid source; v2 embeds rendered images.**
 
 **Status:** superseded, 2026-11-18. The current description is [v2](ARCHITECTURE-v2.md).  
 **Scope:** the backend as implemented (`apps/chat-cli`). The UI is a separate workstream; its contracts are described in [`docs/ui/`](ui/).  

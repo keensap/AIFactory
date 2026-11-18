@@ -1,0 +1,27 @@
+flowchart TB
+  subgraph untrusted["untrusted"]
+    client["client"]
+    prompt["uploaded documents<br/>and model output"]
+  end
+  subgraph boundary1["boundary: HTTP"]
+    auth["token check<br/>timingSafeEqual over SHA-256"]
+    admin["admin check<br/>for reconfiguration"]
+  end
+  subgraph trusted["trusted"]
+    api["api process"]
+    db[("PostgreSQL")]
+  end
+  subgraph boundary2["boundary: child process"]
+    harness["harness"]
+    fs[("project root")]
+  end
+  subgraph external["external"]
+    provider["model provider"]
+  end
+
+  client --> auth --> admin --> api
+  prompt --> api
+  api --> db
+  api --> harness
+  harness --> fs
+  harness --> provider

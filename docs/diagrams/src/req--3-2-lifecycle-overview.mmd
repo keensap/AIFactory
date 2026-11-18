@@ -1,0 +1,11 @@
+flowchart TB
+  d["Discovery<br/>S01 intake<br/>S02 requirements<br/>S03 wireframes<br/>S04 prototype"]
+  f["Definition<br/>S05 functional spec<br/>S06 architecture<br/>S07 data design<br/>S08 roadmap"]
+  p["Proof<br/>S10 POC plan<br/>S11 POC build"]
+  dl["Delivery<br/>S12 tasks<br/>S13 code<br/>S14 PR review<br/>S15–S17 tests<br/>S18 readiness<br/>S19 milestone"]
+  o["Operate<br/>S20 CI/CD<br/>S21 deploy<br/>S22 operations<br/>S23 backlog<br/>S24 comms<br/>S25 docs<br/>S26 changes"]
+  review["S09 review, rating and rejection<br/>applied at every gate"]
+  d --> f --> p --> dl --> o
+  f -.-> review
+  dl -.-> review
+  o -.-> review

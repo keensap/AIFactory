@@ -1,0 +1,7 @@
+flowchart LR
+  app["API + CLI"] --> pg[("PostgreSQL<br/>system of record")]
+  app --> files[("project roots<br/>documents, attachments")]
+  app --> vec[("pgvector chunks<br/>in the same database")]
+  harness["harness"] --> files
+  pg -.-> replica["read replica<br/>(not deployed)"]
+  app -.-> broker["broker<br/>(not deployed)"]

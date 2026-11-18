@@ -1,0 +1,29 @@
+flowchart TB
+  subgraph definitions["src/stages — one file per stage"]
+    planning["planning<br/>TELOS feasibility report"]
+    requirements["requirements<br/>requirements specification"]
+    add["new stage = new file<br/>+ one line in the registry"]
+  end
+
+  registry["src/stages/index.ts<br/>STAGE_DEFINITIONS"]
+
+  subgraph engine["StageEngine (src/stage-runtime.ts)"]
+    direction TB
+    lease["lease + heartbeat"]
+    loop["analyze → author → review"]
+    accept["acceptance rule"]
+    complete["completion + export"]
+    binds["bindings + failover"]
+  end
+
+  subgraph derived["derived from the registry"]
+    processes["STAGE_PROCESSES<br/>(agent assignments)"]
+    settings["stage settings definitions"]
+    engines["one engine per stage"]
+  end
+
+  definitions --> registry
+  registry --> engine
+  registry --> processes
+  registry --> settings
+  registry --> engines

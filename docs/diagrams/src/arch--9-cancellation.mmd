@@ -1,0 +1,22 @@
+sequenceDiagram
+  autonumber
+  participant C as Client
+  participant WS as Workspace
+  participant RT as StageEngine (owner)
+  participant HB as heartbeat timer
+  participant H as Harness
+
+  C->>WS: POST /stage-runs/:id/cancel {reason}
+  alt not leased
+    WS-->>C: status = cancelled (gate cleared, reason kept)
+  else leased
+    WS->>WS: cancel_requested_at = now(), cancel_reason = reason
+    WS-->>C: 200 (request recorded)
+    loop every 30s
+      HB->>WS: heartbeat + isCancelRequested()
+      WS-->>HB: true
+      HB->>H: cancel()
+      H-->>RT: throws "harness turn cancelled"
+      RT->>WS: status = cancelled, event run_cancelled
+    end
+  end

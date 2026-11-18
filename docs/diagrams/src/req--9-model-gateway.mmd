@@ -1,0 +1,14 @@
+flowchart TB
+  subgraph config["configuration"]
+    prov["providers<br/>catalog, keys, egress rules"]
+    target["Factory target<br/>provider + model"]
+    chain["fallback chain"]
+  end
+  subgraph runtime["runtime"]
+    pin["pin a patch<br/>(one per run)"]
+    route["routes per provider"]
+    invoke["harness call"]
+    attr["attribution<br/>model, price, tokens"]
+  end
+  prov --> target --> chain --> pin --> route --> invoke --> attr
+  attr --> ledger["usage events + cost ledger"]

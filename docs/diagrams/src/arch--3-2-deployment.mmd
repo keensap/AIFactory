@@ -1,0 +1,12 @@
+flowchart LR
+  subgraph optional["optional, degrade gracefully"]
+    phoenix["Phoenix :6006<br/>OTLP :4317"]
+    embed["llama.cpp embeddings :8081"]
+  end
+  subgraph required["required"]
+    pg[("PostgreSQL 16<br/>+ pgvector")]
+    api["api :8787"]
+  end
+  api --> pg
+  api -.-> phoenix
+  api -.-> embed

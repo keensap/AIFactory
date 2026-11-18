@@ -1,0 +1,16 @@
+flowchart TB
+  subgraph data["stored"]
+    a1["agent_definitions<br/>name, persona, model,<br/>tools, skills"]
+    a2["agent_assignments<br/>stage + process → agent<br/>(project_id NULL = factory)"]
+  end
+  subgraph compose["per role run"]
+    c1["read composition"]
+    c2["persona →<br/>instruction layer"]
+    c3["skills → files on disk<br/>.aifactory/agents/id/skills/"]
+    c4["tools → verified<br/>against profile rows"]
+    c5["model → agent override<br/>else the run target"]
+  end
+  a1 --> c1
+  a2 --> c1
+  c1 --> c2 --> c3 --> c4 --> c5
+  c5 --> h["dsh --patch model --patch agent"]

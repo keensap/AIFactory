@@ -1,0 +1,37 @@
+sequenceDiagram
+  autonumber
+  participant C as Client
+  participant S as server.ts
+  participant H as http.ts
+  participant R as routes/index.ts
+  participant M as routes/router.ts
+  participant Hd as route handler
+  participant Svc as service
+  participant DB as PostgreSQL
+
+  C->>S: HTTP request
+  S->>H: applyCors()
+  alt OPTIONS
+    H-->>C: 204 preflight
+  else everything else
+    S->>H: requireToken() if /api/*
+    S->>R: dispatchRoutes(table)
+    R->>M: matchRoute(method, path)
+    alt no route matches
+      M-->>S: matched = false
+      S-->>C: 404 NOT_FOUND
+    else route matched
+      M->>M: assertAuthorised(route.auth)
+      alt role insufficient
+        M-->>C: 403 FORBIDDEN / ADMIN_FORBIDDEN
+      else allowed
+        M->>Hd: handler(context)
+        Hd->>Svc: call the service
+        Svc->>DB: SQL
+        DB-->>Svc: rows
+        Svc-->>Hd: domain object
+        Hd-->>C: 2xx JSON
+      end
+    end
+  end
+  Note over S: finally: log method, path, status, duration

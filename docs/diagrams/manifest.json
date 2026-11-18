@@ -1,0 +1,137 @@
+[
+  {
+    "name": "arch--10-1-binding-lifecycle",
+    "width": 899,
+    "height": 501
+  },
+  {
+    "name": "arch--10-2-failover",
+    "width": 641,
+    "height": 1188
+  },
+  {
+    "name": "arch--11-settings-resolution",
+    "width": 248,
+    "height": 616
+  },
+  {
+    "name": "arch--12-agents-and-composition",
+    "width": 588,
+    "height": 825
+  },
+  {
+    "name": "arch--13-prerequisites-and-readiness",
+    "width": 935,
+    "height": 900
+  },
+  {
+    "name": "arch--14-1-entity-model",
+    "width": 2764,
+    "height": 868
+  },
+  {
+    "name": "arch--15-trust-boundaries-and-authorisation",
+    "width": 612,
+    "height": 818
+  },
+  {
+    "name": "arch--16-observability",
+    "width": 1200,
+    "height": 737
+  },
+  {
+    "name": "arch--2-1-context",
+    "width": 969,
+    "height": 401
+  },
+  {
+    "name": "arch--3-1-containers",
+    "width": 851,
+    "height": 562
+  },
+  {
+    "name": "arch--3-2-deployment",
+    "width": 476,
+    "height": 399
+  },
+  {
+    "name": "arch--4-1-what-happens-to-one-request",
+    "width": 1890,
+    "height": 1473
+  },
+  {
+    "name": "arch--4-2-route-resolution",
+    "width": 544,
+    "height": 1154
+  },
+  {
+    "name": "arch--6-1-engine-and-definitions",
+    "width": 1994,
+    "height": 680
+  },
+  {
+    "name": "arch--7-1-a-run-in-order",
+    "width": 1683,
+    "height": 2225
+  },
+  {
+    "name": "arch--7-2-one-role-turn",
+    "width": 1430,
+    "height": 844
+  },
+  {
+    "name": "arch--8-1-run-lifecycle",
+    "width": 850,
+    "height": 778
+  },
+  {
+    "name": "arch--8-2-gate-decision",
+    "width": 631,
+    "height": 732
+  },
+  {
+    "name": "arch--9-cancellation",
+    "width": 1205,
+    "height": 958
+  },
+  {
+    "name": "req--11-data-architecture",
+    "width": 594,
+    "height": 470
+  },
+  {
+    "name": "req--12-integrations",
+    "width": 1539,
+    "height": 531
+  },
+  {
+    "name": "req--13-security-privacy-and-compliance",
+    "width": 479,
+    "height": 1156
+  },
+  {
+    "name": "req--3-2-lifecycle-overview",
+    "width": 326,
+    "height": 968
+  },
+  {
+    "name": "req--3-4-autonomy-levels",
+    "width": 710,
+    "height": 509
+  },
+  {
+    "name": "req--3-5-run-lifecycle",
+    "width": 735,
+    "height": 726
+  },
+  {
+    "name": "req--4-delivery-status-at-a-glance",
+    "width": 657,
+    "height": 335
+  },
+  {
+    "name": "req--9-model-gateway",
+    "width": 323,
+    "height": 864
+  }
+]

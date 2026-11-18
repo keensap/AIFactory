@@ -1,0 +1,26 @@
+flowchart TB
+  subgraph api_proc["api process<br/>node src/api.ts"]
+    routes["HTTP routes<br/>src/routes"]
+    services["Services<br/>stage engine, agents,<br/>models, prerequisites,<br/>settings"]
+    store["Workspace<br/>src/workspace.ts"]
+    routes --> services --> store
+  end
+
+  subgraph cli_proc["apps/chat-cli — cli process"]
+    repl["REPL + commands"]
+    repl --> services2["same services"]
+  end
+
+  subgraph harness_proc["dsh per role<br/>child process"]
+    dsh["harness turn"]
+  end
+
+  pg[("PostgreSQL<br/>aifactory")]
+  files[("project roots<br/>documents, attachments")]
+  ext["model providers"]
+
+  routes --> harness_proc
+  store --> pg
+  store --> files
+  dsh --> ext
+  services2 --> pg

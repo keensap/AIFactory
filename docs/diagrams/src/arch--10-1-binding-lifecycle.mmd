@@ -1,0 +1,9 @@
+stateDiagram-v2
+  [*] --> Unbound: stage created
+  Unbound --> Bound: start() snapshots target + agents
+  Bound --> Bound: every resume pins the same target
+  Bound --> Rebound: POST /rebind (admin)
+  Rebound --> Bound: run_rebound recorded
+  Bound --> Unavailable: bound provider or model removed
+  Unavailable --> Bound: rebind, then resume
+  Bound --> [*]: completed / cancelled

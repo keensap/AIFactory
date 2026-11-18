@@ -1,0 +1,12 @@
+flowchart TB
+  url["GET /api/projects/abc<br/>/stages/planning/runs"] --> split["split into 6 segments"]
+  split --> table["for each route in table"]
+  table --> len{"segment count<br/>equal?"}
+  len -->|no| next["next route"]
+  len -->|yes| lit{"literal segments<br/>equal?"}
+  lit -->|no| next
+  lit -->|yes| method{"method<br/>equal?"}
+  method -->|no| next
+  method -->|yes| auth["assertAuthorised"]
+  auth --> handler["handler with params"]
+  next --> table

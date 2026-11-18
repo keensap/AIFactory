@@ -1,0 +1,22 @@
+sequenceDiagram
+  autonumber
+  participant RT as StageEngine
+  participant A as AgentService
+  participant AP as agent-patch.ts
+  participant H as Harness
+  participant S as StageEventSink
+  participant WS as Workspace
+
+  RT->>A: composition(project, stage, process)
+  A-->>RT: persona, model, tools, skills
+  RT->>AP: write .aifactory/agents/<id>/skills/**
+  AP-->>RT: patch path + cleanup
+  RT->>S: role_start {role, model, agent}
+  RT->>H: spawn dsh --profile headless --patch model --patch agent
+  loop harness events
+    H-->>RT: session, status, thinking, text, tool_call, tool_result
+    RT->>S: append event (usage stamped with the model that ran)
+  end
+  H-->>RT: final text
+  RT->>S: role_end {durationMs, textLength}
+  RT->>AP: cleanup patch

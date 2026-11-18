@@ -1,0 +1,8 @@
+flowchart TB
+  project["project level<br/>A0…A4"] --> min{"effective =<br/>minimum of"}
+  stage["stage cap"] --> min
+  risk["risk tier cap<br/>R1…R4"] --> min
+  min --> gate["gate behaviour"]
+  gate --> a2["A2: every gate<br/>needs a human"]
+  gate --> a3["A3: auto-pass only when<br/>risk low + checks green,<br/>20% sampled"]
+  gate --> a4["A4: audit after,<br/>hard stops still block"]
