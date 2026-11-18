@@ -52,6 +52,34 @@ paths:
                           profile:
                             type: string
                       - type: 'null'
+                  database:
+                    type: string
+                  pools:
+                    type: object
+                    description: One shared application pool plus a separate small log pool.
+                    properties:
+                      app:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            total: {type: integer}
+                            idle: {type: integer}
+                            waiting: {type: integer}
+                      logs:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            total: {type: integer}
+                            idle: {type: integer}
+                            waiting: {type: integer}
+                  schema:
+                    type: object
+                    description: Applied migration head.
+                    properties:
+                      version: {type: [string, 'null']}
+                      applied: {type: integer}
 
   /api/sessions:
     get:

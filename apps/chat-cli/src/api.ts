@@ -20,6 +20,8 @@ import {
 import { ProjectBriefingService } from './briefing.ts'
 import { EmbeddingClient } from './embeddings.ts'
 import { DshHarness, readProfileToolRows } from './harness.ts'
+import { closeSharedPools, poolSnapshot, sharedPool } from './db.ts'
+import { schemaVersion } from './migrations.ts'
 import {
   ConsoleSink,
   FileSink,
@@ -282,14 +284,17 @@ async function main(): Promise<void> {
   let projects: ProjectService | undefined
   let settings: SettingsService | undefined
   let maxActiveProjects = 0
+  let schemaState: { version: string | null; applied: number } | undefined
   if (databaseUrl !== undefined && databaseUrl !== '') {
     projectStore = new PostgresProjectStore(databaseUrl)
     settingsStore = new PostgresSettingsStore(databaseUrl)
     workspaceStore = new PostgresProjectWorkspace(databaseUrl)
     try {
+      // One runner applies every migration; the stores only read the schema.
       await projectStore.migrate()
       await settingsStore.migrate()
       await workspaceStore.migrate()
+      schemaState = await schemaVersion(sharedPool(databaseUrl))
       const recovered = await workspaceStore.recoverStrandedRuns()
       if (recovered > 0) log.warn({ event: 'stage.run.recovered_stranded', count: recovered })
       settings = new SettingsService(settingsStore)
@@ -703,6 +708,8 @@ async function main(): Promise<void> {
     ...(prerequisites !== undefined ? { prerequisites } : {}),
     ...(agents !== undefined ? { agents } : {}),
     ...(agents !== undefined ? { probeAgent } : {}),
+    poolSnapshot,
+    ...(schemaState !== undefined ? { schemaVersion: schemaState } : {}),
     ...(pdfReview !== undefined ? { pdfReview } : {}),
     ...(workspaceStore !== undefined ? { workspace: workspaceStore } : {}),
     ...(briefing !== undefined ? { briefing } : {}),
@@ -794,6 +801,7 @@ async function main(): Promise<void> {
       await logStore?.close().catch(() => {})
       await loggingSettingsStore?.close().catch(() => {})
       await agents?.close().catch(() => {})
+      await closeSharedPools()
       await prerequisites?.close().catch(() => {})
       await stageSettings?.close().catch(() => {})
       await modelRuntime?.shutdown().catch(() => {})

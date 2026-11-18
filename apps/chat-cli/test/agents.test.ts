@@ -92,7 +92,7 @@ function memoryStore(): AgentStore & { agentsMap: Map<string, AgentRecord>; assi
   const agents = new Map<string, AgentRecord>()
   const assignments = new Map<string, string>()
   let sequence = 0
-  const key = (scope: string, stage: string, process: string) => `${scope}|${stage}|${process}`
+  const key = (projectId: string | null, stage: string, process: string) => `${projectId ?? 'factory'}|${stage}|${process}`
   const store: AgentStore & { agentsMap: Map<string, AgentRecord>; assignmentsMap: Map<string, string> } = {
     agentsMap: agents,
     assignmentsMap: assignments,
@@ -119,11 +119,11 @@ function memoryStore(): AgentStore & { agentsMap: Map<string, AgentRecord>; assi
         .filter(([entry]) => entry.split('|')[1] === stage)
         .map(([entry, agentId]) => {
           const [scope, , process] = entry.split('|')
-          return { scope: scope!, process: process!, agentId }
+          return { projectId: scope === 'factory' ? null : scope!, process: process!, agentId }
         })
     },
-    async setAssignment(input) { assignments.set(key(input.scope, input.stage, input.process), input.agentId) },
-    async clearAssignment(input) { return assignments.delete(key(input.scope, input.stage, input.process)) },
+    async setAssignment(input) { assignments.set(key(input.projectId, input.stage, input.process), input.agentId) },
+    async clearAssignment(input) { return assignments.delete(key(input.projectId, input.stage, input.process)) },
   }
   return store
 }
@@ -439,4 +439,44 @@ test('patching only the tools of an agent with skills cannot orphan them', async
     () => service.update(agent.id, { tools: ['tool-fs'] }),
     (error: unknown) => error instanceof AgentError && error.code === 'AGENT_SKILLS_NEED_SKILL_TOOL',
   )
+})
+
+// ---- AR-09: assignments belong to a project -------------------------
+
+test('assignments cascade with their project and reject an unknown one', { skip: process.env.AIFACTORY_TEST_DATABASE_URL === undefined }, async () => {
+  const { PostgresProjectStore } = await import('../src/projects.ts')
+  const { PostgresAgentStore } = await import('../src/agents.ts')
+  const url = process.env.AIFACTORY_TEST_DATABASE_URL!
+  const projects = new PostgresProjectStore(url)
+  const store = new PostgresAgentStore(url)
+  await store.migrate()
+  const project = await projects.create({
+    name: `Cascade ${Date.now()}`, rootPath: mkdtempSync(join(tmpdir(), 'aifactory-cascade-')),
+    organization: null, ownerEmail: null, status: 'inactive',
+  })
+  try {
+    const agent = await store.create({ name: `cascade-agent-${Date.now()}`, tools: [] })
+    await store.setAssignment({ projectId: project.id, stage: 'planning', process: 'author', agentId: agent.id })
+    assert.equal((await store.assignments('planning')).some((row) => row.projectId === project.id), true)
+
+    // Deleting the project removes its override; the Factory default is untouched.
+    await projects.remove(project.id)
+    assert.equal(
+      (await store.assignments('planning')).some((row) => row.projectId === project.id),
+      false,
+      'the assignment cascaded away with its project',
+    )
+
+    // An unknown project is refused by the foreign key, not silently stored.
+    await assert.rejects(
+      () => store.setAssignment({
+        projectId: '00000000-0000-4000-8000-000000000000',
+        stage: 'planning', process: 'author', agentId: agent.id,
+      }),
+      (error: unknown) => (error as { code?: string }).code === '23503',
+    )
+  } finally {
+    await store.close()
+    await projects.close()
+  }
 })

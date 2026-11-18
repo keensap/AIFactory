@@ -1,4 +1,5 @@
 import { Pool } from 'pg'
+import { logSinkPool } from '../../db.ts'
 import type { LogEvent, LogRecord } from '../event.ts'
 import { LEVEL_VALUE, type Level } from '../levels.ts'
 import type { LogSink } from '../sink.ts'
@@ -76,13 +77,10 @@ export class PostgresSink implements LogSink {
     if (options.minLevel !== undefined) this.minLevel = options.minLevel
     this.retentionDays = options.retentionDays ?? 14
     this.batchRows = Math.max(1, Math.min(options.batchRows ?? 200, 1000))
-    this.ownsPool = options.pool === undefined
-    this.pool = options.pool ?? new Pool({
-      connectionString: options.connectionString,
-      max: 2,
-      connectionTimeoutMillis: 3000,
-      idleTimeoutMillis: 30_000,
-    })
+    this.ownsPool = false
+    // The log sink keeps its own small pool so a slow or blocked log write can
+    // never take a connection away from a request (AR-12).
+    this.pool = options.pool ?? logSinkPool(options.connectionString)
     // An idle-client error (e.g. server restart) must not become an unhandled 'error' event.
     this.pool.on('error', () => {})
   }
@@ -97,6 +95,7 @@ export class PostgresSink implements LogSink {
   }
 
   async close(): Promise<void> {
+    // The pool is shared and closed once at shutdown; nothing per sink.
     if (this.ownsPool) await this.pool.end().catch(() => {})
   }
 

@@ -7,6 +7,7 @@
  */
 
 import { Pool } from 'pg'
+import { sharedPool } from '../db.ts'
 import type { ModelCatalog } from './catalog/store.ts'
 import type { ModelRecord, ProviderRecord } from './catalog/types.ts'
 
@@ -212,8 +213,7 @@ export class PostgresModelSettingsStore implements ModelSettingsStore {
   private readonly pool: Pool
 
   constructor(connectionString: string) {
-    this.pool = new Pool({ connectionString, max: 2 })
-    this.pool.on('error', () => {})
+    this.pool = sharedPool(connectionString)
   }
 
   async load(): Promise<ModelSettings> {
@@ -253,7 +253,7 @@ export class PostgresModelSettingsStore implements ModelSettingsStore {
   }
 
   async close(): Promise<void> {
-    await this.pool.end().catch(() => {})
+    // The pool is shared and closed once at shutdown (db.closeSharedPools).
   }
 }
 

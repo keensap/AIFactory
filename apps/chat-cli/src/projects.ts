@@ -14,6 +14,8 @@ import { randomUUID } from 'node:crypto'
 import { realpath, stat } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
 import { Pool } from 'pg'
+import { sharedPool } from './db.ts'
+import { runMigrations } from './migrations.ts'
 import { DEFAULT_MAX_ACTIVE_PROJECTS, type SettingsReader } from './settings.ts'
 import type { ProjectStage } from './sdlc.ts'
 
@@ -173,29 +175,13 @@ export class PostgresProjectStore implements ProjectStore {
   private readonly pool: Pool
 
   constructor(connectionString: string) {
-    this.pool = new Pool({ connectionString, max: 10 })
+    this.pool = sharedPool(connectionString)
   }
 
   async migrate(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS projects (
-        id UUID PRIMARY KEY,
-        name TEXT NOT NULL,
-        root_path TEXT NOT NULL UNIQUE,
-        organization TEXT,
-        owner_email TEXT,
-        status TEXT NOT NULL DEFAULT 'inactive'
-          CHECK (status IN ('active', 'inactive', 'archived', 'completed', 'on_hold')),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-      ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_status_check;
-      ALTER TABLE projects ADD CONSTRAINT projects_status_check
-        CHECK (status IN ('active', 'inactive', 'archived', 'completed', 'on_hold'));
-      CREATE INDEX IF NOT EXISTS projects_status_idx ON projects (status);
-      CREATE INDEX IF NOT EXISTS projects_organization_idx ON projects (organization);
-    `)
+    await runMigrations(this.pool)
   }
+
 
   async create(input: CreateProjectInput, maxActiveProjects?: number): Promise<Project> {
     const id = randomUUID()
@@ -345,7 +331,7 @@ export class PostgresProjectStore implements ProjectStore {
   }
 
   async close(): Promise<void> {
-    await this.pool.end()
+    // The pool is shared and closed once at shutdown (db.closeSharedPools).
   }
 }
 

@@ -623,6 +623,17 @@ curl -X PUT /api/stages/planning/assignments/author \
 
 **In a run:** each role resolves its agent at start, materialises its skills as `SKILL.md` under `.aifactory/agents/<id>/skills/`, and launches with a patch carrying persona, tool allowlist and model. `role_start` events record `agent`, `agentId` and the effective `model`.
 
+### Health
+
+```json
+{ "ok": true, "version": "0.1.0", "uptimeSeconds": 13,
+  "harness": { "command": "…", "profile": "headless" }, "database": "postgres",
+  "pools": { "app": [ { "total": 2, "idle": 2, "waiting": 0 } ], "logs": [] },
+  "schema": { "version": "0003", "applied": 3 } }
+```
+
+`pools.app` is the single shared application pool and `pools.logs` the separate log-sink pool. `schema` reports the applied migration head, so a stale database is visible without shell access.
+
 ### Stage prerequisites and readiness
 
 Every stage declares what it needs before it can run. A prerequisite is satisfied by a brief, an uploaded document, a project document of a given kind, or an **admin waiver with a reason** — so a project can start at any stage when the evidence exists.
@@ -1745,3 +1756,22 @@ Current limitations, deliberate for this slice:
 The next natural step is the SDK transport (`@deepseek-ai/dsh-sdk-client`), which keeps one runtime alive and can route `approval/request` events to the UI. That would change the transport behind `DshHarness`, not this HTTP surface.
 
 A machine-readable contract is in [openapi.yaml](openapi.yaml).
+
+---
+
+## Migrations
+
+Schema lives in `apps/chat-cli/migrations/NNNN_name.sql` and is applied at startup by `src/migrations.ts`:
+
+- filename order, one transaction each, recorded in `schema_migrations` with a checksum;
+- a `pg_advisory_lock` makes concurrent starts apply each migration once;
+- editing a migration that has already been applied **fails startup** — add a new one instead;
+- `0001_baseline.sql` is idempotent, so it also runs safely on a database that predates the runner.
+
+To add one:
+
+```bash
+printf -- '-- what and why\n\nALTER TABLE ...;\n' > apps/chat-cli/migrations/0004_my_change.sql
+```
+
+Set `AIFACTORY_DB_POOL_MAX` to size the single application pool (default 10). The log sink keeps its own pool of 2.

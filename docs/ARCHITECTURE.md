@@ -1,6 +1,6 @@
 # AI Factory — Architecture
 
-**Status:** current state, 2026-11-17; corrected after the code review the same day; Phase 1 hotfixes applied  
+**Status:** current state, 2026-11-18; corrected after the code review; Phase 1 hotfixes and Phase 2 foundations applied  
 **Scope:** the backend as implemented (`apps/chat-cli`). The UI is a separate workstream; its contracts are described in [`docs/ui/`](ui/).  
 **Related:** [`AI-Factory-Requirements.md`](AI-Factory-Requirements.md) (what to build), [`design/`](design/) (per-area decisions), [`design/ARCHITECTURE-REMEDIATION.md`](design/ARCHITECTURE-REMEDIATION.md) (known defects and the plan to fix them).
 
@@ -27,6 +27,7 @@ This document describes what exists **today**, not the target. Where something i
 | 14 | Documents and PDF | How the artifact is produced |
 | 15 | Observability | Where events, traces and logs go |
 | 16 | Data model | Tables and relationships |
+| 16a | Schema and pools | Migrations, and how many connections this process holds |
 | 17 | Trust boundaries | What is trusted, sandboxed or secret |
 
 ---
@@ -458,6 +459,31 @@ erDiagram
 ```
 
 Reserved but unused today: `stage_role_configs`, `project_role_overrides`. They predate the agent tables; new work should use `agent_definitions`/`agent_assignments`.
+
+---
+
+## 16a. Schema and connection pools
+
+```mermaid
+flowchart LR
+  files[["migrations/NNNN_name.sql"]] --> runner["runMigrations"]
+  runner --> lock["pg_advisory_lock"]
+  lock --> check{"recorded in<br/>schema_migrations?"}
+  check -- "yes, same checksum" --> skip["skip"]
+  check -- "yes, different checksum" --> fail["fail boot:<br/>applied migration was edited"]
+  check -- "no" --> apply["BEGIN, apply, record, COMMIT"]
+  apply --> schema[("database schema")]
+  schema --> stores["every store"]
+  stores --> pool["one shared pool<br/>AIFACTORY_DB_POOL_MAX (10)"]
+  pool --> pg[("PostgreSQL")]
+  sink["log sink"] --> logpool["separate pool (2)"]
+  logpool --> pg
+```
+
+Two rules hold this together:
+
+- **A migration that has shipped is never edited.** The checksum recorded in `schema_migrations` fails boot if it changes; a correction is a new migration. A destructive change is two releases (add and backfill, then drop) so the previous release still runs against the new schema.
+- **A store never opens or closes a pool.** One application pool is shared by every store, and the PostgreSQL log sink has its own small one so a blocked log write cannot take a connection from a request. `GET /api/health` reports `pools` and `schema`, which is how the AR-12 fix is verified in production.
 
 ---
 

@@ -13,6 +13,8 @@
  */
 
 import { Pool } from 'pg'
+import { sharedPool } from './db.ts'
+import { runMigrations } from './migrations.ts'
 import { SDLC_STAGES, type ProjectStage } from './sdlc.ts'
 import { TOOL_ROW_IDS, ToolRequirementError, assertToolRequirements } from './agent-patch.ts'
 
@@ -223,10 +225,10 @@ export interface AgentStore {
   create(input: AgentInput): Promise<AgentRecord>
   update(id: string, input: Partial<AgentInput>): Promise<AgentRecord | undefined>
   remove(id: string): Promise<boolean>
-  /** Factory assignments ('factory') plus the project's overrides. */
-  assignments(stage: ProjectStage): Promise<Array<{ scope: string; process: string; agentId: string }>>
-  setAssignment(input: { scope: string; stage: ProjectStage; process: string; agentId: string }): Promise<void>
-  clearAssignment(input: { scope: string; stage: ProjectStage; process: string }): Promise<boolean>
+  /** Factory assignments (projectId null) plus every project override. */
+  assignments(stage: ProjectStage): Promise<Array<{ projectId: string | null; process: string; agentId: string }>>
+  setAssignment(input: { projectId: string | null; stage: ProjectStage; process: string; agentId: string }): Promise<void>
+  clearAssignment(input: { projectId: string | null; stage: ProjectStage; process: string }): Promise<boolean>
   close?(): Promise<void>
 }
 
@@ -234,36 +236,13 @@ export class PostgresAgentStore implements AgentStore {
   private readonly pool: Pool
 
   constructor(connectionString: string) {
-    this.pool = new Pool({ connectionString, max: 2 })
-    this.pool.on('error', () => {})
+    this.pool = sharedPool(connectionString)
   }
 
   async migrate(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS agent_definitions (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        name TEXT NOT NULL UNIQUE,
-        description TEXT NOT NULL DEFAULT '',
-        enabled BOOLEAN NOT NULL DEFAULT true,
-        persona TEXT NOT NULL DEFAULT '',
-        model TEXT,
-        reasoning_effort TEXT,
-        tools JSONB NOT NULL DEFAULT '[]'::jsonb,
-        skills JSONB NOT NULL DEFAULT '[]'::jsonb,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-      -- scope_key is 'factory' or a project id, so the key works without NULL semantics.
-      CREATE TABLE IF NOT EXISTS agent_assignments (
-        scope_key TEXT NOT NULL,
-        stage TEXT NOT NULL,
-        process TEXT NOT NULL,
-        agent_id UUID NOT NULL REFERENCES agent_definitions(id) ON DELETE CASCADE,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        PRIMARY KEY (scope_key, stage, process)
-      );
-    `)
+    await runMigrations(this.pool)
   }
+
 
   async list(): Promise<AgentRecord[]> {
     const result = await this.pool.query<AgentRow>(`SELECT * FROM agent_definitions ORDER BY name`)
@@ -332,42 +311,53 @@ export class PostgresAgentStore implements AgentStore {
     return (result.rowCount ?? 0) > 0
   }
 
-  async assignments(stage: ProjectStage): Promise<Array<{ scope: string; process: string; agentId: string }>> {
-    const result = await this.pool.query<{ scope: string; process: string; agentId: string }>(
-      `SELECT scope_key AS "scope", process, agent_id::text AS "agentId"
-       FROM agent_assignments WHERE stage = $1 ORDER BY scope_key, process`,
+  async assignments(stage: ProjectStage): Promise<Array<{ projectId: string | null; process: string; agentId: string }>> {
+    const result = await this.pool.query<{ projectId: string | null; process: string; agentId: string }>(
+      `SELECT project_id::text AS "projectId", process, agent_id::text AS "agentId"
+       FROM agent_assignments WHERE stage = $1 ORDER BY project_id NULLS FIRST, process`,
       [stage],
     )
     return result.rows
   }
 
-  async setAssignment(input: { scope: string; stage: ProjectStage; process: string; agentId: string }): Promise<void> {
+  async setAssignment(input: {
+    projectId: string | null
+    stage: ProjectStage
+    process: string
+    agentId: string
+  }): Promise<void> {
+    // Two partial unique indexes (factory / project) mean ON CONFLICT needs the
+    // matching index; do it explicitly so both scopes share one code path.
+    const updated = await this.pool.query(
+      `UPDATE agent_assignments SET agent_id = $3, updated_at = now()
+       WHERE stage = $1 AND process = $2 AND project_id IS NOT DISTINCT FROM $4::uuid`,
+      [input.stage, input.process, input.agentId, input.projectId],
+    )
+    if ((updated.rowCount ?? 0) > 0) return
     await this.pool.query(
-      `INSERT INTO agent_assignments (scope_key, stage, process, agent_id, updated_at)
-       VALUES ($1, $2, $3, $4, now())
-       ON CONFLICT (scope_key, stage, process) DO UPDATE SET agent_id = EXCLUDED.agent_id, updated_at = now()`,
-      [input.scope, input.stage, input.process, input.agentId],
+      `INSERT INTO agent_assignments (project_id, stage, process, agent_id, updated_at)
+       VALUES ($1::uuid, $2, $3, $4, now())`,
+      [input.projectId, input.stage, input.process, input.agentId],
     )
   }
 
-  async clearAssignment(input: { scope: string; stage: ProjectStage; process: string }): Promise<boolean> {
+  async clearAssignment(input: { projectId: string | null; stage: ProjectStage; process: string }): Promise<boolean> {
     const result = await this.pool.query(
-      `DELETE FROM agent_assignments WHERE scope_key = $1 AND stage = $2 AND process = $3`,
-      [input.scope, input.stage, input.process],
+      `DELETE FROM agent_assignments
+       WHERE stage = $1 AND process = $2 AND project_id IS NOT DISTINCT FROM $3::uuid`,
+      [input.stage, input.process, input.projectId],
     )
     return (result.rowCount ?? 0) > 0
   }
 
   async close(): Promise<void> {
-    await this.pool.end().catch(() => {})
+    // The pool is shared and closed once at shutdown (db.closeSharedPools).
   }
 }
 
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
-
-const FACTORY_SCOPE = 'factory'
 
 export interface ResolvedAssignment {
   process: string
@@ -455,8 +445,8 @@ export class AgentService {
     const rows = await this.store.assignments(stage as ProjectStage)
     const agents = new Map((await this.store.list()).map((agent) => [agent.id, agent]))
     return processes.map((process) => {
-      const project = projectId === undefined ? undefined : rows.find((row) => row.scope === projectId && row.process === process)
-      const factory = rows.find((row) => row.scope === FACTORY_SCOPE && row.process === process)
+      const project = projectId === undefined ? undefined : rows.find((row) => row.projectId === projectId && row.process === process)
+      const factory = rows.find((row) => row.projectId === null && row.process === process)
       if (project !== undefined) {
         return { process, agent: agents.get(project.agentId) ?? null, source: 'project' as const }
       }
@@ -474,7 +464,7 @@ export class AgentService {
       throw new AgentError(400, 'AGENT_DISABLED', `agent "${agent.name}" is disabled`)
     }
     await this.store.setAssignment({
-      scope: input.projectId ?? FACTORY_SCOPE,
+      projectId: input.projectId ?? null,
       stage: input.stage as ProjectStage,
       process: input.process,
       agentId: agent.id,
@@ -485,7 +475,7 @@ export class AgentService {
   async clearAssignment(input: { stage: string; process: string; projectId?: string }): Promise<ResolvedAssignment[]> {
     assertProcess(input.stage, input.process)
     await this.store.clearAssignment({
-      scope: input.projectId ?? FACTORY_SCOPE,
+      projectId: input.projectId ?? null,
       stage: input.stage as ProjectStage,
       process: input.process,
     })
@@ -497,8 +487,8 @@ export class AgentService {
     const processes = STAGE_PROCESSES[input.stage as ProjectStage]
     if (processes === undefined || !processes.includes(input.process)) return undefined
     const rows = await this.store.assignments(input.stage as ProjectStage)
-    const chosen = rows.find((row) => row.scope === input.projectId && row.process === input.process)
-      ?? rows.find((row) => row.scope === FACTORY_SCOPE && row.process === input.process)
+    const chosen = rows.find((row) => row.projectId === input.projectId && row.process === input.process)
+      ?? rows.find((row) => row.projectId === null && row.process === input.process)
     if (chosen === undefined) return undefined
     const agent = await this.store.get(chosen.agentId)
     if (agent === undefined || agent.enabled === false) return undefined

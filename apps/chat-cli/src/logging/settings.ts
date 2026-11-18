@@ -6,6 +6,7 @@
  */
 
 import { Pool } from 'pg'
+import { sharedPool } from '../db.ts'
 import { LEVEL_NAMES, isLevel, type Level } from './levels.ts'
 
 export interface LoggingSettings {
@@ -123,8 +124,7 @@ export class PostgresLoggingSettingsStore implements LoggingSettingsStore {
   private readonly pool: Pool
 
   constructor(connectionString: string) {
-    this.pool = new Pool({ connectionString, max: 2 })
-    this.pool.on('error', () => {})
+    this.pool = sharedPool(connectionString)
   }
 
   async load(): Promise<LoggingSettings> {
@@ -150,6 +150,6 @@ export class PostgresLoggingSettingsStore implements LoggingSettingsStore {
   }
 
   async close(): Promise<void> {
-    await this.pool.end().catch(() => {})
+    // The pool is shared and closed once at shutdown (db.closeSharedPools).
   }
 }

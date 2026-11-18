@@ -1,6 +1,6 @@
 # Architecture Review — Shortcomings, Remedies and Execution Plan
 
-**Status:** Phase 0 and Phase 1 complete (2026-11-17); Phases 2–4 pending  
+**Status:** Phases 0–2 complete (2026-11-18), except the route table (AR-14) which is deferred; Phases 3–4 pending  
 **Scope:** the backend as implemented (`apps/chat-cli`), reviewed against the code, not against [`../ARCHITECTURE.md`](../ARCHITECTURE.md)  
 **Method:** every finding cites the code that proves it; every remedy states how it is verified as resolved.
 
@@ -36,14 +36,14 @@ Work is planned in five phases (§5). Phases 0–1 fix the defects that can lose
 | [AR-06](#ar-06) | Model and agents are re-resolved on every resume, not once per run | Medium | 3 | open |
 | [AR-07](#ar-07) | Prerequisites accept rejected documents and failed-run briefs | Medium | 1 | fixed |
 | [AR-08](#ar-08) | The agent probe reports broken compositions as accepted | Medium | 1 | fixed |
-| [AR-09](#ar-09) | Agent assignments outlive their project | Medium | 2 | open |
+| [AR-09](#ar-09) | Agent assignments outlive their project | Medium | 2 |  fixed |
 | [AR-10](#ar-10) | Allowlisting tools can silently disable an agent's skills | Medium | 1 | fixed |
 | [AR-11](#ar-11) | Runs cannot be cancelled | Medium | 3 | open |
-| [AR-12](#ar-12) | Twelve connection pools per process | Medium | 2 | open |
-| [AR-13](#ar-13) | No migration runner; seeds never update existing databases | Medium | 2, 4 | open |
+| [AR-12](#ar-12) | Twelve connection pools per process | Medium | 2 |  fixed |
+| [AR-13](#ar-13) | No migration runner; seeds never update existing databases | Medium | 2, 4 |  fixed |
 | [AR-14](#ar-14) | 2,004-line positional router | Medium | 2 | open |
 | [AR-15](#ar-15) | The runtime only knows the planning stage | Medium | 4 | open |
-| [AR-16](#ar-16) | Dead tables from the superseded role-config design; gates never expire | Low | 2, 3 | open |
+| [AR-16](#ar-16) | Dead tables from the superseded role-config design; gates never expire | Low | 2, 3 |  partly fixed — dead tables dropped; gate reminders still open |
 | [AR-17](#ar-17) | Architecture documentation claimed enforcement that did not exist | Low | 0 | fixed |
 
 ---
@@ -651,7 +651,7 @@ Two bugs were found by the live check that the tests had missed, both now covere
 
 **Not done in Phase 1, deliberately:** persisting the probe result on the agent (`verified_at`) needs the Phase 2 migration runner, so the save response carries it instead.
 
-#### Phase 2 — Platform foundations (6–8 days)
+#### Phase 2 — Platform foundations (6–8 days) — **done except AR-14**
 
 | Item | Work |
 |---|---|
@@ -669,6 +669,23 @@ Two bugs were found by the live check that the tests had missed, both now covere
 - The old dispatcher is deleted, and the auth-inventory and OpenAPI-parity tests pass.
 
 **Risk.** The baseline migration on the real database. Mitigation: dump the database first; the baseline only records its version on an existing database and never alters it; rehearse on a copy of `aifactory`.
+
+#### Phase 2 — done, except the route table (2026-11-18)
+
+| Finding | Now |
+|---|---|
+| AR-12 | One application pool per connection string plus one small log pool (`src/db.ts`). Stores never end a pool; `closeSharedPools()` runs at shutdown. **Live: the API holds 2 connections where it previously allowed up to 46.** `GET /api/health` reports `pools` and `schema`. |
+| AR-13 | `migrations/NNNN_name.sql` applied by `src/migrations.ts`: recorded in `schema_migrations` with a checksum, one transaction each, serialised by an advisory lock, and an edited applied migration fails boot. The eleven store `migrate()` methods now only seed reference data. |
+| AR-09 | `agent_assignments.project_id UUID REFERENCES projects ON DELETE CASCADE`, with two partial unique indexes replacing the `scope_key` key. Unknown project ids now fail the foreign key. |
+| AR-16 | Dead tables dropped, guarded so a non-empty table fails the migration instead of losing data. Gate reminders remain open. |
+
+**How the baseline works.** `0001_baseline.sql` is generated from the live schema and is **fully idempotent**: `CREATE TABLE IF NOT EXISTS`, guarded `ADD CONSTRAINT`, `ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`. It therefore runs harmlessly on a database that predates the runner *and* on an older one that lags behind the baseline. The first design recorded the baseline as applied without running it; that broke on a database missing a later table, so it was replaced.
+
+Rehearsed on a restored copy of the real database and on an empty one, then applied live: 3 projects intact, `schema_migrations` at `0003`, dead tables gone, foreign key present.
+
+**Verification:** 556 tests; both guards; `test/migrations.test.ts` covers checksums, rollback, idempotency and — on a scratch schema with a pending migration — that two concurrent runners apply it exactly once; `test/db-pool.test.ts` asserts at most 12 connections per process; `test/agents.test.ts` asserts the cascade and the foreign-key rejection.
+
+**Deferred: AR-14 (route table).** `server.ts` is still the positional dispatcher, so AR-01's fourth part — authorisation as data rather than a call each handler must remember — is not done. It is a pure refactor of 2,000 lines with no behaviour change, and it carries the most risk for the least user-visible benefit, so it is sequenced on its own rather than bundled with schema work. The auth guard added in Phase 1 (`test/auth.test.ts`) holds the line meanwhile.
 
 #### Phase 3 — Run integrity (6–8 days)
 
@@ -708,7 +725,7 @@ Two bugs were found by the live check that the tests had missed, both now covere
 |---|---|---|---|
 | 0 | 0.5 d | 0.5 d | Docs true — **done** |
 | 1 | 4–5 d | ~5 d | Defects that lose money, work or access control are closed — **done** |
-| 2 | 6–8 d | ~12 d | Schema and routing under control |
+| 2 | 6–8 d | ~12 d | Schema under control — **done**; routing deferred (AR-14) |
 | 3 | 6–8 d | ~19 d | Runs reproducible, cancellable, fail over |
 | 4 | 8–10 d | ~28 d | Second stage is configuration, not a copy |
 

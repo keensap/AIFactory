@@ -79,6 +79,10 @@ export interface ChatApiOptions {
   prerequisites?: StagePrerequisiteService
   /** Named agents and their stage-process assignments. */
   agents?: AgentService
+  /** Live pool statistics for diagnostics (connections in use). */
+  poolSnapshot?: () => unknown
+  /** Applied migration version, so a stale schema is visible. */
+  schemaVersion?: { version: string | null; applied: number }
   /** Boots a harness with an agent's composition; set when a model target exists. */
   probeAgent?: (agent: AgentRecord, options?: { mode?: 'offline' | 'online' }) => Promise<unknown>
   /** PDF requirement review. When omitted, the PDF route returns 503. */
@@ -296,6 +300,9 @@ async function route(
       uptimeSeconds: Math.round(process.uptime()),
       harness: options.harnessInfo ?? null,
       database: options.projects === undefined ? 'disabled' : 'postgres',
+      // One application pool plus one small log pool (AR-12).
+      ...(options.poolSnapshot !== undefined ? { pools: options.poolSnapshot() } : {}),
+      ...(options.schemaVersion !== undefined ? { schema: options.schemaVersion } : {}),
     })
     return
   }

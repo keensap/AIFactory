@@ -6,6 +6,7 @@
  */
 
 import { Pool } from 'pg'
+import { sharedPool } from '../db.ts'
 import { LEVEL_NAMES, LEVEL_VALUE, isLevel, type Level } from './levels.ts'
 import { APP_LOGS_DDL } from './sinks/postgres.ts'
 
@@ -72,8 +73,7 @@ export class PostgresLogStore {
   private ready: Promise<void> | undefined
 
   constructor(connectionString: string) {
-    this.pool = new Pool({ connectionString, max: 3 })
-    this.pool.on('error', () => {})
+    this.pool = sharedPool(connectionString)
   }
 
   async ensureSchema(): Promise<void> {
@@ -179,6 +179,6 @@ export class PostgresLogStore {
   }
 
   async close(): Promise<void> {
-    await this.pool.end().catch(() => {})
+    // The pool is shared and closed once at shutdown (db.closeSharedPools).
   }
 }

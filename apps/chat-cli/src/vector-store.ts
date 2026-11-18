@@ -7,6 +7,8 @@
 
 import { randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
+import { sharedPool } from './db.ts'
+import { runMigrations } from './migrations.ts'
 
 export interface ChunkInput {
   projectId: string
@@ -52,36 +54,13 @@ export class PostgresVectorStore {
       throw new VectorStoreError(500, 'INVALID_EMBEDDING_DIMENSIONS', `invalid embedding dimensions: ${dimensions}`)
     }
     this.dimensions = dimensions
-    this.pool = new Pool({ connectionString, max: 5 })
+    this.pool = sharedPool(connectionString)
   }
 
   async migrate(): Promise<void> {
-    await this.pool.query('CREATE EXTENSION IF NOT EXISTS vector')
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS project_chunks (
-        id UUID PRIMARY KEY,
-        project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-        document_id UUID REFERENCES project_documents(id) ON DELETE CASCADE,
-        stage_run_id UUID REFERENCES project_stage_runs(id) ON DELETE SET NULL,
-        source_type TEXT NOT NULL,
-        source_path TEXT NOT NULL DEFAULT '',
-        chunk_index INTEGER NOT NULL,
-        content TEXT NOT NULL,
-        embedding vector(${this.dimensions}) NOT NULL,
-        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        UNIQUE (project_id, source_type, source_path, chunk_index)
-      )
-    `)
-    await this.pool.query(`
-      CREATE INDEX IF NOT EXISTS project_chunks_project_idx
-        ON project_chunks (project_id, source_type)
-    `)
-    await this.pool.query(`
-      CREATE INDEX IF NOT EXISTS project_chunks_embedding_idx
-        ON project_chunks USING hnsw (embedding vector_cosine_ops)
-    `)
+    await runMigrations(this.pool)
   }
+
 
   async replaceDocumentChunks(input: {
     projectId: string
@@ -170,7 +149,7 @@ export class PostgresVectorStore {
   }
 
   async close(): Promise<void> {
-    await this.pool.end()
+    // The pool is shared and closed once at shutdown (db.closeSharedPools).
   }
 }
 

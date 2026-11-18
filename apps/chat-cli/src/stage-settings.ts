@@ -18,6 +18,8 @@
  */
 
 import { Pool } from 'pg'
+import { sharedPool } from './db.ts'
+import { runMigrations } from './migrations.ts'
 import { SDLC_STAGES, STAGE_LABELS, type ProjectStage } from './sdlc.ts'
 
 export const MIN_REVIEW_CYCLES = 1
@@ -226,66 +228,13 @@ export class PostgresStageSettingsStore implements StageSettingsStore {
   private readonly pool: Pool
 
   constructor(connectionString: string) {
-    this.pool = new Pool({ connectionString, max: 2 })
-    this.pool.on('error', () => {})
+    this.pool = sharedPool(connectionString)
   }
 
   async migrate(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-      CREATE TABLE IF NOT EXISTS project_stage_settings (
-        project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-        stage TEXT NOT NULL,
-        settings JSONB NOT NULL DEFAULT '{}'::jsonb,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        PRIMARY KEY (project_id, stage)
-      );
-    `)
-    // Upgrade a table created before settings became per-stage JSONB: move the
-    // typed columns into `settings` once, then drop them so there is one shape.
-    const upgraded = await this.pool.query<{ present: boolean }>(
-      `SELECT EXISTS (
-         SELECT 1 FROM information_schema.columns
-         WHERE table_schema = current_schema() AND table_name = 'project_stage_settings' AND column_name = 'settings'
-       ) AS present`,
-    )
-    if (upgraded.rows[0]?.present === true) return
-
-    const client = await this.pool.connect()
-    try {
-      await client.query('BEGIN')
-      await client.query(`ALTER TABLE project_stage_settings ADD COLUMN settings JSONB NOT NULL DEFAULT '{}'::jsonb`)
-      await client.query(
-        `UPDATE project_stage_settings
-         SET settings = jsonb_build_object(
-           'gateAfterEachReview', gate_after_each_review,
-           'maxReviewCycles', max_review_cycles,
-           'minRating', min_rating,
-           'maxBlockers', max_blockers,
-           'maxMajor', max_major
-         )
-         WHERE stage = 'planning'`,
-      )
-      await client.query(
-        `ALTER TABLE project_stage_settings
-           DROP COLUMN IF EXISTS gate_after_each_review,
-           DROP COLUMN IF EXISTS max_review_cycles,
-           DROP COLUMN IF EXISTS min_rating,
-           DROP COLUMN IF EXISTS max_blockers,
-           DROP COLUMN IF EXISTS max_major`,
-      )
-      await client.query('COMMIT')
-    } catch (error) {
-      await client.query('ROLLBACK').catch(() => {})
-      throw error
-    } finally {
-      client.release()
-    }
+    await runMigrations(this.pool)
   }
+
 
   async loadFactory(): Promise<Record<string, Record<string, unknown>>> {
     const result = await this.pool.query<{ value: unknown }>(`SELECT value FROM settings WHERE key = 'stage_defaults'`)
@@ -335,7 +284,7 @@ export class PostgresStageSettingsStore implements StageSettingsStore {
   }
 
   async close(): Promise<void> {
-    await this.pool.end().catch(() => {})
+    // The pool is shared and closed once at shutdown (db.closeSharedPools).
   }
 }
 

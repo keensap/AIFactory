@@ -16,6 +16,8 @@
  */
 
 import { Pool } from 'pg'
+import { sharedPool } from './db.ts'
+import { runMigrations } from './migrations.ts'
 import { SDLC_STAGES, STAGE_LABELS, type ProjectStage } from './sdlc.ts'
 
 /** Document kinds the pipeline recognises. Uploads may use any kind; these are the ones prerequisites look for. */
@@ -306,35 +308,12 @@ export class PostgresPrerequisiteStore implements PrerequisiteStore {
   private readonly pool: Pool
 
   constructor(connectionString: string) {
-    this.pool = new Pool({ connectionString, max: 2 })
-    this.pool.on('error', () => {})
+    this.pool = sharedPool(connectionString)
   }
 
   async migrate(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS stage_prerequisites (
-        stage TEXT NOT NULL,
-        key TEXT NOT NULL,
-        label TEXT NOT NULL,
-        description TEXT NOT NULL DEFAULT '',
-        accepts JSONB NOT NULL DEFAULT '[]'::jsonb,
-        required BOOLEAN NOT NULL DEFAULT true,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        PRIMARY KEY (stage, key)
-      );
-
-      -- Evidence that is not an artifact: a human waiver with a reason.
-      CREATE TABLE IF NOT EXISTS project_stage_evidence (
-        project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-        stage TEXT NOT NULL,
-        key TEXT NOT NULL,
-        kind TEXT NOT NULL DEFAULT 'waiver',
-        reason TEXT NOT NULL,
-        created_by TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        PRIMARY KEY (project_id, stage, key)
-      );
-    `)
+    await runMigrations(this.pool)
+    // The catalogue is data, not schema: seeded here so it can be edited later.
     for (const seed of STAGE_PREREQUISITE_SEEDS) {
       await this.pool.query(
         `INSERT INTO stage_prerequisites (stage, key, label, description, accepts, required)
@@ -344,6 +323,7 @@ export class PostgresPrerequisiteStore implements PrerequisiteStore {
       )
     }
   }
+
 
   async catalogue(stage?: ProjectStage): Promise<StagePrerequisite[]> {
     const result = await this.pool.query<CatalogueRow>(
@@ -436,7 +416,7 @@ export class PostgresPrerequisiteStore implements PrerequisiteStore {
   }
 
   async close(): Promise<void> {
-    await this.pool.end().catch(() => {})
+    // The pool is shared and closed once at shutdown (db.closeSharedPools).
   }
 }
 

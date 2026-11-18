@@ -7,6 +7,8 @@
  */
 
 import { Pool } from 'pg'
+import { sharedPool } from './db.ts'
+import { runMigrations } from './migrations.ts'
 
 export const DEFAULT_MAX_ACTIVE_PROJECTS = 3
 export const MIN_MAX_ACTIVE_PROJECTS = 1
@@ -86,21 +88,18 @@ export class PostgresSettingsStore implements SettingsStore {
   private readonly pool: Pool
 
   constructor(connectionString: string) {
-    this.pool = new Pool({ connectionString, max: 5 })
+    this.pool = sharedPool(connectionString)
   }
 
   async migrate(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-      INSERT INTO settings (key, value)
-      VALUES ('max_active_projects', '3'::jsonb)
-      ON CONFLICT (key) DO NOTHING;
-    `)
+    await runMigrations(this.pool)
+    // Reference data that must exist for the API to behave; not schema.
+    await this.pool.query(
+      `INSERT INTO settings (key, value) VALUES ('max_active_projects', '3'::jsonb)
+       ON CONFLICT (key) DO NOTHING`,
+    )
   }
+
 
   async get(): Promise<ChatSettings> {
     const result = await this.pool.query<{ value: unknown; updatedAt: Date | string }>(
@@ -152,7 +151,7 @@ export class PostgresSettingsStore implements SettingsStore {
   }
 
   async close(): Promise<void> {
-    await this.pool.end()
+    // The pool is shared and closed once at shutdown (db.closeSharedPools).
   }
 }
 

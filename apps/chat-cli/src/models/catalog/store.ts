@@ -6,6 +6,8 @@
  */
 
 import { Pool } from 'pg'
+import { sharedPool } from '../../db.ts'
+import { runMigrations } from '../../migrations.ts'
 import type { ModelCapabilities } from '../ports.ts'
 import { defaultCapabilities } from '../ports.ts'
 import {
@@ -17,41 +19,6 @@ import {
   type ProviderRecord,
 } from './types.ts'
 
-const MIGRATION = `
-  CREATE TABLE IF NOT EXISTS model_providers (
-    id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    display_name TEXT NOT NULL,
-    base_url TEXT,
-    api_key_env TEXT,
-    headers JSONB NOT NULL DEFAULT '{}'::jsonb,
-    defaults JSONB NOT NULL DEFAULT '{}'::jsonb,
-    enabled BOOLEAN NOT NULL DEFAULT true,
-    local BOOLEAN NOT NULL DEFAULT false,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-  );
-
-  CREATE TABLE IF NOT EXISTS model_catalog (
-    provider TEXT NOT NULL REFERENCES model_providers(id) ON DELETE CASCADE,
-    model TEXT NOT NULL,
-    display_name TEXT,
-    context_window INTEGER,
-    max_output INTEGER,
-    capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
-    price JSONB NOT NULL DEFAULT '{}'::jsonb,
-    discovered_at TIMESTAMPTZ,
-    PRIMARY KEY (provider, model)
-  );
-
-  CREATE INDEX IF NOT EXISTS model_catalog_provider_idx ON model_catalog (provider);
-
-  CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value JSONB NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-  );
-`
 
 export interface ModelCatalog {
   listProviders(): Promise<ProviderRecord[]>
@@ -67,12 +34,16 @@ export class PostgresModelCatalog implements ModelCatalog {
   private readonly pool: Pool
 
   constructor(connectionString: string) {
-    this.pool = new Pool({ connectionString, max: 3 })
-    this.pool.on('error', () => {})
+    this.pool = sharedPool(connectionString)
   }
 
   async migrate(): Promise<void> {
-    await this.pool.query(MIGRATION)
+    await runMigrations(this.pool)
+    await this.seedProviders()
+  }
+
+  /** Built-in providers. Reference data, not schema; an operator edit is kept. */
+  private async seedProviders(): Promise<void> {
     for (const provider of SEED_PROVIDERS) {
       await this.pool.query(
         `INSERT INTO model_providers (id, kind, display_name, base_url, api_key_env, headers, defaults, enabled, local)
@@ -91,6 +62,7 @@ export class PostgresModelCatalog implements ModelCatalog {
       )
     }
   }
+
 
   async listProviders(): Promise<ProviderRecord[]> {
     const result = await this.pool.query<ProviderRow>(
@@ -181,7 +153,7 @@ export class PostgresModelCatalog implements ModelCatalog {
   }
 
   async close(): Promise<void> {
-    await this.pool.end().catch(() => {})
+    // The pool is shared and closed once at shutdown (db.closeSharedPools).
   }
 }
 
