@@ -1,6 +1,6 @@
 # Architecture Review — Shortcomings, Remedies and Execution Plan
 
-**Status:** Phases 0–3 complete (2026-11-18); Phase 4 pending  
+**Status:** All four phases complete (2026-11-18)  
 **Scope:** the backend as implemented (`apps/chat-cli`), reviewed against the code, not against [`../ARCHITECTURE.md`](../ARCHITECTURE.md)  
 **Method:** every finding cites the code that proves it; every remedy states how it is verified as resolved.
 
@@ -42,7 +42,7 @@ Work is planned in five phases (§5). Phases 0–1 fix the defects that can lose
 | [AR-12](#ar-12) | Twelve connection pools per process | Medium | 2 |  fixed |
 | [AR-13](#ar-13) | No migration runner; seeds never update existing databases | Medium | 2, 4 |  fixed |
 | [AR-14](#ar-14) | Positional router | Medium | 2 | fixed — route table, auth as data, both guards |
-| [AR-15](#ar-15) | The runtime only knows the planning stage | Medium | 4 | open |
+| [AR-15](#ar-15) | The runtime only knows the planning stage | Medium | 4 |  fixed |
 | [AR-16](#ar-16) | Dead tables from the superseded role-config design; gates never expire | Low | 2, 3 |  fixed |
 | [AR-17](#ar-17) | Architecture documentation claimed enforcement that did not exist | Low | 0 | fixed |
 
@@ -765,7 +765,34 @@ Rehearsed on a restored copy of the real database and on an empty one, then appl
 
 **Verification:** 572 tests. New: `test/stage-failover.test.ts` (classification, fallback, non-retryable refusal, open-breaker skip, attribution) and `test/stage-bindings.test.ts` (freezing, mid-run immunity, rebind, cancel, one-shot staleness). Live: migration applied, cancel keeps its reason, a run with an assigned agent records the binding, rebind returns both sides.
 
-#### Phase 4 — Stage engine (8–10 days)
+#### Phase 4 — Stage engine (8–10 days) — **done**
+
+**AR-15 — the engine names no stage.** `PlanningStageRuntime` became `StageEngine`, which takes a `StageDefinition`:
+
+| Definition owns | Engine owns |
+|---|---|
+| stage key, processes | lease, heartbeat, cancellation |
+| prompt builders | analyze → author → review → gate loop |
+| artifact kind, title, file stem | acceptance rule and revision cycles |
+| checklist keys it evidences | completion, export, summary |
+| review parser, decision contract | bindings, failover, events, spans |
+
+The definition's `humanDecision` distinguishes planning (go / conditional-go / no-go) from a plain approval, so a stage that has no feasibility question does not invent one. `PlanningStageRuntime` survives as a subclass, and every existing test passes unchanged — the port was behaviour-preserving, not a rewrite.
+
+**A second stage proves it.** `requirements` runs on the same engine: its own prompts (numbered `FR-`/`NFR-` requirements, acceptance criteria, traceability), its own artifact (`requirements_spec`), its own checklist keys, its own settings and processes. `test/stage-requirements.test.ts` drives it to completion and asserts the document, the checklist evidence and that the planning prompts did not leak in. `design` and the rest answer `501 STAGE_NOT_IMPLEMENTED` rather than pretending.
+
+**AR-13 — the catalogue is editable.** `PUT/DELETE /api/stages/:stage/prerequisites/:key`. Validation is strict because a mistyped source would silently never match: at least one accepted source, a known kind, a `min` of at least one, at least one document kind. Deleting is refused while a project still waives the entry (`409 PREREQUISITE_IN_USE`), because a waiver pointing at nothing is worse than an explicit unwaive.
+
+**Three real defects the work exposed:**
+
+- an **import cycle** — `agents.ts` derived `STAGE_PROCESSES` from the registry, which imports the engine, which imports `agents.ts`. It was silent until one load order threw `Cannot access before initialization`. The map is now declared, with a test asserting it matches the registry.
+- the **completion transaction** in `workspace.ts` hard-coded planning's three checklist keys, so a requirements run would have evidenced planning's items. The keys now come from the definition.
+- **settings resolution** only accepted a `planning` function, so a second stage could not have its own settings.
+
+Also worth recording: mid-refactor I moved blocks out of `stage-runtime.ts` with a naive brace matcher that cut at the first `}` of nested objects, leaving a corrupt file. It was rebuilt from `HEAD` and the changes re-applied deterministically rather than patched up — a reminder that structural moves need a parser, not a regex.
+
+**Verification:** 579 tests. Live: both stages have settings, a requirements run is created and routed, `design` returns 501, the catalogue accepts a custom prerequisite and rejects an empty `accepts` and an unknown source kind, and a cancelled requirements run shows the full AR-11 path in the log — request recorded, harness aborted, run ended `cancelled`.
+
 
 | Item | Work |
 |---|---|

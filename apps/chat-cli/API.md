@@ -623,6 +623,33 @@ curl -X PUT /api/stages/planning/assignments/author \
 
 **In a run:** each role resolves its agent at start, materialises its skills as `SKILL.md` under `.aifactory/agents/<id>/skills/`, and launches with a patch carrying persona, tool allowlist and model. `role_start` events record `agent`, `agentId` and the effective `model`.
 
+### Stages
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/sdlc/stages` | The eight SDLC stages |
+| `GET` | `/api/settings/stages/:stage` | Settings and defaults for a stage |
+| `PATCH` | `/api/settings/stages/:stage` | Update Factory defaults (admin) |
+| `GET` | `/api/stages` | The prerequisite catalogue |
+| `PUT` | `/api/stages/:stage/prerequisites/:key` | Add or edit a prerequisite (admin) |
+| `DELETE` | `/api/stages/:stage/prerequisites/:key` | Remove one (admin) |
+| `GET` | `/api/projects/:id/stages/:stage/readiness` | What this project has, and what is missing |
+
+Two stages run today: **planning** (the TELOS feasibility report) and **requirements** (a requirements specification). Each is configuration; the engine is the same. Any other stage answers `501 STAGE_NOT_IMPLEMENTED` — at settings, at readiness, and at run creation — rather than silently doing nothing.
+
+**Editing the catalogue.** The seed is the default, not the law. A prerequisite needs at least one accepted source, or it can never be satisfied:
+
+```bash
+curl -X PUT /api/stages/requirements/prerequisites/signoff \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"Stakeholder sign-off",
+       "description":"Written approval from the business owner.",
+       "accepts":[{"kind":"document","documentKinds":["stakeholder_signoff"]}],
+       "required":true}'
+```
+
+`accepts` takes three source kinds — `brief` (the text on a run), `attachment` (with `min`), and `document` (with `documentKinds`). Validation rejects an unknown kind, an empty `accepts`, and a `min` below one; deleting is refused while a project still waives the entry (`409 PREREQUISITE_IN_USE`), because a waiver pointing at nothing is worse than an unwaive first.
+
 ### Run control
 
 | Method | Path | Purpose |

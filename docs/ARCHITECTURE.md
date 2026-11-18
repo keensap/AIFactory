@@ -1,6 +1,6 @@
 # AI Factory — Architecture
 
-**Status:** current state, 2026-11-18; corrected after the code review; Phases 1–3 applied (hotfixes, foundations, run integrity)  
+**Status:** current state, 2026-11-18; corrected after the code review; all four remediation phases applied — hotfixes, foundations, run integrity and the stage engine  
 **Scope:** the backend as implemented (`apps/chat-cli`). The UI is a separate workstream; its contracts are described in [`docs/ui/`](ui/).  
 **Related:** [`AI-Factory-Requirements.md`](AI-Factory-Requirements.md) (what to build), [`design/`](design/) (per-area decisions), [`design/ARCHITECTURE-REMEDIATION.md`](design/ARCHITECTURE-REMEDIATION.md) (known defects and the plan to fix them).
 
@@ -135,6 +135,38 @@ Two guards keep the table honest: an **auth inventory** asserts every route decl
 Errors are typed at the boundary (`HttpError` with `status` + `code`) and rendered as `{ error: { message, code, status } }`. Domain errors (`StageRuntimeError`, `StageSettingsError`, `PrerequisiteError`, `AgentError`, `ModelSettingsError`) map to those codes in `toHttpError` rather than leaking messages.
 
 ---
+
+## 4a. The stage engine
+
+The engine is stage-independent: everything that differs between stages is a definition.
+
+```mermaid
+flowchart TB
+  subgraph defs["Stage definitions (src/stages)"]
+    planning["planning<br/>TELOS feasibility report"]
+    requirements["requirements<br/>requirements specification"]
+    future["… adds a definition,<br/>not a copy"]
+  end
+  registry["stages/index.ts<br/>the registry"]
+  engine["StageEngine<br/>lease, loop, acceptance, completion"]
+  settings["stage-settings.ts<br/>per-stage defaults and validation"]
+  agents["agents.ts<br/>STAGE_PROCESSES"]
+  defs --> registry --> engine
+  registry --> settings
+  registry --> agents
+  engine --> ws["ProjectWorkspace"]
+  engine --> harness["harness (per role)"]
+```
+
+| The definition owns | The engine owns |
+|---|---|
+| stage key and processes | lease, heartbeat, cancellation |
+| prompt builders per role | analyze → author → review → gate loop |
+| artifact kind, title, file stem | acceptance rule and revision cycles |
+| checklist keys the artifact evidences | completion, export and summary |
+| review parser, decision contract | bindings, failover, events and spans |
+
+`humanDecision` separates a stage that records a go/no-go decision (planning) from one that is simply approved (requirements). Each engine drives exactly one stage: asking it for another is `501 STAGE_NOT_IMPLEMENTED`, not an empty list, and a stage with no definition answers the same way at the route.
 
 ## 5. Stage run lifecycle
 

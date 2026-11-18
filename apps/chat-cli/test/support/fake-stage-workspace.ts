@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { STAGE_CHECKLISTS } from '../../src/sdlc.ts'
 import type { ProjectAttachment } from '../../src/attachments.ts'
 import type {
   PostgresProjectWorkspace,
@@ -21,16 +22,27 @@ export function fakeWorkspace(): PostgresProjectWorkspace {
   const documentExports = new Map<string, { path: string; bytes: number }>()
   const events: StageRunEvent[] = []
 
+  // Persistent checklist state: the snapshot is a view, and a test that asserts
+  // evidence needs the update to stick. Every stage's checklist comes from the
+  // real definitions, so a second stage is exercised with its own items.
+  const checklist: ProjectWorkspaceSnapshot['checklist'] = Object.entries(STAGE_CHECKLISTS).flatMap(
+    ([stage, items]) => items.map((item, index) => ({
+      id: `${stage}-${index}`,
+      stage: stage as ProjectWorkspaceSnapshot['currentStage'],
+      key: item.key,
+      label: item.label,
+      required: item.required,
+      status: 'open' as const,
+      evidenceDocumentId: null,
+      completedAt: null,
+    })),
+  )
+
   const snapshot = (): ProjectWorkspaceSnapshot => ({
     currentStage: 'planning',
     stages: [{ stage: 'planning', status: 'in_progress', startedAt: null, completedAt: null, notes: null }],
     documents: [...documents],
-    checklist: [
-      { id: 'c1', stage: 'planning', key: 'business_idea', label: 'Business idea', required: true, status: 'open', evidenceDocumentId: null, completedAt: null },
-      { id: 'c2', stage: 'planning', key: 'stakeholder_goals', label: 'Stakeholder goals', required: true, status: 'open', evidenceDocumentId: null, completedAt: null },
-      { id: 'c3', stage: 'planning', key: 'telos_report', label: 'TELOS report', required: true, status: 'open', evidenceDocumentId: null, completedAt: null },
-      { id: 'c4', stage: 'planning', key: 'feasibility_decision', label: 'Decision', required: true, status: 'open', evidenceDocumentId: null, completedAt: null },
-    ],
+    checklist,
     nextActions: [],
     progress: { completedStages: 0, totalStages: 8, completedRequiredItems: 0, totalRequiredItems: 4 },
   })
@@ -118,6 +130,9 @@ export function fakeWorkspace(): PostgresProjectWorkspace {
     async isCancelRequested(runId: string) {
       return runs.get(runId)?.cancelRequestedAt !== null && runs.get(runId)?.cancelRequestedAt !== undefined
     },
+    async listStageRuns(projectId: string, stage: string) {
+      return [...runs.values()].filter((run) => run.projectId === projectId && run.stage === stage)
+    },
     async listAwaitingStageRuns() {
       return [...runs.values()].filter((run) => run.status === 'awaiting_human')
     },
@@ -136,19 +151,34 @@ export function fakeWorkspace(): PostgresProjectWorkspace {
       return review
     },
     async addDocument(input: {
+      stage?: ProjectDocument['stage']
       kind: string
       title: string
       stageRunId?: string | null
-      completeRun?: { summaryMarkdown: string }
+      completeRun?: { summaryMarkdown: string; checklistKeys: string[] }
     }) {
+      // Record the stage it is given: a fake that hard-codes planning cannot test
+      // a second stage.
+      const stage = input.stage ?? 'planning'
       const doc: ProjectDocument & { stageRunId?: string | null } = {
-        id: randomUUID(), projectId: 'p', stage: 'planning', kind: input.kind, title: input.title,
-        storagePath: '.aifactory/documents/planning/telos.md', mimeType: 'text/markdown',
+        id: randomUUID(), projectId: 'p', stage, kind: input.kind, title: input.title,
+        storagePath: `.aifactory/documents/${stage}/document.md`, mimeType: 'text/markdown',
         sizeBytes: 10, sha256: 'abc', status: 'uploaded', version: 1,
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         stageRunId: input.stageRunId ?? null,
       }
       documents.push(doc)
+      // Mirror the real transaction: the document is approved and the stage's own
+      // checklist items are evidenced.
+      if (input.completeRun !== undefined) {
+        for (const key of input.completeRun.checklistKeys) {
+          const item = checklist.find((entry) => entry.stage === stage && entry.key === key)
+          if (item !== undefined) {
+            item.status = 'done'
+            item.evidenceDocumentId = doc.id
+          }
+        }
+      }
       // Mirror the real transaction: the document is approved and the run completes.
       if (input.completeRun !== undefined && input.stageRunId !== undefined && input.stageRunId !== null) {
         doc.status = 'approved'
@@ -232,9 +262,19 @@ export function fakeWorkspace(): PostgresProjectWorkspace {
         .sort((a, b) => Number(a.id) - Number(b.id))
         .slice(0, Math.min(Math.max(limit, 1), 1000))
     },
-    async updateChecklistItem(_projectId: string, _stage: string, key: string, status: unknown, evidence?: string | null) {
+    async updateChecklistItem(projectId: string, stage: string, key: string, status: unknown, evidence?: string | null) {
       checklistUpdates.push({ key, status, evidence })
-      return snapshot().checklist[0]!
+      // Record it on the snapshot too, so a test can assert the evidence that a
+      // stage's document actually produced.
+      void projectId
+      const item = checklist.find((entry) => entry.stage === stage && entry.key === key)
+      if (item !== undefined) {
+        item.status = status as never
+        item.evidenceDocumentId = evidence ?? null
+        item.completedAt = new Date().toISOString()
+        return item
+      }
+      return checklist[0]!
     },
     checklistUpdates,
     events,

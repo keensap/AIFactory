@@ -15,13 +15,48 @@ import type { PostgresProjectWorkspace, StageRunEvent } from '../workspace.ts'
 import { requireWorkspace } from './shared.ts'
 import { requiredParam, route, type RouteDef, type RouteContext } from './router.ts'
 
-function requireRuntime(options: ChatApiOptions) {
+/**
+ * The engine for a stage, or for the stage a run belongs to.
+ *
+ * `options.stageEngines` serves every executable stage; `options.stageRuntime`
+ * alone keeps working for callers that only drive planning.
+ */
+function engineForStage(options: ChatApiOptions, stage: string) {
+  const engines = options.stageEngines
+  if (engines !== undefined) {
+    const engine = engines.for(stage)
+    if (engine !== undefined) return engine
+    throw new HttpError(
+      501,
+      `the ${stage} stage has no runtime yet`,
+      'STAGE_NOT_IMPLEMENTED',
+    )
+  }
+  const runtime = options.stageRuntime
+  if (runtime === undefined) {
+    throw new HttpError(503, 'stage runtime is disabled', 'STAGE_RUNTIME_DISABLED')
+  }
+  if (stage !== runtime.stage) {
+    throw new HttpError(501, `the ${stage} stage has no runtime yet`, 'STAGE_NOT_IMPLEMENTED')
+  }
+  return runtime
+}
+
+async function engineForRun(options: ChatApiOptions, runId: string) {
+  const engines = options.stageEngines
+  if (engines !== undefined) {
+    const engine = await engines.forRun(runId)
+    if (engine !== undefined) return engine
+    throw new HttpError(404, 'stage run not found', 'STAGE_RUN_NOT_FOUND')
+  }
   const runtime = options.stageRuntime
   if (runtime === undefined) {
     throw new HttpError(503, 'stage runtime is disabled', 'STAGE_RUNTIME_DISABLED')
   }
   return runtime
 }
+
+
 
 function requireWorkspaceOr503(options: ChatApiOptions): PostgresProjectWorkspace {
   if (options.workspace === undefined) {
@@ -166,7 +201,7 @@ export const stageRunRoutes: RouteDef[] = [
   }, 'listStageRuns'),
 
   route('POST', '/api/projects/:id/stages/:stage/runs', 'operator', async ({ request, params, response, options }) => {
-    const runtime = requireRuntime(options)
+    const runtime = engineForStage(options, requiredParam(params, 'stage'))
     const body = await readJson(request)
     const record = body !== null && typeof body === 'object' ? body as Record<string, unknown> : {}
     const attachmentIds = record.attachmentIds
@@ -189,7 +224,10 @@ export const stageRunRoutes: RouteDef[] = [
   // ---- reading a run --------------------------------------------------
   // A collection route: `/api/stage-runs?awaiting=1[&staleOnly=1]`.
   route('GET', '/api/stage-runs', 'operator', async ({ url, response, options }) => {
-    const runtime = requireRuntime(options)
+    const runtime = options.stageRuntime
+    if (runtime === undefined) {
+      throw new HttpError(503, 'stage runtime is disabled', 'STAGE_RUNTIME_DISABLED')
+    }
     if (url.searchParams.get('awaiting') !== '1' && url.searchParams.get('awaiting') !== 'true') {
       throw new HttpError(
         400,
@@ -202,21 +240,23 @@ export const stageRunRoutes: RouteDef[] = [
   }, 'listAwaitingStageRuns'),
 
   route('GET', '/api/stage-runs/:runId', 'operator', async ({ params, response, options }) => {
-    sendJson(response, 200, { run: await requireRuntime(options).get(requiredParam(params, 'runId')) })
+    const runId = requiredParam(params, 'runId')
+    sendJson(response, 200, { run: await (await engineForRun(options, runId)).get(runId) })
   }, 'getStageRun'),
 
   route('GET', '/api/stage-runs/:runId/reviews', 'operator', async ({ params, response, options }) => {
     // The runtime gate comes first, as it did when all stage-run routes were one
     // handler: a deployment without a runtime answers 503 for every one of them.
-    requireRuntime(options)
+    const runId = requiredParam(params, 'runId')
+    await engineForRun(options, runId)
     const workspace = requireWorkspaceOr503(options)
-    sendJson(response, 200, { reviews: await workspace.listStageReviews(requiredParam(params, 'runId')) })
+    sendJson(response, 200, { reviews: await workspace.listStageReviews(runId) })
   }, 'listStageRunReviews'),
 
   route('GET', '/api/stage-runs/:runId/events', 'operator', async ({ params, url, response, options }) => {
-    requireRuntime(options)
-    const workspace = requireWorkspaceOr503(options)
     const runId = requiredParam(params, 'runId')
+    await engineForRun(options, runId)
+    const workspace = requireWorkspaceOr503(options)
     await assertRunExists(workspace, runId)
     const after = url.searchParams.get('after') ?? '0'
     const limit = Number.parseInt(url.searchParams.get('limit') ?? '200', 10) || 200
@@ -225,9 +265,9 @@ export const stageRunRoutes: RouteDef[] = [
   }, 'listStageRunEvents'),
 
   route('GET', '/api/stage-runs/:runId/telemetry', 'operator', async ({ params, response, options }) => {
-    requireRuntime(options)
-    const workspace = requireWorkspaceOr503(options)
     const runId = requiredParam(params, 'runId')
+    await engineForRun(options, runId)
+    const workspace = requireWorkspaceOr503(options)
     await assertRunExists(workspace, runId)
     sendJson(response, 200, { telemetry: telemetryFromEvents(await readRunEvents(workspace, runId)) })
   }, 'stageRunTelemetry'),
@@ -235,19 +275,21 @@ export const stageRunRoutes: RouteDef[] = [
   // Registered after `/events` because it is longer; the matcher compares segment
   // counts, so order only matters within one length.
   route('GET', '/api/stage-runs/:runId/events/stream', 'operator', async ({ request, params, response, url, options }) => {
-    requireRuntime(options)
+    const runId = requiredParam(params, 'runId')
+    await engineForRun(options, runId)
     const workspace = requireWorkspaceOr503(options)
-    await streamStageEvents(request, response, url, requiredParam(params, 'runId'), workspace)
+    await streamStageEvents(request, response, url, runId, workspace)
   }, 'streamStageRunEvents'),
 
   // ---- acting on a run ------------------------------------------------
   route('POST', '/api/stage-runs/:runId/export', 'operator', async ({ params, response, options }) => {
-    sendJson(response, 200, { export: await requireRuntime(options).exportRun(requiredParam(params, 'runId')) })
+    const runId = requiredParam(params, 'runId')
+    sendJson(response, 200, { export: await (await engineForRun(options, runId)).exportRun(runId) })
   }, 'exportStageRun'),
 
   route('POST', '/api/stage-runs/:runId/execute', 'operator', async ({ params, url, response, options }) => {
-    const runtime = requireRuntime(options)
     const runId = requiredParam(params, 'runId')
+    const runtime = await engineForRun(options, runId)
     if (url.searchParams.get('wait') === '1') {
       sendJson(response, 200, { run: await runtime.execute(runId) })
       return
@@ -259,7 +301,8 @@ export const stageRunRoutes: RouteDef[] = [
   }, 'executeStageRun'),
 
   route('POST', '/api/stage-runs/:runId/gate', 'operator', async ({ request, params, response, options }) => {
-    const runtime = requireRuntime(options)
+    const runId = requiredParam(params, 'runId')
+    const runtime = await engineForRun(options, runId)
     const body = await readJson(request)
     const record = body !== null && typeof body === 'object' ? body as Record<string, unknown> : {}
     if (record.action !== 'apply' && record.action !== 'accept') {
@@ -269,7 +312,8 @@ export const stageRunRoutes: RouteDef[] = [
   }, 'answerStageGate'),
 
   route('POST', '/api/stage-runs/:runId/cancel', 'operator', async ({ request, params, response, options }) => {
-    const runtime = requireRuntime(options)
+    const runId = requiredParam(params, 'runId')
+    const runtime = await engineForRun(options, runId)
     // The body is optional: cancelling is the request.
     const body = await readJson(request).catch(() => ({}))
     const record = body !== null && typeof body === 'object' ? body as Record<string, unknown> : {}
@@ -283,17 +327,19 @@ export const stageRunRoutes: RouteDef[] = [
 
   route('POST', '/api/stage-runs/:runId/rebind', 'admin', async ({ params, response, options }) => {
     // The only way a paused run adopts the current model and agents (AR-06).
-    sendJson(response, 200, await requireRuntime(options).rebind(requiredParam(params, 'runId')))
+    const runId = requiredParam(params, 'runId')
+    sendJson(response, 200, await (await engineForRun(options, runId)).rebind(runId))
   }, 'rebindStageRun'),
 
   route('POST', '/api/stage-runs/:runId/retry', 'admin', async ({ params, response, options }) => {
     // Explicit retry of a failed run: it resumes from stored analysis and draft (AR-04).
-    sendJson(response, 200, { run: await requireRuntime(options).retry(requiredParam(params, 'runId')) })
+    const runId = requiredParam(params, 'runId')
+    sendJson(response, 200, { run: await (await engineForRun(options, runId)).retry(runId) })
   }, 'retryStageRun'),
 
   route('POST', '/api/stage-runs/:runId/decision', 'operator', async ({ request, params, response, options }) => {
-    const runtime = requireRuntime(options)
     const runId = requiredParam(params, 'runId')
+    const runtime = await engineForRun(options, runId)
     const body = await readJson(request)
     const record = body !== null && typeof body === 'object' ? body as Record<string, unknown> : {}
     if (record.refine === true) {

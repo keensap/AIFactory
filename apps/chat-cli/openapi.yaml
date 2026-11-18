@@ -2188,6 +2188,85 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/stages/{stage}/prerequisites/{key}:
+    parameters:
+      - {name: stage, in: path, required: true, schema: {$ref: '#/components/schemas/ProjectStage'}}
+      - {name: key, in: path, required: true, schema: {type: string}}
+    put:
+      tags: [stages]
+      summary: Add or edit a prerequisite (admin)
+      description: The seed is a default, not the law. A prerequisite with no accepted source can never be satisfied, so it is rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label, accepts]
+              properties:
+                label: {type: string}
+                description: {type: string}
+                required: {type: boolean, default: true}
+                accepts:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [kind]
+                    properties:
+                      kind: {type: string, enum: [brief, attachment, document]}
+                      label: {type: string}
+                      min: {type: integer, minimum: 1}
+                      documentKinds: {type: array, items: {type: string}}
+      responses:
+        '200':
+          description: The stored entry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  prerequisite:
+                    type: object
+                    properties:
+                      stage: {type: string}
+                      key: {type: string}
+                      label: {type: string}
+                      description: {type: string}
+                      accepts: {type: array, items: {type: object}}
+                      required: {type: boolean}
+                      stageLabel: {type: string}
+        '400':
+          description: INVALID_PREREQUISITE, INVALID_ACCEPTS or INVALID_STAGE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: ADMIN_FORBIDDEN
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [stages]
+      summary: Remove a prerequisite (admin)
+      description: Refuses while a project still waives it (409 PREREQUISITE_IN_USE).
+      responses:
+        '204': {description: Removed}
+        '404':
+          description: PREREQUISITE_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: PREREQUISITE_IN_USE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/projects/{id}/stages/{stage}/readiness:
     get:
       tags: [stage-runs]

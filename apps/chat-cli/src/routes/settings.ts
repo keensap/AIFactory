@@ -165,6 +165,25 @@ export const settingsRoutes: RouteDef[] = [
     sendJson(response, 200, { stages: await requirePrerequisites(options).catalogue() })
   }, 'listStageCatalogue'),
 
+  // Editing the catalogue itself, not the evidence (AR-13).
+  route('PUT', '/api/stages/:stage/prerequisites/:key', 'admin', async ({ request, params, response, options }) => {
+    sendJson(response, 200, {
+      prerequisite: await requirePrerequisites(options).saveCatalogueEntry(
+        requiredParam(params, 'stage'),
+        requiredParam(params, 'key'),
+        await readJson(request),
+      ),
+    })
+  }, 'savePrerequisite'),
+
+  route('DELETE', '/api/stages/:stage/prerequisites/:key', 'admin', async ({ params, response, options }) => {
+    await requirePrerequisites(options).removeCatalogueEntry(
+      requiredParam(params, 'stage'),
+      requiredParam(params, 'key'),
+    )
+    response.writeHead(204).end()
+  }, 'removePrerequisite'),
+
   route('GET', '/api/projects/:id/stages/:stage/readiness', 'operator', async ({ params, response, options }) => {
     const id = requiredParam(params, 'id')
     await requireProjects(options).get(id)

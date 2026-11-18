@@ -289,6 +289,9 @@ export function assertStage(value: string): asserts value is ProjectStage {
 export interface PrerequisiteStore {
   migrate?(): Promise<void>
   catalogue(stage?: ProjectStage): Promise<StagePrerequisite[]>
+  /** Add or edit a catalogue entry, so the seed is a default rather than the law. */
+  savePrerequisite?(input: StagePrerequisite): Promise<StagePrerequisite>
+  removePrerequisite?(stage: ProjectStage, key: string): Promise<void>
   evidence(projectId: string, stage: ProjectStage): Promise<PrerequisiteEvidence>
   addWaiver(input: { projectId: string; stage: ProjectStage; key: string; reason: string }): Promise<void>
   removeWaiver(projectId: string, stage: ProjectStage, key: string): Promise<boolean>
@@ -324,6 +327,69 @@ export class PostgresPrerequisiteStore implements PrerequisiteStore {
     }
   }
 
+
+  /**
+   * Add or edit a catalogue entry (AR-13).
+   *
+   * The seed is the default, not the law: an operator can tighten what a stage
+   * requires, or add a prerequisite their process needs, without a deploy.
+   */
+  async savePrerequisite(input: {
+    stage: ProjectStage
+    key: string
+    label: string
+    description: string
+    accepts: EvidenceSource[]
+    required: boolean
+  }): Promise<StagePrerequisite> {
+    await this.pool.query(
+      `INSERT INTO stage_prerequisites (stage, key, label, description, accepts, required)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+       ON CONFLICT (stage, key) DO UPDATE
+         SET label = EXCLUDED.label,
+             description = EXCLUDED.description,
+             accepts = EXCLUDED.accepts,
+             required = EXCLUDED.required`,
+      [
+        input.stage, input.key, input.label, input.description,
+        JSON.stringify(input.accepts), input.required,
+      ],
+    )
+    const saved = (await this.catalogue(input.stage)).find((entry) => entry.key === input.key)
+    if (saved === undefined) {
+      throw new PrerequisiteError(500, 'PREREQUISITE_SAVE_FAILED', 'the prerequisite could not be read back')
+    }
+    return saved
+  }
+
+  /**
+   * Remove a catalogue entry.
+   *
+   * Refuses while a project still waives it: deleting the entry would leave a
+   * waiver pointing at nothing, which is worse than an explicit unwaive first.
+   */
+  async removePrerequisite(stage: ProjectStage, key: string): Promise<void> {
+    const existing = (await this.catalogue(stage)).find((entry) => entry.key === key)
+    if (existing === undefined) {
+      throw new PrerequisiteError(404, 'PREREQUISITE_NOT_FOUND', `no prerequisite "${key}" for ${stage}`)
+    }
+    const waived = await this.pool.query(
+      `SELECT 1 FROM project_stage_evidence
+       WHERE stage = $1 AND key = $2 AND kind = 'waiver' LIMIT 1`,
+      [stage, key],
+    )
+    if ((waived.rowCount ?? 0) > 0) {
+      throw new PrerequisiteError(
+        409,
+        'PREREQUISITE_IN_USE',
+        `a project still waives "${key}"; remove the waiver first`,
+      )
+    }
+    await this.pool.query(
+      `DELETE FROM stage_prerequisites WHERE stage = $1 AND key = $2`,
+      [stage, key],
+    )
+  }
 
   async catalogue(stage?: ProjectStage): Promise<StagePrerequisite[]> {
     const result = await this.pool.query<CatalogueRow>(
@@ -441,6 +507,61 @@ export class StagePrerequisiteService {
    * `incomingBrief` is the text the caller is about to submit with a new run: it
    * is evidence for this stage even though no run row exists yet.
    */
+  /**
+   * Validate and save a catalogue entry (AR-13).
+   *
+   * The acceptance sources are the contract: a prerequisite with none can never be
+   * satisfied, so that is rejected rather than stored and puzzled over later.
+   */
+  async saveCatalogueEntry(
+    stage: string,
+    key: string,
+    input: unknown,
+  ): Promise<StagePrerequisite & { stageLabel: string }> {
+    if (!SDLC_STAGES.includes(stage as ProjectStage)) {
+      throw new PrerequisiteError(400, 'INVALID_STAGE', `unknown SDLC stage ${stage}`)
+    }
+    const record = input !== null && typeof input === 'object' ? input as Record<string, unknown> : {}
+    const label = typeof record.label === 'string' ? record.label.trim() : ''
+    if (label === '') throw new PrerequisiteError(400, 'INVALID_PREREQUISITE', 'label is required')
+    const accepts = normaliseAccepts(record.accepts)
+    if (accepts.length === 0) {
+      throw new PrerequisiteError(
+        400,
+        'INVALID_PREREQUISITE',
+        'a prerequisite needs at least one accepted source, or it can never be satisfied',
+      )
+    }
+    const required = record.required === undefined ? true : record.required === true
+    if (this.store.savePrerequisite === undefined) {
+      throw new PrerequisiteError(
+        501,
+        'PREREQUISITE_CATALOGUE_READ_ONLY',
+        'this catalogue store cannot be edited',
+      )
+    }
+    const saved = await this.store.savePrerequisite({
+      stage: stage as ProjectStage,
+      key,
+      label,
+      description: typeof record.description === 'string' ? record.description : '',
+      accepts,
+      required,
+    })
+    return { ...saved, stageLabel: STAGE_LABELS[stage as ProjectStage] }
+  }
+
+  async removeCatalogueEntry(stage: string, key: string): Promise<void> {
+    if (this.store.removePrerequisite === undefined) {
+      throw new PrerequisiteError(
+        501,
+        'PREREQUISITE_CATALOGUE_READ_ONLY',
+        'this catalogue store cannot be edited',
+      )
+    }
+    await this.store.removePrerequisite(stage as ProjectStage, key)
+  }
+
   async readiness(projectId: string, stage: string, options: { incomingBrief?: boolean } = {}): Promise<StageReadiness> {
     assertStage(stage)
     const [catalogue, stored] = await Promise.all([
@@ -489,4 +610,50 @@ export class StagePrerequisiteService {
   async close(): Promise<void> {
     await this.store.close?.()
   }
+}
+
+/**
+ * Validate the accepted sources of a catalogue entry (AR-13).
+ *
+ * Kept strict on purpose: an unknown source kind would silently never match, so a
+ * typo would look like a prerequisite nobody can satisfy.
+ */
+export function normaliseAccepts(input: unknown): EvidenceSource[] {
+  if (!Array.isArray(input)) {
+    throw new PrerequisiteError(400, 'INVALID_ACCEPTS', 'accepts must be an array of sources')
+  }
+  return input.map((entry) => {
+    const record = entry !== null && typeof entry === 'object' ? entry as Record<string, unknown> : {}
+    const kind = record.kind
+    if (kind === 'brief') {
+      return { kind: 'brief' as const, label: typeof record.label === 'string' ? record.label : 'the brief on a run' }
+    }
+    if (kind === 'attachment') {
+      const min = typeof record.min === 'number' ? record.min : 1
+      if (!Number.isInteger(min) || min < 1) {
+        throw new PrerequisiteError(400, 'INVALID_ACCEPTS', 'an attachment source needs min >= 1')
+      }
+      return {
+        kind: 'attachment' as const,
+        min,
+        label: typeof record.label === 'string' ? record.label : `${min} attachment(s)`,
+      }
+    }
+    if (kind === 'document') {
+      const kinds = Array.isArray(record.documentKinds) ? record.documentKinds.filter((value) => typeof value === 'string') : []
+      if (kinds.length === 0) {
+        throw new PrerequisiteError(400, 'INVALID_ACCEPTS', 'a document source needs at least one documentKinds entry')
+      }
+      return {
+        kind: 'document' as const,
+        documentKinds: kinds as string[],
+        label: typeof record.label === 'string' ? record.label : `a ${kinds.join(' or ')} document`,
+      }
+    }
+    throw new PrerequisiteError(
+      400,
+      'INVALID_ACCEPTS',
+      `unknown acceptance source "${String(kind)}"; expected brief, attachment or document`,
+    )
+  })
 }

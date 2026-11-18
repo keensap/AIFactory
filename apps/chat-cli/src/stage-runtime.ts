@@ -12,6 +12,8 @@ import { access, mkdir, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { materialiseAgent } from './agent-patch.ts'
 import { STAGE_PROCESSES, type AgentComposition } from './agents.ts'
+import type { StageDefinition } from './stage-definition.ts'
+import { PLANNING_DEFINITION } from './stages/planning.ts'
 import { ModelSettingsError } from './models/index.ts'
 import type { DshHarness } from './harness.ts'
 import { StageEventSink } from './stage-event-sink.ts'
@@ -51,6 +53,11 @@ const TELOS_REPORT_TITLE = 'TELOS Feasibility Report'
 export type HumanDecision = 'go' | 'conditional_go' | 'no_go'
 
 export interface StageRuntimeDeps {
+  /**
+   * What this engine drives. Defaults to planning, so existing callers and tests
+   * keep working while the engine itself stays stage-independent (AR-15).
+   */
+  definition?: StageDefinition
   projects: ProjectService
   workspace: PostgresProjectWorkspace
   harnessFactory: (cwd?: string, timeoutMs?: number) => DshHarness
@@ -79,7 +86,11 @@ export interface StageRuntimeDeps {
   /** Test seam: replace PDF rendering (e.g. to simulate a failure). */
   renderPdf?: typeof renderReportPdf
   /** Resolves the project's planning-stage settings (gate, cycles, acceptance). */
-  stageSettings?: { planning(projectId: string): Promise<PlanningStageSettings> }
+  /**
+   * Per-stage settings, keyed by stage. Any stage the engine drives must be here;
+   * a stage absent falls back to the planning defaults as before.
+   */
+  stageSettings?: { [stage: string]: (projectId: string) => Promise<PlanningStageSettings> }
   /** The model target in force, snapshotted into a new run (AR-06). */
   currentTarget?: () => { provider: string; model: string; fallback: Array<{ provider: string; model: string }> } | null
   /** Pin an explicit target instead of the current one (AR-06). */
@@ -219,7 +230,15 @@ export class StageRuntimeError extends Error {
   }
 }
 
-export class PlanningStageRuntime {
+/**
+ * Drives one stage run: lease, the analyze -> author -> review -> gate loop, the
+ * acceptance rule, completion and export.
+ *
+ * Stage identity, prompts and artifact come from `StageDefinition`, so the engine
+ * itself names no stage (AR-15). `PlanningStageRuntime` remains as an alias for
+ * callers that drive planning, and for the tests written against it.
+ */
+export class StageEngine {
   private readonly projects: ProjectService
   private readonly workspace: PostgresProjectWorkspace
   private readonly harnessFactory: (cwd?: string, timeoutMs?: number) => DshHarness
@@ -242,7 +261,7 @@ export class PlanningStageRuntime {
   private readonly activeRuns = new Set<string>()
   private readonly pinModel?: () => ModelPin | undefined
   private readonly renderPdf: typeof renderReportPdf
-  private readonly stageSettings?: { planning(projectId: string): Promise<PlanningStageSettings> }
+  private readonly stageSettings?: { [stage: string]: (projectId: string) => Promise<PlanningStageSettings> }
   private readonly currentTarget?: () => { provider: string; model: string; fallback: Array<{ provider: string; model: string }> } | null
   private readonly pinTarget?: (target: { provider: string; model: string; fallback: Array<{ provider: string; model: string }> }) => Promise<ModelPin>
   private readonly catalogDigest?: () => string | null
@@ -252,6 +271,7 @@ export class PlanningStageRuntime {
     recordFailure(error: unknown): void
   } | null>
   private readonly profileToolRows?: readonly string[]
+  private readonly definition: StageDefinition
   private readonly prerequisites?: {
     ensureReady(
       projectId: string,
@@ -277,6 +297,7 @@ export class PlanningStageRuntime {
     this.harnessFactory = deps.harnessFactory
     this.runPrompt = deps.runPrompt
     if (deps.agents !== undefined) this.agents = deps.agents
+    this.definition = deps.definition ?? PLANNING_DEFINITION
     this.maxReviewCycles = deps.maxReviewCycles ?? DEFAULT_MAX_REVIEW_CYCLES
     this.roleTimeoutMs = deps.roleTimeoutMs ?? 300_000
     this.workerId = deps.workerId ?? `${process.pid}-${randomUUID().slice(0, 8)}`
@@ -294,7 +315,7 @@ export class PlanningStageRuntime {
     /** Requester-supplied PDFs to analyse alongside the brief. */
     attachmentIds?: string[]
   }): Promise<StageRunDetail> {
-    this.assertPlanning(input.stage)
+    this.assertExecutable(input.stage)
     const project = await this.projects.get(input.projectId)
     await assertProjectRoot(project)
     // Prerequisites are evidence, not "the previous stage ran", so a project can
@@ -303,12 +324,12 @@ export class PlanningStageRuntime {
     // can always be audited against the evidence that existed at the time (AR-07).
     let readiness: { ready: boolean; evaluatedAt: string; prerequisites: Array<{ key: string; satisfied: boolean; evidence: unknown }> } | undefined
     if (this.prerequisites !== undefined) {
-      readiness = await this.prerequisites.ensureReady(project.id, PLANNING_STAGE, {
+      readiness = await this.prerequisites.ensureReady(project.id, this.definition.stage, {
         incomingBrief: (input.brief ?? '').trim() !== '',
       })
     }
     const snapshot = await this.workspace.getSnapshot(project.id)
-    const priorStages = await this.workspace.getPriorStageSummaries(project.id, PLANNING_STAGE)
+    const priorStages = await this.workspace.getPriorStageSummaries(project.id, this.definition.stage)
     const attachments = await this.loadAttachments(project, input.attachmentIds ?? [])
     const settings = await this.resolveSettings(project.id)
     const context = buildContextPacket(
@@ -323,12 +344,13 @@ export class PlanningStageRuntime {
       readiness === undefined
         ? undefined
         : { evaluatedAt: readiness.evaluatedAt, prerequisites: readiness.prerequisites },
+      this.definition,
     )
     // Freeze what this run uses, so a resume days later is the same run (AR-06).
     const bindings = await this.snapshotBindings(project.id)
     const run = await this.workspace.createStageRun({
       projectId: project.id,
-      stage: PLANNING_STAGE,
+      stage: this.definition.stage,
       inputText: input.brief ?? null,
       context,
       contextHash: hashContext(context),
@@ -378,7 +400,11 @@ export class PlanningStageRuntime {
       return { ...DEFAULT_PLANNING_STAGE_SETTINGS, maxReviewCycles: this.maxReviewCycles }
     }
     try {
-      const resolved = await this.stageSettings.planning(projectId)
+      const resolve = this.stageSettings[this.definition.stage] ?? this.stageSettings.planning
+      if (resolve === undefined) {
+        return { ...DEFAULT_PLANNING_STAGE_SETTINGS, maxReviewCycles: this.maxReviewCycles }
+      }
+      const resolved = await resolve(projectId)
       return {
         gateAfterEachReview: resolved.gateAfterEachReview,
         maxReviewCycles: resolved.maxReviewCycles,
@@ -394,10 +420,15 @@ export class PlanningStageRuntime {
     }
   }
 
+  /** The stage this engine drives. */
+  get stage(): ProjectStage {
+    return this.definition.stage
+  }
+
   async list(projectId: string, stage: string): Promise<StageRun[]> {
-    this.assertPlanning(stage)
+    this.assertExecutable(stage)
     await this.projects.get(projectId)
-    return this.workspace.listStageRuns(projectId, PLANNING_STAGE)
+    return this.workspace.listStageRuns(projectId, this.definition.stage)
   }
 
   async get(runId: string): Promise<StageRunDetail> {
@@ -459,7 +490,7 @@ export class PlanningStageRuntime {
    * Completion is the only point where the document and its PDF are produced.
    */
   async decide(runId: string, input: {
-    decision?: HumanDecision
+    decision?: HumanDecision | 'approved'
     refine?: boolean
     note?: string
   }): Promise<StageRunDetail> {
@@ -469,8 +500,19 @@ export class PlanningStageRuntime {
       throw new StageRuntimeError(409, 'STAGE_RUN_NOT_AWAITING_DECISION', 'this run is not waiting on a final decision')
     }
     const refine = input.refine === true
-    if (!refine && !['go', 'conditional_go', 'no_go'].includes(input.decision ?? '')) {
+    // Planning records a feasibility decision; a stage that only approves does not
+    // ask for one, so a decision there is optional rather than required (AR-15).
+    const feasibility = this.definition.humanDecision === 'feasibility'
+    if (feasibility && !refine && !['go', 'conditional_go', 'no_go'].includes(input.decision ?? '')) {
       throw new StageRuntimeError(400, 'INVALID_HUMAN_DECISION', 'decision must be go, conditional_go or no_go')
+    }
+    if (!feasibility && !refine && input.decision !== undefined
+      && !['go', 'conditional_go', 'no_go', 'approved'].includes(input.decision)) {
+      throw new StageRuntimeError(
+        400,
+        'INVALID_HUMAN_DECISION',
+        'decision must be approved, go, conditional_go or no_go',
+      )
     }
 
     return runWithLogContext(
@@ -482,7 +524,13 @@ export class PlanningStageRuntime {
           await this.appendRunEvent(ctx.project.id, ctx.run.id, 'gate_decision', { gate: 'final', refine: true }, 'info')
           return this.refineOnce(ctx, review, settings)
         }
-        return this.completeRun(ctx, input.decision as HumanDecision, input.note, review)
+        // A plain approval stage records `go`; the distinction is planning's.
+        const recorded: HumanDecision = feasibility
+          ? (input.decision as HumanDecision)
+          : (input.decision === undefined || input.decision === 'approved'
+              ? 'go'
+              : input.decision as HumanDecision)
+        return this.completeRun(ctx, recorded, input.note, review)
       }, { resumeAtGate: true }),
     )
   }
@@ -495,12 +543,12 @@ export class PlanningStageRuntime {
    */
   private async snapshotBindings(projectId: string): Promise<StageRunBindings | null> {
     const target = this.currentTarget?.() ?? null
-    const processes = STAGE_PROCESSES[PLANNING_STAGE] ?? []
+    const processes = STAGE_PROCESSES[this.definition.stage] ?? this.definition.processes
     const agents: StageRunBindings['agents'] = {}
     for (const process of processes) {
       const composition = this.agents === undefined
         ? undefined
-        : await this.agents.composition({ projectId, stage: PLANNING_STAGE, process })
+        : await this.agents.composition({ projectId, stage: this.definition.stage, process })
       agents[process] = composition === undefined ? null : { ...composition }
     }
     if (target === null && Object.values(agents).every((entry) => entry === null)) return null
@@ -619,7 +667,7 @@ export class PlanningStageRuntime {
   private async requireRun(runId: string): Promise<StageRun> {
     const run = await this.workspace.getStageRun(runId)
     if (run === undefined) throw new StageRuntimeError(404, 'STAGE_RUN_NOT_FOUND', 'stage run not found')
-    if (run.stage !== PLANNING_STAGE) {
+    if (run.stage !== this.definition.stage) {
       throw new StageRuntimeError(501, 'STAGE_RUNTIME_NOT_IMPLEMENTED', 'only planning stage execution is implemented')
     }
     return run
@@ -832,13 +880,13 @@ export class PlanningStageRuntime {
     if (analysis.trim() === '') {
       await ctx.update({ status: 'analyzing' })
       ctx.assertLease()
-      analysis = await this.runRole('analyzer', buildAnalyzerPrompt(ctx.project, ctx.context), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span)
+      analysis = await this.runRole('analyzer', this.definition.prompts.analyzer(ctx.project, ctx.context), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span)
       await ctx.update({ analysisMarkdown: analysis })
     }
     if (draft.trim() === '') {
       await ctx.update({ status: 'drafting' })
       ctx.assertLease()
-      draft = cleanMarkdown(await this.runRole('author', buildAuthorPrompt(ctx.project, ctx.context, analysis), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span))
+      draft = cleanMarkdown(await this.runRole('author', this.definition.prompts.author(ctx.project, ctx.context, analysis), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span))
       await ctx.update({ draftMarkdown: draft })
     }
     return this.reviewAndContinue(ctx, draft, analysis, safeCycle(ctx.run.reviewCycles), settings)
@@ -898,8 +946,8 @@ export class PlanningStageRuntime {
   private async reviewOnce(ctx: LeaseContext, draft: string, settings: PlanningStageSettings): Promise<StageReviewResult> {
     await ctx.update({ status: 'reviewing' })
     ctx.assertLease()
-    const rawReview = await this.runRole('reviewer', buildReviewerPrompt(ctx.project, ctx.context, draft, settings), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span)
-    const review = parseStageReview(rawReview)
+    const rawReview = await this.runRole('reviewer', this.definition.prompts.reviewer(ctx.project, ctx.context, draft, settings), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span)
+    const review = (this.definition.parseReview ?? parseStageReview)(rawReview)
     await this.workspace.addStageReview({
       stageRunId: ctx.run.id,
       reviewerRole: 'planning_reviewer',
@@ -923,7 +971,7 @@ export class PlanningStageRuntime {
     ctx.assertLease()
     const revised = cleanMarkdown(await this.runRole(
       'author',
-      buildRevisionPrompt(ctx.project, ctx.context, analysis, draft, findings),
+      this.definition.prompts.revision(ctx.project, ctx.context, analysis, draft, findings),
       ctx.project.rootPath,
       ctx.run.id,
       ctx.project.id,
@@ -1029,21 +1077,24 @@ export class PlanningStageRuntime {
     try {
       document = await this.workspace.addDocument({
         project,
-        stage: PLANNING_STAGE,
-        kind: TELOS_DOCUMENT_KIND,
-        title: 'TELOS feasibility report',
-        filename: `telos-${ctx.run.id}.md`,
+        stage: this.definition.stage,
+        kind: this.definition.artifact.kind,
+        title: this.definition.artifact.title,
+        filename: `${this.definition.artifact.fileStem}-${ctx.run.id}.md`,
         mimeType: 'text/markdown',
         buffer: Buffer.from(draft, 'utf8'),
         stageRunId: ctx.run.id,
-        completeRun: { summaryMarkdown: summary },
+        completeRun: {
+          summaryMarkdown: summary,
+          checklistKeys: this.definition.artifact.checklistKeys,
+        },
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       throw new StageRuntimeError(
         409,
         'DOCUMENT_WRITE_FAILED',
-        `could not store the TELOS document under ${project.rootPath}: ${message}`,
+        `could not store the stage document under ${project.rootPath}: ${message}`,
       )
     }
     await this.appendRunEvent(project.id, ctx.run.id, 'document_created', {
@@ -1113,7 +1164,7 @@ export class PlanningStageRuntime {
       ? (bound.agents[role] ?? undefined)
       : this.agents === undefined
         ? undefined
-        : await this.agents.composition({ projectId, stage: PLANNING_STAGE, process: role })
+        : await this.agents.composition({ projectId, stage: this.definition.stage, process: role })
     // An agent may run a different model from the Factory target. Price and
     // measure this role as the model that actually ran (AR-02), never as another's.
     const attribution = pin === undefined
@@ -1328,7 +1379,7 @@ export class PlanningStageRuntime {
   async exportRun(runId: string): Promise<{ path: string; bytes: number; documentId: string }> {
     const detail = await this.get(runId)
     const project = await this.projects.get(detail.projectId)
-    const document = detail.documents.find((item) => item.kind === TELOS_DOCUMENT_KIND)
+    const document = detail.documents.find((item) => item.kind === this.definition.artifact.kind)
     if (document === undefined) {
       throw new StageRuntimeError(409, 'DOCUMENT_NOT_READY', 'the stage has not produced its document yet')
     }
@@ -1405,14 +1456,24 @@ export class PlanningStageRuntime {
   }
 
   private async markPlanningEvidence(projectId: string, document: ProjectDocument): Promise<void> {
-    for (const key of ['business_idea', 'stakeholder_goals']) {
-      await this.workspace.updateChecklistItem(projectId, PLANNING_STAGE, key, 'done', document.id)
+    for (const key of this.definition.artifact.checklistKeys) {
+      // The decision item is set by the completion transaction, not here.
+      if (key === 'feasibility_decision') continue
+      await this.workspace.updateChecklistItem(projectId, this.definition.stage, key, 'done', document.id)
     }
   }
 
-  private assertPlanning(stage: string): asserts stage is typeof PLANNING_STAGE {
-    if (stage !== PLANNING_STAGE) {
-      throw new StageRuntimeError(501, 'STAGE_RUNTIME_NOT_IMPLEMENTED', 'only planning stage execution is implemented')
+  /**
+   * Each engine drives exactly one stage. Asking it for another is a programming
+   * error, not an empty result, so it says which stage it does drive.
+   */
+  private assertExecutable(stage: string): asserts stage is ProjectStage {
+    if (stage !== this.definition.stage) {
+      throw new StageRuntimeError(
+        501,
+        'STAGE_NOT_IMPLEMENTED',
+        `this engine drives the ${this.definition.stage} stage, not ${stage}`,
+      )
     }
   }
 }
@@ -1441,6 +1502,7 @@ export function buildContextPacket(
   gateAfterEachReview = false,
   acceptance: { minRating: number; maxBlockers: number; maxMajor: number } = { minRating: 0, maxBlockers: 0, maxMajor: 0 },
   readiness?: { evaluatedAt: string; prerequisites: Array<{ key: string; satisfied: boolean; evidence: unknown }> },
+  definition: StageDefinition = PLANNING_DEFINITION,
 ): StageContextPacket {
   return {
     schemaVersion: 1,
@@ -1454,9 +1516,9 @@ export function buildContextPacket(
       currentStage: project.currentStage,
     },
     stage: {
-      key: PLANNING_STAGE,
-      checklist: snapshot.checklist.filter((item) => item.stage === PLANNING_STAGE),
-      documents: snapshot.documents.filter((item) => item.stage === PLANNING_STAGE),
+      key: definition.stage,
+      checklist: snapshot.checklist.filter((item) => item.stage === definition.stage),
+      documents: snapshot.documents.filter((item) => item.stage === definition.stage),
     },
     priorStages,
     documents: snapshot.documents,
@@ -1471,7 +1533,7 @@ export function buildContextPacket(
       minRating: acceptance.minRating,
       maxBlockers: acceptance.maxBlockers,
       maxMajor: acceptance.maxMajor,
-      documentKind: TELOS_DOCUMENT_KIND,
+      documentKind: definition.artifact.kind,
       cardinality: 'one',
     },
   }
@@ -1774,3 +1836,11 @@ export function classifyHarnessError(message: string): { kind: string; retryable
   }
   return { kind: 'unknown', retryable: true }
 }
+
+/**
+ * A {@link StageEngine} that drives the planning stage.
+ *
+ * Kept so existing callers and tests read naturally; it is the same engine with
+ * the planning definition supplied by default.
+ */
+export class PlanningStageRuntime extends StageEngine {}

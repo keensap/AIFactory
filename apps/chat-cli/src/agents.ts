@@ -18,9 +18,17 @@ import { runMigrations } from './migrations.ts'
 import { SDLC_STAGES, type ProjectStage } from './sdlc.ts'
 import { TOOL_ROW_IDS, ToolRequirementError, assertToolRequirements } from './agent-patch.ts'
 
-/** Processes each stage runs. Only planning has a runtime today. */
+/**
+ * Processes each stage runs.
+ *
+ * Declared here rather than derived from the stage registry: the registry's
+ * definitions import the engine, the engine imports this module, and deriving it
+ * would close that loop. `test/stage-requirements.test.ts` asserts this map and
+ * the registry agree, so a new stage cannot forget it.
+ */
 export const STAGE_PROCESSES: Partial<Record<ProjectStage, readonly string[]>> = {
   planning: ['analyzer', 'author', 'reviewer'],
+  requirements: ['analyzer', 'author', 'reviewer'],
 }
 
 export type AgentSkill = { name: string; description: string; instructions: string }

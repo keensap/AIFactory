@@ -634,7 +634,7 @@ export class PostgresProjectWorkspace {
      * partial failure cannot leave a document without a completed run (or the
      * reverse). Requires `stageRunId`.
      */
-    completeRun?: { summaryMarkdown: string }
+    completeRun?: { summaryMarkdown: string; checklistKeys: string[] }
   }): Promise<ProjectDocument> {
     if (input.buffer.byteLength > MAX_DOCUMENT_BYTES) {
       throw new WorkspaceError(413, 'DOCUMENT_TOO_LARGE', `document exceeds ${MAX_DOCUMENT_BYTES} bytes`)
@@ -713,7 +713,9 @@ export class PostgresProjectWorkspace {
           )
         }
         if (input.completeRun !== undefined) {
-          for (const key of ['business_idea', 'stakeholder_goals', 'feasibility_decision']) {
+          // The keys come from the stage's definition, not from a planning literal
+          // (AR-15): a second stage must evidence its own checklist.
+          for (const key of input.completeRun.checklistKeys) {
             await client.query(
               `UPDATE project_checklist_items
                SET status = 'done', completed_at = COALESCE(completed_at, now()), evidence_document_id = $1

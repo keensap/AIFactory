@@ -38,10 +38,12 @@ import { PdfReviewService } from './pdf-review.ts'
 import { PostgresProjectStore, ProjectService, type Project } from './projects.ts'
 import { createChatServer } from './server.ts'
 import { PostgresSettingsStore, SettingsService } from './settings.ts'
-import { PlanningStageRuntime } from './stage-runtime.ts'
+import { PlanningStageRuntime, StageEngine } from './stage-runtime.ts'
+import { STAGE_DEFINITIONS } from './stages/index.ts'
+import type { StageDefinition } from './stage-definition.ts'
 import { SemanticIndexService } from './semantic-index.ts'
 import { PostgresVectorStore } from './vector-store.ts'
-import { ModelRuntime, ModelService, PostgresModelCatalog, PostgresModelSettingsStore } from './models/index.ts'
+import { ModelRuntime, ModelService, PostgresModelCatalog, PostgresModelSettingsStore, type ModelTarget } from './models/index.ts'
 import { PostgresStageSettingsStore, StageSettingsService } from './stage-settings.ts'
 import { PostgresPrerequisiteStore, StagePrerequisiteService } from './stage-prerequisites.ts'
 import { AgentService, PostgresAgentStore, compositionOf, type AgentRecord } from './agents.ts'
@@ -470,29 +472,63 @@ async function main(): Promise<void> {
     })
   }
 
-  const stageRuntime = projects === undefined || workspaceStore === undefined
+  // One engine per executable stage. They share the workspace, settings, agents,
+  // prerequisites and observer, so a stage differs only by its definition (AR-15).
+  const engineDeps = (definition: StageDefinition) => ({
+    definition,
+    projects: projects!,
+    workspace: workspaceStore!,
+    harnessFactory,
+    roleTimeoutMs: stageRoleTimeoutMs,
+    ...(stageSettings !== undefined
+      ? {
+          stageSettings: Object.fromEntries(
+            STAGE_DEFINITIONS.map((entry) => [
+              entry.stage,
+              (projectId: string) => stageSettings!.effective(projectId, entry.stage),
+            ]),
+          ),
+        }
+      : {}),
+    ...(prerequisites !== undefined ? { prerequisites } : {}),
+    ...(agents !== undefined ? { agents } : {}),
+    ...(profileToolRows !== undefined ? { profileToolRows } : {}),
+    // Late-bound: the model runtime is created after the stage engines.
+    pinModel: () => modelRuntime?.pin(),
+    currentTarget: () => modelRuntime?.currentTarget() ?? null,
+    catalogDigest: () => modelRuntime?.catalogDigest() ?? null,
+    pinTarget: (target: ModelTarget) => modelRuntime!.pinTarget(target),
+    modelHealth: (provider: string) => modelService === undefined
+      ? Promise.resolve(null)
+      : modelService.providerHealth(provider),
+    ...(semanticIndex !== undefined
+      ? { indexDocument: (project: Project, document: ProjectDocument) => semanticIndex!.indexDocument(project, document) }
+      : {}),
+    ...(traces !== undefined ? { traces } : {}),
+    logger: logging.logger,
+  })
+  const engines = projects === undefined || workspaceStore === undefined
+    ? new Map<string, StageEngine>()
+    : new Map(STAGE_DEFINITIONS.map((definition) => [
+        definition.stage,
+        new StageEngine(engineDeps(definition)),
+      ]))
+  // The planning engine keeps its own name for callers that expect it.
+  const planningEngine = engines.get('planning')
+  const stageRuntime = planningEngine instanceof PlanningStageRuntime
+    ? planningEngine
+    : planningEngine === undefined
+      ? undefined
+      : Object.assign(Object.create(PlanningStageRuntime.prototype) as PlanningStageRuntime, planningEngine)
+  const stageEngines = engines.size === 0
     ? undefined
-    : new PlanningStageRuntime({
-        projects,
-        workspace: workspaceStore,
-        harnessFactory,
-        roleTimeoutMs: stageRoleTimeoutMs,
-        ...(stageSettings !== undefined ? { stageSettings } : {}),
-        ...(prerequisites !== undefined ? { prerequisites } : {}),
-        ...(agents !== undefined ? { agents } : {}),
-        ...(profileToolRows !== undefined ? { profileToolRows } : {}),
-        // Late-bound: the model runtime is created after the stage runtime.
-        pinModel: () => modelRuntime?.pin(),
-        currentTarget: () => modelRuntime?.currentTarget() ?? null,
-        catalogDigest: () => modelRuntime?.catalogDigest() ?? null,
-        pinTarget: (target) => modelRuntime!.pinTarget(target),
-        modelHealth: (provider) => modelService === undefined ? Promise.resolve(null) : modelService.providerHealth(provider),
-        ...(semanticIndex !== undefined
-          ? { indexDocument: (project: Project, document: ProjectDocument) => semanticIndex!.indexDocument(project, document) }
-          : {}),
-        ...(traces !== undefined ? { traces } : {}),
-        logger: logging.logger,
-      })
+    : {
+        for: (stage: string): StageEngine | undefined => engines.get(stage),
+        forRun: async (runId: string): Promise<StageEngine | undefined> => {
+          const run = await workspaceStore!.getStageRun(runId)
+          return run === undefined ? undefined : engines.get(run.stage)
+        },
+      }
 
   /**
    * Boot a harness with an agent's composition and ask for one word back.
@@ -718,6 +754,7 @@ async function main(): Promise<void> {
     ...(workspaceStore !== undefined ? { workspace: workspaceStore } : {}),
     ...(briefing !== undefined ? { briefing } : {}),
     ...(stageRuntime !== undefined ? { stageRuntime } : {}),
+    ...(stageEngines !== undefined ? { stageEngines } : {}),
     ...(semanticIndex !== undefined ? { semanticIndex } : {}),
     ...(observabilityReader !== undefined ? { observability: observabilityReader } : {}),
     ...(modelService !== undefined ? { models: modelService } : {}),

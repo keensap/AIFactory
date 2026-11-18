@@ -15,7 +15,7 @@ import type { AgentService, AgentRecord } from './agents.ts'
 import type { PdfReviewService } from './pdf-review.ts'
 import type { PostgresProjectWorkspace } from './workspace.ts'
 import type { ProjectBriefingService } from './briefing.ts'
-import type { PlanningStageRuntime } from './stage-runtime.ts'
+import type { PlanningStageRuntime, StageEngine } from './stage-runtime.ts'
 import type { SemanticIndexService } from './semantic-index.ts'
 import type { ObservabilityReader, TraceRecorder } from './observability/index.ts'
 import type { Logger, LoggingManager, PostgresLogStore } from './logging/index.ts'
@@ -58,6 +58,16 @@ export interface ChatApiOptions {
   briefing?: ProjectBriefingService
   /** Stage coordinator runtime. When omitted, stage-run routes return 503. */
   stageRuntime?: PlanningStageRuntime
+  /**
+   * Query an engine per stage (AR-15).
+   *
+   * `stageRuntime` remains the planning engine; this adds the others. Run routes
+   * resolve by the run's own stage, so one API serves every executable stage.
+   */
+  stageEngines?: {
+    for(stage: string): StageEngine | undefined
+    forRun(runId: string): Promise<StageEngine | undefined>
+  }
   /** Project-scoped semantic indexing. When omitted, retrieval routes return 503. */
   semanticIndex?: SemanticIndexService
   /** Provider-neutral observability reader (Phoenix today). */

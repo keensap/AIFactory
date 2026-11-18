@@ -187,8 +187,26 @@ const PLANNING_DEFINITION: StageSettingsDefinition = {
   },
 }
 
+/**
+ * The requirements stage asks the same review questions as planning, so it reuses
+ * the same validator. It has no go/no-go decision, so `gateReminderHours` still
+ * applies but `convergence` is a plain approval.
+ */
+const REQUIREMENTS_DEFINITION: StageSettingsDefinition = {
+  stage: 'requirements',
+  label: STAGE_LABELS.requirements,
+  defaults: { ...DEFAULT_PLANNING_STAGE_SETTINGS },
+  validate(input: unknown): Record<string, unknown> {
+    return { ...parseStageSettings(input, { partial: true }) }
+  },
+  fromContext(constraints: unknown): Record<string, unknown> {
+    return { ...settingsFromContext({ constraints }) }
+  },
+}
+
 export const STAGE_SETTINGS_DEFINITIONS: Partial<Record<ProjectStage, StageSettingsDefinition>> = {
   planning: PLANNING_DEFINITION,
+  requirements: REQUIREMENTS_DEFINITION,
 }
 
 export function stageSettingsDefinition(stage: string): StageSettingsDefinition | undefined {
@@ -376,8 +394,20 @@ export class StageSettingsService {
 
   /** The planning settings a run should start with. */
   async planning(projectId: string): Promise<PlanningStageSettings> {
-    const resolved = await this.resolve(projectId, 'planning')
-    return { ...DEFAULT_PLANNING_STAGE_SETTINGS, ...(resolved.settings as Partial<PlanningStageSettings>) }
+    return this.effective(projectId, 'planning')
+  }
+
+  /**
+   * The settings in force for any stage (AR-15).
+   *
+   * A stage with a definition gets its own defaults and overrides; a stage without
+   * one still answers with the planning defaults, which is what the routes relied
+   * on before stages existed.
+   */
+  async effective(projectId: string, stage: ProjectStage = 'planning'): Promise<PlanningStageSettings> {
+    const resolved = await this.resolve(projectId, stage)
+    const defaults = STAGE_SETTINGS_DEFINITIONS[stage]?.defaults ?? DEFAULT_PLANNING_STAGE_SETTINGS
+    return { ...DEFAULT_PLANNING_STAGE_SETTINGS, ...defaults, ...(resolved.settings as Partial<PlanningStageSettings>) }
   }
 
   async close(): Promise<void> {
