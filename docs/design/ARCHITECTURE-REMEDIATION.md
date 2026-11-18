@@ -1,6 +1,6 @@
 # Architecture Review — Shortcomings, Remedies and Execution Plan
 
-**Status:** Phases 0–2 complete (2026-11-18), except the route table (AR-14) which is deferred; Phases 3–4 pending  
+**Status:** Phases 0–2 complete (2026-11-18); Phases 3–4 pending  
 **Scope:** the backend as implemented (`apps/chat-cli`), reviewed against the code, not against [`../ARCHITECTURE.md`](../ARCHITECTURE.md)  
 **Method:** every finding cites the code that proves it; every remedy states how it is verified as resolved.
 
@@ -41,7 +41,7 @@ Work is planned in five phases (§5). Phases 0–1 fix the defects that can lose
 | [AR-11](#ar-11) | Runs cannot be cancelled | Medium | 3 | open |
 | [AR-12](#ar-12) | Twelve connection pools per process | Medium | 2 |  fixed |
 | [AR-13](#ar-13) | No migration runner; seeds never update existing databases | Medium | 2, 4 |  fixed |
-| [AR-14](#ar-14) | 2,004-line positional router | Medium | 2 | open |
+| [AR-14](#ar-14) | Positional router | Medium | 2 | fixed — route table, auth as data, both guards |
 | [AR-15](#ar-15) | The runtime only knows the planning stage | Medium | 4 | open |
 | [AR-16](#ar-16) | Dead tables from the superseded role-config design; gates never expire | Low | 2, 3 |  partly fixed — dead tables dropped; gate reminders still open |
 | [AR-17](#ar-17) | Architecture documentation claimed enforcement that did not exist | Low | 0 | fixed |
@@ -474,30 +474,41 @@ The data moves in the same migration, and rows whose project no longer exists ar
 
 <a id="ar-14"></a>
 
-### AR-14 — 2,004-line positional router
+### AR-14 — 2,079-line positional router
 
-**Severity:** Medium · **Phase:** 2
+**Severity:** Medium · **Phase:** 2 (deferred from the Phase 2 commit, **fixed** 2026-11-18)
 
-**Evidence.** [server.ts](../../apps/chat-cli/src/server.ts) dispatches on `rest[n]` indices across 2,004 lines. Earlier off-by-one 404s on attachments came directly from this. Authorisation is repeated by hand in each handler (AR-01).
+**The story.** This finding was raised by the code review, deferred out of the Phase 2 commit on purpose, and is being closed now. That sequence is worth recording, because the reasons for deferring it are the same reasons it is the riskiest item in the plan.
+
+*What is wrong.* [server.ts](../../apps/chat-cli/src/server.ts) routes by position. `url.pathname.split('/')` becomes `rest`, and every handler re-derives what it needs from indices: `rest.length === 4 && rest[1] === 'documents' && rest[3] === 'content'`. This has already caused real bugs — the attachment content and delete routes shipped with an off-by-one and returned 404 — because the project id sits at `rest[0]` while sub-resources start at `rest[1]`, which is easy to misread. Authorisation is likewise a call each handler must remember (AR-01), so a new route can be added without one and nothing complains.
+
+*Why it was deferred.* It is a pure refactor: no user-visible behaviour, no new capability, and the largest single diff in the plan. Landing it inside the Phase 2 commit, alongside the first real migrations, would have made two risky changes reviewable as one and impossible to bisect. The Phase 1 structural guard (`test/auth.test.ts`, which fails if a settings write loses its `requireAdmin`) held the line in the meantime.
+
+*Why it cannot be deferred forever.* Every new route added before this lands adds to the conversion cost, and the auth inventory cannot exist without declared policy. It is also the prerequisite for the stage engine (AR-15): a `StageEngine` that registers its own routes should not have to learn index arithmetic.
 
 **Remedy**
 
-1. A route table with named parameters and declared policy:
+1. **A route table with named parameters and declared policy.** One entry per endpoint:
 
    ```ts
-   route('POST', '/api/stage-runs/:runId/gate', { auth: 'operator', body: GateBody }, answerGate)
+   route('POST', '/api/stage-runs/:runId/gate', { auth: 'operator' }, answerGate)
+   route('POST', '/api/agents/:agentId/test', { auth: 'admin' }, testAgent)
    ```
 
-   It uses a small internal matcher, with no framework dependency.
-2. Handlers are split by resource: `routes/projects.ts`, `stage-runs.ts`, `settings.ts`, `models.ts`, `agents.ts`, `observability.ts`.
-3. Migration is incremental: the table is consulted first and the old dispatcher remains the fallback until it is empty, then it is deleted.
-4. Two guard tests: the **auth inventory** (AR-01), and **OpenAPI parity**, which checks that every route is in `openapi.yaml` and every OpenAPI path has a route.
+   A small internal matcher compiles the pattern once and returns named `params`, so no handler does arithmetic on indices. No framework dependency.
+2. **Authorisation becomes data.** The router enforces `auth` before the handler runs — `public`, `operator` or `admin` — so a route cannot be added without declaring whose request may call it. This completes AR-01's fourth part.
+3. **Handlers are split by resource**, each in `src/routes/`: `system`, `agents`, `settings`, `models`, `prerequisites`, `stage-runs`, `projects`, `sessions`, `logging`. Shared HTTP plumbing (JSON, errors, body limits, CORS, token checks, `HttpError`) moves to `src/http.ts`.
+4. **Fallback during the conversion.** The table is consulted first; the old positional dispatcher answers anything it does not claim, and cannot be deleted until it claims nothing. This keeps every intermediate state shippable.
+5. **Two guard tests:**
+   - *auth inventory* — every mutating route declares a role, and reads the source to prove it;
+   - *OpenAPI parity* — every route in the table appears in `openapi.yaml`, and every path in `openapi.yaml` has a route. This is the check that prevents the API documentation drifting from the API again.
 
 **Resolved when**
 
-- The old dispatcher is gone and no handler reads `rest[n]`.
+- The positional dispatcher is gone and no handler reads an index into path segments.
 - Both guard tests pass.
-- [server.ts](../../apps/chat-cli/src/server.ts) is under 300 lines.
+- [server.ts](../../apps/chat-cli/src/server.ts) holds only the server lifecycle and the router wiring, under 300 lines.
+- All existing HTTP tests pass unchanged, which is the real proof that behaviour was preserved.
 
 ---
 
@@ -686,6 +697,35 @@ Rehearsed on a restored copy of the real database and on an empty one, then appl
 **Verification:** 556 tests; both guards; `test/migrations.test.ts` covers checksums, rollback, idempotency and — on a scratch schema with a pending migration — that two concurrent runners apply it exactly once; `test/db-pool.test.ts` asserts at most 12 connections per process; `test/agents.test.ts` asserts the cascade and the foreign-key rejection.
 
 **Deferred: AR-14 (route table).** `server.ts` is still the positional dispatcher, so AR-01's fourth part — authorisation as data rather than a call each handler must remember — is not done. It is a pure refactor of 2,000 lines with no behaviour change, and it carries the most risk for the least user-visible benefit, so it is sequenced on its own rather than bundled with schema work. The auth guard added in Phase 1 (`test/auth.test.ts`) holds the line meanwhile.
+
+#### AR-14 closed (2026-11-18)
+
+`server.ts` is **202 lines**: server lifecycle, request logging and the router wiring. Everything else moved:
+
+| Module | Holds |
+|---|---|
+| `src/api-options.ts` | `ChatApiOptions`, so route modules do not import the server |
+| `src/http.ts` | responses, JSON bodies, CORS, token checks, `HttpError`, error mapping |
+| `src/routes/router.ts` | the matcher, `RouteContext`, `assertAuthorised` |
+| `src/routes/{system,agents,settings,models,logging,stage-runs,projects,sessions}.ts` | the handlers |
+| `src/routes/{shared,index}.ts` | cross-resource helpers, and the ordered table |
+
+**How.** Each branch of the old `if (rest.length === N && rest[i] === 'x')` chain became a route with its own pattern and handler. `rest[2]!` became `params.documentId`, and the off-by-one that historically broke the attachment routes is now unrepresentable: there is no index to get wrong.
+
+**Auth is data.** Every route declares `public`, `operator` or `admin`, and the router enforces it before the handler runs. `assertAuthorised` is the only place the decision is made. AR-01's fourth part is therefore complete.
+
+**Two guards now hold it:**
+
+- *auth inventory* (`test/auth.test.ts`) — every route declares a role; the public set is an exact expected list; 21 named write operations must be `admin`; no write may be public; no duplicate method+pattern.
+- *OpenAPI parity* — every served route appears in `openapi.yaml` and every documented path is served. **It found eight undocumented routes and two where the parameter was named differently from the contract** (`:sessionId` vs `{id}`, `:id` vs `{projectId}`); both were fixed rather than exempted.
+
+**Behaviour preserved.** All HTTP tests pass unchanged. The refactor did introduce three regressions, caught by the suite and fixed against the original source rather than by editing the tests:
+
+- the run-creation validation used a new code (`INVALID_ATTACHMENT_IDS`) and dropped the `brief` type check — restored to `INVALID_ATTACHMENTS` and `INVALID_BRIEF`;
+- stage-run read routes checked the workspace before the runtime, so a deployment without a runtime answered 503 `WORKSPACE_NOT_CONFIGURED` instead of `STAGE_RUNTIME_DISABLED` — the original order is restored;
+- the PDF review sent `message: ''` instead of the uploaded `message` field.
+
+**Verification:** 557 tests, both guards, live smoke test across every resource and the run sub-resources (200s), validation codes (`INVALID_ATTACHMENTS`, `INVALID_BRIEF`, `STAGE_RUN_NOT_FOUND`, `INVALID_STAGE`) and an unknown path returning `404 NOT_FOUND`.
 
 #### Phase 3 — Run integrity (6–8 days)
 

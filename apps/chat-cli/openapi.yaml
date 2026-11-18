@@ -23,6 +23,18 @@ tags:
   - name: observability
   - name: retrieval
 paths:
+  /openapi.yaml:
+    get:
+      tags: [health]
+      summary: This document
+      security: []
+      responses:
+        '200':
+          description: The OpenAPI contract as YAML
+          content:
+            application/yaml:
+              schema: {type: string}
+
   /api/health:
     get:
       tags: [health]
@@ -1993,6 +2005,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+    post:
+      tags: [agents]
+      summary: Update an agent (alias of PATCH)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AgentInput'}
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent: {$ref: '#/components/schemas/Agent'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
     delete:
       tags: [agents]
       summary: Delete an agent and its assignments (admin)
@@ -2064,6 +2095,32 @@ paths:
     parameters:
       - {name: stage, in: path, required: true, schema: {$ref: '#/components/schemas/ProjectStage'}}
       - {name: process, in: path, required: true, schema: {type: string}}
+    post:
+      tags: [agents]
+      summary: Assign an agent to a process (alias of PUT)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agentId]
+              properties:
+                agentId: {type: string}
+                projectId: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Assignments after the change
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  assignments:
+                    type: array
+                    items: {$ref: '#/components/schemas/AgentAssignment'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
     put:
       tags: [agents]
       summary: Assign an agent to a process (admin)
@@ -2478,6 +2535,35 @@ paths:
           $ref: '#/components/responses/Conflict'
         '502':
           $ref: '#/components/responses/HarnessError'
+
+  /api/stage-runs/{runId}/retry:
+    post:
+      tags: [stage-runs]
+      summary: Retry a failed run (admin)
+      description: Resumes from the stored analysis and draft, so completed phases are not paid for again.
+      parameters:
+        - {name: runId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: The run, back in pending
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run: {$ref: '#/components/schemas/StageRunDetail'}
+        '409':
+          description: STAGE_RUN_NOT_FAILED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: ADMIN_FORBIDDEN
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /api/stage-runs/{runId}/decision:
     parameters:

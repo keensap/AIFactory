@@ -1,6 +1,6 @@
 # AI Factory — Architecture
 
-**Status:** current state, 2026-11-18; corrected after the code review; Phase 1 hotfixes and Phase 2 foundations applied  
+**Status:** current state, 2026-11-18; corrected after the code review; Phase 1 hotfixes and Phase 2 foundations applied, including the route table  
 **Scope:** the backend as implemented (`apps/chat-cli`). The UI is a separate workstream; its contracts are described in [`docs/ui/`](ui/).  
 **Related:** [`AI-Factory-Requirements.md`](AI-Factory-Requirements.md) (what to build), [`design/`](design/) (per-area decisions), [`design/ARCHITECTURE-REMEDIATION.md`](design/ARCHITECTURE-REMEDIATION.md) (known defects and the plan to fix them).
 
@@ -84,34 +84,55 @@ Each role is a **separate harness process** launched with `--profile headless --
 
 ```mermaid
 flowchart TB
-  http["HTTP server<br/>src/server.ts<br/>routing, auth, errors"]
+  http["http.ts<br/>responses, bodies, CORS, tokens, errors"]
+  table["routes/index.ts<br/>ordered route table"]
+  matcher["routes/router.ts<br/>match + assertAuthorised"]
+  subgraph routes["routes/* — one module per resource"]
+    sys["system"]
+    agents["agents"]
+    settings["settings"]
+    models["models"]
+    logging["logging"]
+    runs["stage-runs"]
+    projects["projects"]
+    sessions["sessions"]
+  end
   subgraph services["Services"]
-    projects["ProjectsService"]
-    stages["StageRuntime<br/>(planning)"]
-    settings["StageSettingsService"]
+    projectsvc["ProjectsService"]
+    stages["StageRuntime (planning)"]
+    settingssvc["StageSettingsService"]
     prereq["StagePrerequisiteService"]
-    agents["AgentService"]
-    models["ModelService + ModelRuntime"]
-    logging["LoggingManager"]
-    telemetry["TraceRecorder"]
+    agentsvc["AgentService"]
+    modelssvc["ModelService + ModelRuntime"]
+    logman["LoggingManager"]
   end
   subgraph stores["Stores"]
-    ws["ProjectWorkspace<br/>(PostgreSQL)"]
+    ws["ProjectWorkspace (PostgreSQL)"]
     files["Project filesystem"]
   end
-  http --> services
+  request(("request")) --> table --> matcher --> routes
+  routes --> services
   stages --> ws
   stages --> files
-  stages --> models
-  settings --> ws
+  settingssvc --> ws
   prereq --> ws
-  agents --> ws
-  models --> db[("PostgreSQL")]
-  logging --> db
-  telemetry --> phoenix["Phoenix"]
+  agentsvc --> ws
+  modelssvc --> db[("PostgreSQL")]
+  http --> routes
 ```
 
-Errors are typed at the boundary (`HttpError` with `status` + `code`) and rendered as `{ error: { message, code, status } }`. Domain errors (`StageRuntimeError`, `StageSettingsError`, `PrerequisiteError`, `AgentError`, `ModelSettingsError`) map to those codes rather than leaking messages.
+`server.ts` holds only the server lifecycle, request logging and the router wiring: registering a route is the same act as declaring who may call it.
+
+| Concern | Where |
+|---|---|
+| routes, and their `public` / `operator` / `admin` policy | `src/routes/*.ts`, aggregated in `src/routes/index.ts` |
+| matching and authorisation | `src/routes/router.ts` |
+| responses, JSON bodies, CORS, token checks, error mapping | `src/http.ts` |
+| the option type every module needs | `src/api-options.ts` |
+
+Two guards keep the table honest: an **auth inventory** asserts every route declares a role and that a named set of write operations is `admin`; **OpenAPI parity** asserts the served routes and `openapi.yaml` are the same set.
+
+Errors are typed at the boundary (`HttpError` with `status` + `code`) and rendered as `{ error: { message, code, status } }`. Domain errors (`StageRuntimeError`, `StageSettingsError`, `PrerequisiteError`, `AgentError`, `ModelSettingsError`) map to those codes in `toHttpError` rather than leaking messages.
 
 ---
 
@@ -525,7 +546,7 @@ Rules enforced in code today:
 
 Also enforced since Phase 1:
 
-- **Settings writes are admin-only**, and with `AIFACTORY_ADMIN_TOKEN` set the operator token cannot reconfigure the factory (tests: `test/auth.test.ts`, [AR-01](design/ARCHITECTURE-REMEDIATION.md#ar-01)).
+- **Authorisation is data**: every route declares `public`/`operator`/`admin` and the router enforces it, so a route cannot be added without deciding who may call it. With `AIFACTORY_ADMIN_TOKEN` set the operator token cannot reconfigure the factory (tests: `test/auth.test.ts`, [AR-01](design/ARCHITECTURE-REMEDIATION.md#ar-01)).
 - **Bearer tokens are compared in constant time** over SHA-256 digests.
 - **Agent tool allowlists fail closed**, and an unclassified harness tool row refuses a restricted agent (tests: `test/agents.test.ts`, `scripts/check-tool-rows.mjs`, [AR-05](design/ARCHITECTURE-REMEDIATION.md#ar-05)).
 - **Prerequisites accept only acceptable evidence**: `uploaded`/`in_review`/`approved` documents (newest version), and briefs from runs that did not fail ([AR-07](design/ARCHITECTURE-REMEDIATION.md#ar-07)).

@@ -157,43 +157,99 @@ test('a wrong bearer token is refused for ordinary requests too', async () => {
 
 // ---- AR-01: the inventory guard --------------------------------------
 
-test('every settings write is guarded by requireAdmin', () => {
-  // The guard has to survive refactors, so this reads the source and checks the
-  // handlers themselves rather than relying on a single call site's shape.
-  const source = readFileSync(join(ROOT, 'src/server.ts'), 'utf8')
+test('every mutating route declares a role, and admin writes are admin', async () => {
+  // The route table is the source of truth now, so this reads declarations rather
+  // than string-matching handlers (AR-14 completes AR-01's fourth part).
+  const { routeTable, isReadOnly } = await import('../src/routes/index.ts')
+  assert.ok(routeTable.length > 40, `expected a populated route table, got ${routeTable.length}`)
 
-  /** The handler block that contains `marker`, up to the next top-level guard. */
-  const blockAround = (marker: string): string => {
-    const index = source.indexOf(marker)
-    assert.ok(index >= 0, `source is missing ${marker}`)
-    const before = source.lastIndexOf('\n  if (', index)
-    const after = source.indexOf('\n  }\n', index)
-    return source.slice(before === -1 ? 0 : before, after === -1 ? source.length : after)
-  }
+  const undeclared = routeTable.filter((entry) => !['public', 'operator', 'admin'].includes(entry.auth))
+  assert.deepEqual(undeclared, [], 'every route states who may call it')
 
-  const settingsWrites: Array<[string, string]> = [
-    ['factory defaults (stage)', 'stageSettings.updateFactoryDefaults(stage, await readJson(request))'],
-    ['factory defaults (planning alias)', "stageSettings.updateFactoryDefaults('planning', await readJson(request))"],
-    ['project override set', 'stageSettings.setProject(id, stage, await readJson(request))'],
-    ['project override clear', 'stageSettings.setProject(id, stage, null)'],
+  // A public route must be deliberate: docs, the API index, a probe target.
+  const publicRoutes = routeTable.filter((entry) => entry.auth === 'public').map((entry) => `${entry.method} ${entry.pattern}`)
+  assert.deepEqual(publicRoutes.sort(), [
+    'GET /',
+    'GET /api',
+    'GET /api/health',
+    'GET /docs',
+    'GET /docs/',
+    'GET /openapi.yaml',
+  ].sort(), 'only the documented public routes are unauthenticated')
+
+  // Reconfiguration is admin-only. This is the list that must not silently gain a
+  // member with a weaker role.
+  const mustBeAdmin = [
+    'POST /api/agents',
+    'PATCH /api/agents/:agentId',
+    'DELETE /api/agents/:agentId',
+    'POST /api/agents/:agentId/test',
+    'PUT /api/stages/:stage/assignments/:process',
+    'DELETE /api/stages/:stage/assignments/:process',
+    'PATCH /api/settings',
+    'PATCH /api/settings/models',
+    'DELETE /api/settings/models',
+    'PATCH /api/settings/logging',
+    'PATCH /api/settings/stages/:stage',
+    'POST /api/settings/stages/:stage',
+    'PATCH /api/settings/stage-defaults',
+    'POST /api/stages/:stage/assignments/:process',
+    'PATCH /api/projects/:id/stages/:stage/settings',
+    'POST /api/projects/:id/stages/:stage/settings',
+    'DELETE /api/projects/:id/stages/:stage/settings',
+    'POST /api/projects/:id/stages/:stage/waivers',
+    'DELETE /api/projects/:id/stages/:stage/waivers/:key',
+    'POST /api/stage-runs/:runId/retry',
+    'PUT /api/admin/logging/level',
   ]
-  for (const [label, marker] of settingsWrites) {
-    const block = blockAround(marker)
-    assert.match(block, /requireAdmin\(request, options\)/, `${label} write must call requireAdmin`)
+  for (const key of mustBeAdmin) {
+    const entry = routeTable.find((candidate) => `${candidate.method} ${candidate.pattern}` === key)
+    assert.ok(entry !== undefined, `route ${key} is missing from the table`)
+    assert.equal(entry.auth, 'admin', `${key} must be admin-only`)
   }
 
-  // Agent and waiver writes keep their guards too.
-  for (const marker of [
-    'await agents.create(await readJson(request))',
-    'await agents.update(agentId, await readJson(request))',
-    'await agents.remove(agentId)',
-    'prerequisites.waive({',
-    'prerequisites.unwaive(',
-    'options.probeAgent(',
-  ]) {
-    assert.match(blockAround(marker), /requireAdmin\(request, options\)/, `${marker} must call requireAdmin`)
+  // No route may be both read-only and declared as a write, and every route has a
+  // unique method+pattern (compileRoutes enforces it, this states why).
+  const seen = new Set<string>()
+  for (const entry of routeTable) {
+    const key = `${entry.method} ${entry.pattern}`
+    assert.equal(seen.has(key), false, `duplicate route ${key}`)
+    seen.add(key)
+    assert.ok(isReadOnly(entry.method) || entry.auth !== 'public', `${key}: a write cannot be public`)
+  }
+})
+
+test('every served route is documented, and every documented path is served', async () => {
+  const { routeTable } = await import('../src/routes/index.ts')
+  const { readFileSync } = await import('node:fs')
+  // `js-yaml` is not a dependency of this package; load it through a tiny wrapper
+  // so the type annotation stays local instead of naming an absolute path.
+  type YamlModule = { load: (text: string) => unknown }
+  const jsYaml = await import('/fs22/deepseek-harness/node_modules/js-yaml/index.js' as string) as YamlModule
+  const load = jsYaml.load
+  const spec = load(readFileSync(new URL('../openapi.yaml', import.meta.url), 'utf8')) as {
+    paths: Record<string, Record<string, unknown>>
   }
 
-  // And the guard is not a no-op: it rejects a non-admin credential.
-  assert.match(source, /ADMIN_FORBIDDEN/)
+  /** `/api/agents/{agentId}` → `/api/agents/:agentId`, so the two can be compared. */
+  const normalise = (path: string): string => path.replace(/\{([A-Za-z0-9_]+)\}/g, ':$1')
+
+  const documented = new Set<string>()
+  for (const [path, operations] of Object.entries(spec.paths)) {
+    for (const method of Object.keys(operations)) {
+      if (['get', 'post', 'put', 'patch', 'delete', 'head', 'options'].includes(method)) {
+        documented.add(`${method.toUpperCase()} ${normalise(path)}`)
+      }
+    }
+  }
+  const served = new Set(routeTable.map((entry) => `${entry.method} ${entry.pattern}`))
+
+  // The API index and the docs assets are not part of the machine contract.
+  const notInSpec = new Set(['GET /', 'GET /docs', 'GET /docs/', 'GET /api'])
+
+  const servedNotDocumented = [...served].filter((key) => !documented.has(key) && !notInSpec.has(key)).sort()
+  const documentedNotServed = [...documented].filter((key) => !served.has(key)).sort()
+
+  assert.deepEqual(servedNotDocumented, [], 'these routes are served but missing from openapi.yaml')
+  assert.deepEqual(documentedNotServed, [], 'openapi.yaml documents routes that are not served')
 })
