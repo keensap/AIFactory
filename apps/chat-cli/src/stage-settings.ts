@@ -36,6 +36,13 @@ export interface PlanningStageSettings {
   maxBlockers: number
   /** Major findings tolerated before the run keeps revising. */
   maxMajor: number
+  /**
+   * Hours a gate may wait before it is reported as stale (AR-16).
+   *
+   * Stale is a reminder, never an action: nothing is auto-approved, because
+   * completion must stay a human decision.
+   */
+  gateReminderHours: number
 }
 
 /**
@@ -48,6 +55,7 @@ export const DEFAULT_PLANNING_STAGE_SETTINGS: PlanningStageSettings = {
   minRating: 0,
   maxBlockers: 0,
   maxMajor: 0,
+  gateReminderHours: 72,
 }
 
 export class StageSettingsError extends Error {
@@ -103,6 +111,13 @@ export function parseStageSettings(input: unknown, options: { partial?: boolean 
     }
     out.maxBlockers = value
   }
+  if (input.gateReminderHours !== undefined) {
+    const value = input.gateReminderHours
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 720) {
+      throw new StageSettingsError(400, 'INVALID_GATE_REMINDER_HOURS', 'gateReminderHours must be an integer between 1 and 720')
+    }
+    out.gateReminderHours = value
+  }
   if (input.maxMajor !== undefined) {
     const value = input.maxMajor
     if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_MAJOR_LIMIT) {
@@ -135,6 +150,7 @@ export function settingsFromContext(context: unknown): PlanningStageSettings {
     minRating: int(constraints.minRating, DEFAULT_PLANNING_STAGE_SETTINGS.minRating, 0, 100),
     maxBlockers: int(constraints.maxBlockers, DEFAULT_PLANNING_STAGE_SETTINGS.maxBlockers, 0, MAX_BLOCKERS_LIMIT),
     maxMajor: int(constraints.maxMajor, DEFAULT_PLANNING_STAGE_SETTINGS.maxMajor, 0, MAX_MAJOR_LIMIT),
+    gateReminderHours: int(constraints.gateReminderHours, DEFAULT_PLANNING_STAGE_SETTINGS.gateReminderHours, 1, 720),
   }
 }
 

@@ -216,7 +216,7 @@ test('each planning role runs with its assigned agent composition', async () => 
       harnessFactory: () => harness,
       pinModel: () => pin,
       runPrompt: undefined,
-      stageSettings: { planning: async () => ({ gateAfterEachReview: false, maxReviewCycles: 1, minRating: 0, maxBlockers: 0, maxMajor: 0 }) },
+      stageSettings: { planning: async () => ({ gateAfterEachReview: false, maxReviewCycles: 1, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72 }) },
       agents: service,
     })
     const run = await runtime.start({ projectId: project.id, stage: 'planning', brief: 'portal' })

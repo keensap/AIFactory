@@ -483,6 +483,10 @@ async function main(): Promise<void> {
         ...(profileToolRows !== undefined ? { profileToolRows } : {}),
         // Late-bound: the model runtime is created after the stage runtime.
         pinModel: () => modelRuntime?.pin(),
+        currentTarget: () => modelRuntime?.currentTarget() ?? null,
+        catalogDigest: () => modelRuntime?.catalogDigest() ?? null,
+        pinTarget: (target) => modelRuntime!.pinTarget(target),
+        modelHealth: (provider) => modelService === undefined ? Promise.resolve(null) : modelService.providerHealth(provider),
         ...(semanticIndex !== undefined
           ? { indexDocument: (project: Project, document: ProjectDocument) => semanticIndex!.indexDocument(project, document) }
           : {}),

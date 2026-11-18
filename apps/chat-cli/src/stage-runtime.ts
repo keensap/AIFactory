@@ -11,13 +11,15 @@ import { createHash, randomUUID } from 'node:crypto'
 import { access, mkdir, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { materialiseAgent } from './agent-patch.ts'
-import type { AgentComposition } from './agents.ts'
+import { STAGE_PROCESSES, type AgentComposition } from './agents.ts'
+import { ModelSettingsError } from './models/index.ts'
 import type { DshHarness } from './harness.ts'
 import { StageEventSink } from './stage-event-sink.ts'
 import { attributeUsage, roleModel, type ModelPin } from './models/index.ts'
 import { addLogContext, noopLogger, runWithLogContext, type Logger } from './logging/index.ts'
 import { noopProvider, type TraceRecorder, type TraceSpan } from './observability/index.ts'
 import type { Project, ProjectService } from './projects.ts'
+import type { StageRunBindings } from './workspace.ts'
 import type { ProjectStage } from './sdlc.ts'
 import { SDLC_STAGES, STAGE_LABELS } from './sdlc.ts'
 import { MAX_ATTACHMENTS_PER_RUN, PROMPT_CHARS_PER_ATTACHMENT, renderAttachmentPrompt, type ProjectAttachment } from './attachments.ts'
@@ -78,6 +80,18 @@ export interface StageRuntimeDeps {
   renderPdf?: typeof renderReportPdf
   /** Resolves the project's planning-stage settings (gate, cycles, acceptance). */
   stageSettings?: { planning(projectId: string): Promise<PlanningStageSettings> }
+  /** The model target in force, snapshotted into a new run (AR-06). */
+  currentTarget?: () => { provider: string; model: string; fallback: Array<{ provider: string; model: string }> } | null
+  /** Pin an explicit target instead of the current one (AR-06). */
+  pinTarget?: (target: { provider: string; model: string; fallback: Array<{ provider: string; model: string }> }) => Promise<ModelPin>
+  /** Digest of the model catalogue at start, for provenance. */
+  catalogDigest?: () => string | null
+  /** Provider health (the shared circuit breaker), so a run can fail over (AR-03). */
+  modelHealth?: (provider: string) => Promise<{
+    tryAcquire(): boolean
+    recordSuccess(): void
+    recordFailure(error: unknown): void
+  } | null>
   /** The profile's `tool-*` rows, so an allowlist can be verified (AR-05). */
   profileToolRows?: readonly string[]
   /** Refuses to start a run when the stage's prerequisites are not met. */
@@ -211,6 +225,10 @@ export class PlanningStageRuntime {
   private readonly harnessFactory: (cwd?: string, timeoutMs?: number) => DshHarness
   private readonly runPrompt?: (role: StageRole, prompt: string, cwd: string) => Promise<string>
   private readonly agents?: { composition(input: { projectId: string; stage: string; process: string }): Promise<AgentComposition | undefined> }
+  /** Frozen bindings per active run, so roles never re-resolve mid-run (AR-06). */
+  private readonly runBindings = new Map<string, StageRunBindings | null>()
+  /** The harness currently running a role, so a cancel request can abort it. */
+  private activeHarness: DshHarness | null = null
   /** Cleanup for agent patch files, so a run removes exactly what it wrote. */
   private readonly agentCleanup = new Map<string, () => Promise<void>>()
   private readonly maxReviewCycles: number
@@ -225,6 +243,14 @@ export class PlanningStageRuntime {
   private readonly pinModel?: () => ModelPin | undefined
   private readonly renderPdf: typeof renderReportPdf
   private readonly stageSettings?: { planning(projectId: string): Promise<PlanningStageSettings> }
+  private readonly currentTarget?: () => { provider: string; model: string; fallback: Array<{ provider: string; model: string }> } | null
+  private readonly pinTarget?: (target: { provider: string; model: string; fallback: Array<{ provider: string; model: string }> }) => Promise<ModelPin>
+  private readonly catalogDigest?: () => string | null
+  private readonly modelHealth?: (provider: string) => Promise<{
+    tryAcquire(): boolean
+    recordSuccess(): void
+    recordFailure(error: unknown): void
+  } | null>
   private readonly profileToolRows?: readonly string[]
   private readonly prerequisites?: {
     ensureReady(
@@ -242,6 +268,10 @@ export class PlanningStageRuntime {
     if (deps.stageSettings !== undefined) this.stageSettings = deps.stageSettings
     if (deps.prerequisites !== undefined) this.prerequisites = deps.prerequisites
     if (deps.profileToolRows !== undefined) this.profileToolRows = deps.profileToolRows
+    if (deps.currentTarget !== undefined) this.currentTarget = deps.currentTarget
+    if (deps.pinTarget !== undefined) this.pinTarget = deps.pinTarget
+    if (deps.catalogDigest !== undefined) this.catalogDigest = deps.catalogDigest
+    if (deps.modelHealth !== undefined) this.modelHealth = deps.modelHealth
     this.projects = deps.projects
     this.workspace = deps.workspace
     this.harnessFactory = deps.harnessFactory
@@ -294,6 +324,8 @@ export class PlanningStageRuntime {
         ? undefined
         : { evaluatedAt: readiness.evaluatedAt, prerequisites: readiness.prerequisites },
     )
+    // Freeze what this run uses, so a resume days later is the same run (AR-06).
+    const bindings = await this.snapshotBindings(project.id)
     const run = await this.workspace.createStageRun({
       projectId: project.id,
       stage: PLANNING_STAGE,
@@ -301,6 +333,9 @@ export class PlanningStageRuntime {
       context,
       contextHash: hashContext(context),
     })
+    if (bindings !== null) {
+      await this.workspace.updateStageRun(run.id, { bindings })
+    }
     if (attachments.length > 0) {
       await this.workspace.linkRunAttachments(run.id, attachments.map((attachment) => attachment.id))
     }
@@ -350,6 +385,7 @@ export class PlanningStageRuntime {
         minRating: resolved.minRating,
         maxBlockers: resolved.maxBlockers,
         maxMajor: resolved.maxMajor,
+        gateReminderHours: resolved.gateReminderHours ?? DEFAULT_PLANNING_STAGE_SETTINGS.gateReminderHours,
       }
     } catch (error) {
       // Settings must never stop a run; fall back to the built-in defaults.
@@ -452,6 +488,111 @@ export class PlanningStageRuntime {
   }
 
   /**
+   * The model target and per-process agents a new run will use (AR-06).
+   *
+   * Only what is configured is recorded: an unconfigured model leaves the
+   * harness profile default in force, exactly as before.
+   */
+  private async snapshotBindings(projectId: string): Promise<StageRunBindings | null> {
+    const target = this.currentTarget?.() ?? null
+    const processes = STAGE_PROCESSES[PLANNING_STAGE] ?? []
+    const agents: StageRunBindings['agents'] = {}
+    for (const process of processes) {
+      const composition = this.agents === undefined
+        ? undefined
+        : await this.agents.composition({ projectId, stage: PLANNING_STAGE, process })
+      agents[process] = composition === undefined ? null : { ...composition }
+    }
+    if (target === null && Object.values(agents).every((entry) => entry === null)) return null
+    return {
+      // null, not an empty string: "no target configured" is not a provider.
+      model: target === null
+        ? null
+        : {
+            provider: target.provider,
+            model: target.model,
+            fallback: target.fallback,
+            catalogDigest: this.catalogDigest?.() ?? null,
+          },
+      agents,
+    }
+  }
+
+  /**
+   * Adopt the current model and agents on a paused run (AR-06).
+   *
+   * The only way a run's bindings change: explicit, admin-only, and recorded with
+   * the before and after values so the review history stays explainable.
+   */
+  async rebind(runId: string): Promise<{ before: StageRunBindings | null; after: StageRunBindings | null; run: StageRunDetail }> {
+    const run = await this.requireRun(runId)
+    if (['completed', 'failed', 'cancelled'].includes(run.status)) {
+      throw new StageRuntimeError(409, 'STAGE_RUN_TERMINAL', `stage run is already ${run.status}`)
+    }
+    const before = run.bindings ?? null
+    const after = await this.snapshotBindings(run.projectId)
+    await this.workspace.updateStageRun(run.id, { bindings: after })
+    await this.appendRunEvent(run.projectId, run.id, 'run_rebound', { before, after }, 'warn')
+    this.log.info({ event: 'stage.run.rebound', runId: run.id })
+    return { before, after, run: (await this.workspace.getStageRunDetail(run.id))! }
+  }
+
+  /**
+   * Runs waiting for a human, with staleness (AR-16).
+   *
+   * A gate older than the run's own `gateReminderHours` snapshot is reported stale
+   * and gets one `gate_stale` event. Nothing is approved, rejected or cancelled
+   * automatically: completion stays a human decision.
+   */
+  async awaiting(options: { staleOnly?: boolean } = {}): Promise<Array<{
+    run: StageRunDetail
+    stale: boolean
+    waitingHours: number
+    reminderAfterHours: number
+  }>> {
+    const runs = await this.workspace.listAwaitingStageRuns()
+    const out: Array<{ run: StageRunDetail; stale: boolean; waitingHours: number; reminderAfterHours: number }> = []
+    for (const run of runs) {
+      const settings = settingsFromContext(run.context)
+      const since = run.pendingGate?.waitingSince ?? run.updatedAt
+      const waitingHours = Math.max(0, (Date.now() - Date.parse(since)) / 3_600_000)
+      const stale = waitingHours >= settings.gateReminderHours
+      if (stale && !(await this.workspace.hasStageRunEvent(run.id, 'gate_stale'))) {
+        await this.appendRunEvent(run.projectId, run.id, 'gate_stale', {
+          waitingHours: Math.round(waitingHours),
+          reminderAfterHours: settings.gateReminderHours,
+          gate: run.pendingGate?.kind ?? null,
+        }, 'warn')
+      }
+      if (options.staleOnly === true && !stale) continue
+      out.push({
+        run: (await this.workspace.getStageRunDetail(run.id))!,
+        stale,
+        waitingHours: Math.round(waitingHours * 10) / 10,
+        reminderAfterHours: settings.gateReminderHours,
+      })
+    }
+    return out
+  }
+
+  /**
+   * Ask a run to stop (AR-11).
+   *
+   * A run that is not being executed is cancelled at once. A leased run gets the
+   * request recorded; its owner aborts at the next heartbeat and ends it
+   * `cancelled`. Nothing is left paused: a gate is cleared either way.
+   */
+  async cancel(runId: string, reason?: string): Promise<StageRunDetail> {
+    const run = await this.requireRun(runId)
+    const updated = await this.workspace.requestCancel(run.id, reason?.trim() === '' ? null : reason?.trim() ?? null)
+    if (updated.status === 'cancelled') {
+      await this.appendRunEvent(run.projectId, run.id, 'run_cancelled', { reason: reason ?? null }, 'info')
+      this.log.info({ event: 'stage.run.cancelled', runId: run.id, reason: reason ?? null })
+    }
+    return this.get(run.id)
+  }
+
+  /**
    * Retry a failed run (AR-04). The stored analysis and draft are kept, so the
    * runtime resumes from the last completed phase instead of paying for it again.
    * Explicit and audited: never automatic.
@@ -517,6 +658,7 @@ export class PlanningStageRuntime {
 
     this.log.info({ event: 'stage.run.claimed', workerId: this.workerId, executionAttempt: claimed.executionAttempts })
     let leaseLost = false
+    let cancelRequested = false
     const heartbeat = setInterval(() => {
       void (async () => {
         try {
@@ -524,6 +666,13 @@ export class PlanningStageRuntime {
           if (!renewed) {
             leaseLost = true
             this.log.warn({ event: 'stage.run.lease_lost', workerId: this.workerId })
+          }
+          // A stop was requested (AR-11). Abort the role in flight rather than
+          // waiting for it: the operator asked for it to end now.
+          if (!cancelRequested && await this.workspace.isCancelRequested(run.id)) {
+            cancelRequested = true
+            this.log.info({ event: 'stage.run.cancel_requested', workerId: this.workerId })
+            this.activeHarness?.cancel()
           }
         } catch (error) {
           leaseLost = true
@@ -546,7 +695,13 @@ export class PlanningStageRuntime {
     try {
       const project = await this.projects.get(run.projectId)
       await assertProjectRoot(project)
-      const pin = this.pinModel?.()
+      const bound = claimed.bindings ?? null
+      this.runBindings.set(claimed.id, bound)
+      // A resume uses the model the run started with, not today's target (AR-06).
+      const target = bound?.model ?? null
+      const pin = target !== null && this.pinTarget !== undefined
+        ? await this.pinTarget({ provider: target.provider, model: target.model, fallback: target.fallback })
+        : this.pinModel?.()
       if (pin !== undefined) {
         this.pins.set(run.id, pin)
         this.log.info({
@@ -579,6 +734,9 @@ export class PlanningStageRuntime {
           if (leaseLost) {
             throw new StageRuntimeError(409, 'STAGE_RUN_LEASE_LOST', 'worker lease was lost; another worker may own the run')
           }
+          if (cancelRequested) {
+            throw new StageRuntimeError(409, 'STAGE_RUN_CANCELLED', 'the run was cancelled while it was executing')
+          }
         },
         update: async (patch: StageRunPatch) => {
           const next = await this.workspace.updateStageRun(run.id, patch)
@@ -607,6 +765,29 @@ export class PlanningStageRuntime {
       runSpan?.recordException(error instanceof Error ? error : new Error(String(error)))
       runSpan?.setStatus('error', error instanceof Error ? error.message : String(error))
       const message = error instanceof Error ? error.message : String(error)
+      if (cancelRequested) {
+        // A cancellation is not a failure: the operator asked for it.
+        await this.workspace.updateStageRun(run.id, {
+          status: 'cancelled',
+          pendingGate: null,
+        }).catch(() => {})
+        await this.appendRunEvent(run.projectId, run.id, 'run_cancelled', { reason: message }, 'info').catch(() => {})
+        this.log.info({ event: 'stage.run.cancelled', runId: run.id })
+        throw new StageRuntimeError(409, 'STAGE_RUN_CANCELLED', 'the run was cancelled')
+      }
+      if (error instanceof ModelSettingsError && error.code === 'MODEL_BINDING_UNAVAILABLE') {
+        if (checkpoint !== null) {
+          await this.workspace.updateStageRun(run.id, {
+            status: checkpoint.status,
+            pendingGate: checkpoint.pendingGate,
+            draftMarkdown: checkpoint.draftMarkdown,
+            reviewCycles: checkpoint.reviewCycles,
+            summaryMarkdown: checkpoint.summaryMarkdown,
+          } as StageRunPatch).catch(() => {})
+        }
+        this.log.error({ event: 'stage.run.binding_unavailable', runId: run.id, err: error })
+        throw error
+      }
       if (checkpoint !== null) {
         // Put the run back where the operator left it: same gate, same draft.
         // Losing an approvable draft to a transient error is the most expensive
@@ -629,6 +810,7 @@ export class PlanningStageRuntime {
       }).catch(() => {})
       throw error
     } finally {
+      this.runBindings.delete(run.id)
       this.pins.get(run.id)?.release()
       this.pins.delete(run.id)
       runSpan?.end()
@@ -924,9 +1106,14 @@ export class PlanningStageRuntime {
       logger: this.log.child({ component: 'stage-event-sink' }),
     })
     const pin = this.pins.get(runId)
-    const composition = this.agents === undefined
-      ? undefined
-      : await this.agents.composition({ projectId, stage: PLANNING_STAGE, process: role })
+    // A bound run uses exactly what it started with: an agent assigned later must
+    // not join a run mid-flight, and an agent removed later must not vanish.
+    const bound = this.runBindings.get(runId)
+    const composition = bound !== undefined && bound !== null
+      ? (bound.agents[role] ?? undefined)
+      : this.agents === undefined
+        ? undefined
+        : await this.agents.composition({ projectId, stage: PLANNING_STAGE, process: role })
     // An agent may run a different model from the Factory target. Price and
     // measure this role as the model that actually ran (AR-02), never as another's.
     const attribution = pin === undefined
@@ -957,30 +1144,95 @@ export class PlanningStageRuntime {
         this.traces.completeRole(roleSpan, text)
         return text
       }
-      if (composition !== undefined) {
-        agentPatch = await this.writeAgentPatch(cwd, composition, pin)
+
+      // The primary attempt uses the run's pin; a fallback gets its own (AR-03).
+      const candidates = this.candidatesFor(runId)
+      let lastError: unknown = null
+      for (const [index, candidate] of candidates.entries()) {
+        const isPrimary = index === 0
+        let attemptPin: ModelPin | undefined = isPrimary ? pin : undefined
+        let temporaryPin: ModelPin | undefined
+        const health = this.modelHealth === undefined ? null : await this.modelHealth(candidate.provider)
+        if (health !== null && !health.tryAcquire()) {
+          await sink.append('role_fallback_skipped', {
+            role,
+            provider: candidate.provider,
+            model: candidate.model,
+            reason: 'breaker_open',
+          }, 'warn')
+          this.log.warn({ event: 'stage.role.fallback_skipped', role, provider: candidate.provider })
+          continue
+        }
+
+        try {
+          if (!isPrimary) {
+            temporaryPin = await this.pinTargetFor(candidate)
+            attemptPin = temporaryPin
+          }
+          const attemptAttribution = attemptPin === undefined
+            ? null
+            : (attemptPin.attributionFor?.(composition?.model ?? undefined) ?? attemptPin.attribution)
+          if (agentPatch === null && composition !== undefined) {
+            agentPatch = await this.writeAgentPatch(cwd, composition, attemptPin)
+          }
+          const harness = attemptPin !== undefined
+            ? attemptPin.harness(cwd, this.roleTimeoutMs, agentPatch)
+            : this.harnessFactory(cwd, this.roleTimeoutMs)
+          this.activeHarness = harness
+          const result = await harness.run(prompt, {
+            onEvent: (event) => {
+              const phase = 'phase' in event && typeof event.phase === 'string' ? event.phase : null
+              // Usage is stamped with the model that actually ran and the price in
+              // force for it, so a fallback is never billed as the primary.
+              void sink.append(event.type, attributeUsage(event, attemptAttribution), phase)
+              this.traces.recordHarnessEvent(roleSpan, event)
+            },
+          })
+          health?.recordSuccess()
+          await sink.append('role_end', {
+            role,
+            durationMs: Date.now() - started,
+            textLength: result.text.length,
+            ...(result.stderr === '' ? {} : { stderr: result.stderr.slice(0, 8_000) }),
+            ...(isPrimary ? {} : { model: roleModel(attemptAttribution), fallback: true }),
+          })
+          this.log.info({
+            event: 'stage.role.completed',
+            role,
+            durationMs: Date.now() - started,
+            textLength: result.text.length,
+            fallback: !isPrimary,
+          })
+          this.traces.completeRole(roleSpan, result.text)
+          return result.text
+        } catch (error) {
+          lastError = error
+          const message = error instanceof Error ? error.message : String(error)
+          const classified = classifyHarnessError(message)
+          health?.recordFailure(error)
+          const next = candidates[index + 1]
+          if (!classified.retryable || next === undefined) {
+            throw error
+          }
+          await sink.append('role_fallback', {
+            role,
+            from: { provider: candidate.provider, model: candidate.model },
+            to: { provider: next.provider, model: next.model },
+            kind: classified.kind,
+            message: message.slice(0, 500),
+          }, 'warn')
+          this.log.warn({
+            event: 'stage.role.fallback',
+            role,
+            from: candidate.provider,
+            to: next.provider,
+            kind: classified.kind,
+          })
+        } finally {
+          temporaryPin?.release()
+        }
       }
-      const harness = pin !== undefined
-        ? pin.harness(cwd, this.roleTimeoutMs, agentPatch)
-        : this.harnessFactory(cwd, this.roleTimeoutMs)
-      const result = await harness.run(prompt, {
-        onEvent: (event) => {
-          const phase = 'phase' in event && typeof event.phase === 'string' ? event.phase : null
-          // Usage events are stamped with the pinned model and the cost at the
-          // price in force when the run started.
-          void sink.append(event.type, attributeUsage(event, attribution), phase)
-          this.traces.recordHarnessEvent(roleSpan, event)
-        },
-      })
-      await sink.append('role_end', {
-        role,
-        durationMs: Date.now() - started,
-        textLength: result.text.length,
-        ...(result.stderr === '' ? {} : { stderr: result.stderr.slice(0, 8_000) }),
-      })
-      this.log.info({ event: 'stage.role.completed', role, durationMs: Date.now() - started, textLength: result.text.length })
-      this.traces.completeRole(roleSpan, result.text)
-      return result.text
+      throw lastError ?? new Error('no model candidate was available')
     } catch (error) {
       this.traces.failRole(roleSpan, error)
       const message = error instanceof Error ? error.message : String(error)
@@ -992,14 +1244,37 @@ export class PlanningStageRuntime {
       this.log.error({ event: 'stage.role.failed', role, durationMs: Date.now() - started, err: error })
       throw new StageRuntimeError(502, 'STAGE_ROLE_FAILED', `${role} failed: ${message}`)
     } finally {
+      this.activeHarness = null
       if (agentPatch !== null) {
         const cleanup = this.agentCleanup.get(agentPatch)
         this.agentCleanup.delete(agentPatch)
         if (cleanup !== undefined) await cleanup()
         else await rm(agentPatch, { force: true }).catch(() => {})
       }
-      await sink.flush()
+}
+  }
+
+  /**
+   * The model candidates for a run, primary first (AR-03).
+   *
+   * A bound run has its own chain; without a target there is one implicit
+   * candidate (the harness profile default) and nothing to fall back to.
+   */
+  private candidatesFor(runId: string): Array<{ provider: string; model: string }> {
+    const bound = this.runBindings.get(runId)
+    const target = bound?.model ?? null
+    if (target === null) {
+      const current = this.currentTarget?.() ?? null
+      if (current === null) return [{ provider: '', model: '' }]
+      return [{ provider: current.provider, model: current.model }, ...current.fallback]
     }
+    return [{ provider: target.provider, model: target.model }, ...target.fallback]
+  }
+
+  /** Pin a fallback candidate for one attempt. */
+  private async pinTargetFor(candidate: { provider: string; model: string }): Promise<ModelPin | undefined> {
+    if (candidate.provider === '' || this.pinTarget === undefined) return undefined
+    return this.pinTarget({ provider: candidate.provider, model: candidate.model, fallback: [] })
   }
 
   /** Materialise an agent's composition for one role run. */
@@ -1479,3 +1754,23 @@ ${review === undefined ? '- none' : review.findings.length === 0 ? '- none' : re
 
 /** Re-exported for route validation and tests. */
 export { SDLC_STAGES }
+
+/**
+ * Classify a harness failure for failover (AR-03).
+ *
+ * The harness reports a structured code for its own errors but a plain message
+ * for transport and provider failures, so this reads what is available. Only
+ * failures another model could plausibly avoid are retryable: an abort or a
+ * content filter is a decision, not an outage.
+ */
+export function classifyHarnessError(message: string): { kind: string; retryable: boolean } {
+  if (/cancel|abort/i.test(message)) return { kind: 'aborted', retryable: false }
+  if (/content.?filter|refus/i.test(message)) return { kind: 'content_filter', retryable: false }
+  if (/MISSING_CREDENTIAL|no API key|cannot start/i.test(message)) return { kind: 'unconfigured', retryable: true }
+  if (/RATE_LIMIT|429|quota/i.test(message)) return { kind: 'rate_limited', retryable: true }
+  if (/TIMEOUT|timed out/i.test(message)) return { kind: 'timeout', retryable: true }
+  if (/TRANSPORT|ECONN|ENOTFOUND|EAI_AGAIN|socket|connection|HTTP 5\d\d/i.test(message)) {
+    return { kind: 'unavailable', retryable: true }
+  }
+  return { kind: 'unknown', retryable: true }
+}

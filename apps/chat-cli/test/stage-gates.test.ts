@@ -22,7 +22,7 @@ const REVIEWS = {
 
 /** Settings with every field filled; the tests only vary the gating knobs. */
 const withSettings = (overrides: Partial<PlanningStageSettings>): PlanningStageSettings => ({
-  gateAfterEachReview: false, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, ...overrides,
+  gateAfterEachReview: false, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72, ...overrides,
 })
 
 interface Script {

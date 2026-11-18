@@ -187,6 +187,20 @@ export const stageRunRoutes: RouteDef[] = [
   }, 'createStageRun'),
 
   // ---- reading a run --------------------------------------------------
+  // A collection route: `/api/stage-runs?awaiting=1[&staleOnly=1]`.
+  route('GET', '/api/stage-runs', 'operator', async ({ url, response, options }) => {
+    const runtime = requireRuntime(options)
+    if (url.searchParams.get('awaiting') !== '1' && url.searchParams.get('awaiting') !== 'true') {
+      throw new HttpError(
+        400,
+        'list the runs of a project at /api/projects/:id/stages/:stage/runs, or pass awaiting=1 for gates waiting on a human',
+        'INVALID_RUN_QUERY',
+      )
+    }
+    const staleOnly = ['1', 'true'].includes(url.searchParams.get('staleOnly') ?? '')
+    sendJson(response, 200, { runs: await runtime.awaiting({ staleOnly }) })
+  }, 'listAwaitingStageRuns'),
+
   route('GET', '/api/stage-runs/:runId', 'operator', async ({ params, response, options }) => {
     sendJson(response, 200, { run: await requireRuntime(options).get(requiredParam(params, 'runId')) })
   }, 'getStageRun'),
@@ -253,6 +267,24 @@ export const stageRunRoutes: RouteDef[] = [
     }
     sendJson(response, 200, { run: await runtime.answerGate(requiredParam(params, 'runId'), record.action) })
   }, 'answerStageGate'),
+
+  route('POST', '/api/stage-runs/:runId/cancel', 'operator', async ({ request, params, response, options }) => {
+    const runtime = requireRuntime(options)
+    // The body is optional: cancelling is the request.
+    const body = await readJson(request).catch(() => ({}))
+    const record = body !== null && typeof body === 'object' ? body as Record<string, unknown> : {}
+    sendJson(response, 200, {
+      run: await runtime.cancel(
+        requiredParam(params, 'runId'),
+        typeof record.reason === 'string' ? record.reason : undefined,
+      ),
+    })
+  }, 'cancelStageRun'),
+
+  route('POST', '/api/stage-runs/:runId/rebind', 'admin', async ({ params, response, options }) => {
+    // The only way a paused run adopts the current model and agents (AR-06).
+    sendJson(response, 200, await requireRuntime(options).rebind(requiredParam(params, 'runId')))
+  }, 'rebindStageRun'),
 
   route('POST', '/api/stage-runs/:runId/retry', 'admin', async ({ params, response, options }) => {
     // Explicit retry of a failed run: it resumes from stored analysis and draft (AR-04).

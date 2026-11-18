@@ -150,6 +150,37 @@ export interface PendingGate {
   waitingSince: string
 }
 
+/**
+ * What a run froze when it started (AR-06).
+ *
+ * The model target - including its fallback chain - and the agent assigned to
+ * each process. A paused run resumes with these, not with whatever the settings
+ * say by then, so a document is never drafted by one model and reviewed by
+ * another by accident.
+ */
+export interface StageRunBindings {
+  /**
+   * The model target at start, or null when none was configured and the harness
+   * profile default applied - which is a different fact from "the default is X".
+   */
+  model: {
+    provider: string
+    model: string
+    fallback: Array<{ provider: string; model: string }>
+    /** Catalogue digest, so a price or window change is detectable. */
+    catalogDigest: string | null
+  } | null
+  agents: Record<string, {
+    id: string
+    name: string
+    persona: string | null
+    model: string | null
+    reasoningEffort: string | null
+    tools: string[]
+    skills: Array<{ name: string; description: string; instructions: string }>
+  } | null>
+}
+
 export interface StageRun {
   id: string
   projectId: string
@@ -167,6 +198,15 @@ export interface StageRun {
   pendingGate: PendingGate | null
   /** Revision cycles applied so far (counted after the first review). */
   reviewCycles: number
+  /**
+   * What the run froze at start: the model target and each process's agent.
+   * Null for runs created before bindings existed.
+   */
+  bindings: StageRunBindings | null
+  /** Set when a stop was requested; the lease owner aborts at its next heartbeat. */
+  cancelRequestedAt: string | null
+  /** Why the stop was requested. */
+  cancelReason: string | null
   startedAt: string | null
   completedAt: string | null
   lockedBy: string | null
@@ -225,6 +265,8 @@ export interface StageRunDetail extends StageRun {
 
 export interface StageRunPatch {
   pendingGate?: PendingGate | null
+  bindings?: StageRunBindings | null
+  cancelRequestedAt?: string | null
   reviewCycles?: number
   status?: StageRunStatus
   sessionId?: string | null
@@ -830,6 +872,7 @@ export class PostgresProjectWorkspace {
                  input_text AS "inputText", analysis_markdown AS "analysisMarkdown",
                  draft_markdown AS "draftMarkdown", summary_markdown AS "summaryMarkdown",
               pending_gate AS "pendingGate", review_cycles AS "reviewCycles",
+              bindings, cancel_requested_at AS "cancelRequestedAt", cancel_reason AS "cancelReason",
                  started_at AS "startedAt", completed_at AS "completedAt",
                  locked_by AS "lockedBy", lease_expires_at AS "leaseExpiresAt",
                  execution_attempts AS "executionAttempts",
@@ -853,6 +896,7 @@ export class PostgresProjectWorkspace {
               input_text AS "inputText", analysis_markdown AS "analysisMarkdown",
               draft_markdown AS "draftMarkdown", summary_markdown AS "summaryMarkdown",
               pending_gate AS "pendingGate", review_cycles AS "reviewCycles",
+              bindings, cancel_requested_at AS "cancelRequestedAt", cancel_reason AS "cancelReason",
               started_at AS "startedAt", completed_at AS "completedAt",
               locked_by AS "lockedBy", lease_expires_at AS "leaseExpiresAt",
               execution_attempts AS "executionAttempts",
@@ -870,6 +914,7 @@ export class PostgresProjectWorkspace {
               input_text AS "inputText", analysis_markdown AS "analysisMarkdown",
               draft_markdown AS "draftMarkdown", summary_markdown AS "summaryMarkdown",
               pending_gate AS "pendingGate", review_cycles AS "reviewCycles",
+              bindings, cancel_requested_at AS "cancelRequestedAt", cancel_reason AS "cancelReason",
               started_at AS "startedAt", completed_at AS "completedAt",
               locked_by AS "lockedBy", lease_expires_at AS "leaseExpiresAt",
               execution_attempts AS "executionAttempts",
@@ -903,6 +948,7 @@ export class PostgresProjectWorkspace {
                  input_text AS "inputText", analysis_markdown AS "analysisMarkdown",
                  draft_markdown AS "draftMarkdown", summary_markdown AS "summaryMarkdown",
               pending_gate AS "pendingGate", review_cycles AS "reviewCycles",
+              bindings, cancel_requested_at AS "cancelRequestedAt", cancel_reason AS "cancelReason",
                  started_at AS "startedAt", completed_at AS "completedAt",
                  locked_by AS "lockedBy", lease_expires_at AS "leaseExpiresAt",
                  execution_attempts AS "executionAttempts",
@@ -1003,6 +1049,106 @@ ${message}`
     return recovered.length
   }
 
+  /**
+   * Ask a run to stop (AR-11).
+   *
+   * A leased run cannot be switched off from outside: the owner aborts at its next
+   * heartbeat. A run that is not leased is cancelled immediately.
+   */
+  async requestCancel(runId: string, reason: string | null = null): Promise<StageRun> {
+    const run = await this.getStageRun(runId)
+    if (run === undefined) throw new WorkspaceError(404, 'STAGE_RUN_NOT_FOUND', 'stage run not found')
+    if (['completed', 'failed', 'cancelled'].includes(run.status)) {
+      throw new WorkspaceError(409, 'STAGE_RUN_TERMINAL', `stage run is already ${run.status}`)
+    }
+    const leased = run.lockedBy !== null
+      && run.leaseExpiresAt !== null
+      && Date.parse(run.leaseExpiresAt) > Date.now()
+    if (!leased) {
+      // Nobody is running it, so the request is the action.
+      // The reason must survive the immediate path too, not only the leased one.
+      const result = await this.pool.query<StageRunRow>(
+        `UPDATE project_stage_runs
+         SET status = 'cancelled', pending_gate = NULL, completed_at = COALESCE(completed_at, now()),
+             cancel_requested_at = now(), cancel_reason = $2, updated_at = now(),
+             locked_by = NULL, lease_expires_at = NULL
+         WHERE id = $1
+         RETURNING id, project_id AS "projectId", stage, attempt, session_id AS "sessionId",
+                   status, context_hash AS "contextHash", context_json AS "context",
+                   input_text AS "inputText", analysis_markdown AS "analysisMarkdown",
+                   draft_markdown AS "draftMarkdown", summary_markdown AS "summaryMarkdown",
+                   pending_gate AS "pendingGate", review_cycles AS "reviewCycles",
+                   bindings, cancel_requested_at AS "cancelRequestedAt", cancel_reason AS "cancelReason",
+                   started_at AS "startedAt", completed_at AS "completedAt",
+                   locked_by AS "lockedBy", lease_expires_at AS "leaseExpiresAt",
+                   execution_attempts AS "executionAttempts",
+                   created_at AS "createdAt", updated_at AS "updatedAt"`,
+        [runId, reason],
+      )
+      return mapStageRun(result.rows[0]!)
+    }
+    const result = await this.pool.query<StageRunRow>(
+      `UPDATE project_stage_runs
+       SET cancel_requested_at = now(), cancel_reason = COALESCE($2, cancel_reason), updated_at = now()
+       WHERE id = $1
+       RETURNING id, project_id AS "projectId", stage, attempt, session_id AS "sessionId",
+                 status, context_hash AS "contextHash", context_json AS "context",
+                 input_text AS "inputText", analysis_markdown AS "analysisMarkdown",
+                 draft_markdown AS "draftMarkdown", summary_markdown AS "summaryMarkdown",
+                 pending_gate AS "pendingGate", review_cycles AS "reviewCycles",
+                 bindings, cancel_requested_at AS "cancelRequestedAt", cancel_reason AS "cancelReason",
+                 started_at AS "startedAt", completed_at AS "completedAt",
+                 locked_by AS "lockedBy", lease_expires_at AS "leaseExpiresAt",
+                 execution_attempts AS "executionAttempts",
+                 created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [runId, reason],
+    )
+    return mapStageRun(result.rows[0]!)
+  }
+
+  /**
+   * Every run waiting for a human, oldest first.
+   *
+   * Staleness is computed by the caller from each run's own snapshot, so a run is
+   * judged by the reminder window it started with (AR-16).
+   */
+  async listAwaitingStageRuns(): Promise<StageRun[]> {
+    const result = await this.pool.query<StageRunRow>(
+      `SELECT id, project_id AS "projectId", stage, attempt, session_id AS "sessionId",
+              status, context_hash AS "contextHash", context_json AS "context",
+              input_text AS "inputText", analysis_markdown AS "analysisMarkdown",
+              draft_markdown AS "draftMarkdown", summary_markdown AS "summaryMarkdown",
+              pending_gate AS "pendingGate", review_cycles AS "reviewCycles",
+              bindings, cancel_requested_at AS "cancelRequestedAt", cancel_reason AS "cancelReason",
+              started_at AS "startedAt", completed_at AS "completedAt",
+              locked_by AS "lockedBy", lease_expires_at AS "leaseExpiresAt",
+              execution_attempts AS "executionAttempts",
+              created_at AS "createdAt", updated_at AS "updatedAt"
+       FROM project_stage_runs
+       WHERE status = 'awaiting_human'
+       ORDER BY updated_at ASC`,
+    )
+    return result.rows.map(mapStageRun)
+  }
+
+  /** Whether a run already recorded an event of this type (used to de-duplicate reminders). */
+  async hasStageRunEvent(runId: string, type: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `SELECT 1 FROM stage_run_events WHERE stage_run_id = $1 AND type = $2 LIMIT 1`,
+      [runId, type],
+    )
+    return (result.rowCount ?? 0) > 0
+  }
+
+  /** Whether a stop has been requested for this run. */
+  async isCancelRequested(runId: string): Promise<boolean> {
+    const result = await this.pool.query<{ requested: boolean }>(
+      `SELECT cancel_requested_at IS NOT NULL AS requested FROM project_stage_runs WHERE id = $1`,
+      [runId],
+    )
+    return result.rows[0]?.requested === true
+  }
+
   async updateStageRun(runId: string, patch: StageRunPatch): Promise<StageRun> {
     if (patch.status !== undefined && !STAGE_RUN_STATUSES.includes(patch.status)) {
       throw new WorkspaceError(400, 'INVALID_STAGE_RUN_STATUS', 'invalid stage run status')
@@ -1042,6 +1188,14 @@ ${message}`
       values.push(patch.pendingGate === null ? null : JSON.stringify(patch.pendingGate))
       fields.push(`pending_gate = $${values.length}::jsonb`)
     }
+    if (patch.bindings !== undefined) {
+      values.push(patch.bindings === null ? null : JSON.stringify(patch.bindings))
+      fields.push(`bindings = $${values.length}::jsonb`)
+    }
+    if (patch.cancelRequestedAt !== undefined) {
+      values.push(patch.cancelRequestedAt)
+      fields.push(`cancel_requested_at = $${values.length}`)
+    }
     if (patch.reviewCycles !== undefined) {
       values.push(patch.reviewCycles)
       fields.push(`review_cycles = $${values.length}`)
@@ -1059,6 +1213,7 @@ ${message}`
                  input_text AS "inputText", analysis_markdown AS "analysisMarkdown",
                  draft_markdown AS "draftMarkdown", summary_markdown AS "summaryMarkdown",
               pending_gate AS "pendingGate", review_cycles AS "reviewCycles",
+              bindings, cancel_requested_at AS "cancelRequestedAt", cancel_reason AS "cancelReason",
                  started_at AS "startedAt", completed_at AS "completedAt",
                  locked_by AS "lockedBy", lease_expires_at AS "leaseExpiresAt",
                  execution_attempts AS "executionAttempts",
@@ -1594,6 +1749,9 @@ interface StageRunRow {
   summaryMarkdown: string | null
   pendingGate: PendingGate | null
   reviewCycles: number
+  bindings: StageRunBindings | null
+  cancelRequestedAt: Date | string | null
+  cancelReason: string | null
   startedAt: Date | string | null
   completedAt: Date | string | null
   lockedBy: string | null
@@ -1727,6 +1885,9 @@ function mapStageRun(row: StageRunRow): StageRun {
     summaryMarkdown: row.summaryMarkdown,
     pendingGate: row.pendingGate ?? null,
     reviewCycles: row.reviewCycles ?? 0,
+    bindings: (row.bindings ?? null) as StageRunBindings | null,
+    cancelRequestedAt: toIsoOrNull(row.cancelRequestedAt),
+    cancelReason: row.cancelReason ?? null,
     startedAt: toIsoOrNull(row.startedAt),
     completedAt: toIsoOrNull(row.completedAt),
     lockedBy: row.lockedBy,

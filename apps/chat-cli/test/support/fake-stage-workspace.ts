@@ -68,6 +68,7 @@ export function fakeWorkspace(): PostgresProjectWorkspace {
         context: input.context, inputText: input.inputText ?? null,
         analysisMarkdown: null, draftMarkdown: null, summaryMarkdown: null,
         pendingGate: null, reviewCycles: 0,
+        bindings: null, cancelRequestedAt: null, cancelReason: null,
         startedAt: null, completedAt: null, lockedBy: null, leaseExpiresAt: null,
         executionAttempts: 0, createdAt: now, updatedAt: now,
       }
@@ -91,6 +92,37 @@ export function fakeWorkspace(): PostgresProjectWorkspace {
     async releaseStageRun(runId: string) {
       const run = runs.get(runId)
       if (run !== undefined) runs.set(runId, { ...run, lockedBy: null, leaseExpiresAt: null })
+    },
+    async requestCancel(runId: string, reason: string | null = null) {
+      const run = runs.get(runId)
+      if (run === undefined) throw new Error('stage run not found')
+      if (['completed', 'failed', 'cancelled'].includes(run.status)) {
+        throw Object.assign(new Error(`stage run is already ${run.status}`), { code: 'STAGE_RUN_TERMINAL' })
+      }
+      const leased = run.lockedBy !== null
+        && run.leaseExpiresAt !== null
+        && Date.parse(run.leaseExpiresAt) > Date.now()
+      const next: StageRun = leased
+        ? { ...run, cancelRequestedAt: new Date().toISOString(), cancelReason: reason }
+        : {
+            ...run,
+            status: 'cancelled',
+            pendingGate: null,
+            completedAt: run.completedAt ?? new Date().toISOString(),
+            cancelRequestedAt: new Date().toISOString(),
+            cancelReason: reason,
+          }
+      runs.set(runId, next)
+      return next
+    },
+    async isCancelRequested(runId: string) {
+      return runs.get(runId)?.cancelRequestedAt !== null && runs.get(runId)?.cancelRequestedAt !== undefined
+    },
+    async listAwaitingStageRuns() {
+      return [...runs.values()].filter((run) => run.status === 'awaiting_human')
+    },
+    async hasStageRunEvent(runId: string, type: string) {
+      return events.some((event) => event.stageRunId === runId && event.type === type)
     },
     async updateStageRun(runId: string, patch: Partial<StageRun>) {
       const run = runs.get(runId)!
@@ -130,6 +162,9 @@ export function fakeWorkspace(): PostgresProjectWorkspace {
             ...run,
             status: 'completed',
             pendingGate: null,
+          bindings: null,
+          cancelRequestedAt: null,
+          cancelReason: null,
             summaryMarkdown: input.completeRun.summaryMarkdown,
             completedAt: new Date().toISOString(),
             lockedBy: null,

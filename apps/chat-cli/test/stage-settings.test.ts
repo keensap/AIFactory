@@ -35,12 +35,12 @@ test('factory defaults apply until a project overrides them', { skip }, async ()
   const t = await setup()
   try {
     const defaults = await t.service.factoryDefaults()
-    assert.deepEqual(defaults.planning, { gateAfterEachReview: false, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0 })
+    assert.deepEqual(defaults.planning, { gateAfterEachReview: false, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72 })
     assert.deepEqual(defaults.design, {}, 'stages without a runtime have no settings yet')
     assert.deepEqual(Object.keys(defaults).sort(), ['architecture', 'deployment', 'design', 'development', 'maintenance', 'planning', 'requirements', 'testing'])
 
     const updated = await t.service.updateFactoryDefaults('planning', { maxReviewCycles: 5 })
-    assert.deepEqual(updated, { gateAfterEachReview: false, maxReviewCycles: 5, minRating: 0, maxBlockers: 0, maxMajor: 0 })
+    assert.deepEqual(updated, { gateAfterEachReview: false, maxReviewCycles: 5, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72 })
     const fromFactory = await t.service.resolve(t.project.id, 'planning')
     assert.equal(fromFactory.source, 'factory')
     assert.equal(fromFactory.settings.maxReviewCycles, 5)
@@ -64,10 +64,10 @@ test('the acceptance criteria round-trip through Factory and project settings', 
   const t = await setup()
   try {
     const updated = await t.service.updateFactoryDefaults('planning', { minRating: 95, maxBlockers: 0, maxMajor: 1 })
-    assert.deepEqual(updated, { gateAfterEachReview: false, maxReviewCycles: 3, minRating: 95, maxBlockers: 0, maxMajor: 1 })
+    assert.deepEqual(updated, { gateAfterEachReview: false, maxReviewCycles: 3, minRating: 95, maxBlockers: 0, maxMajor: 1, gateReminderHours: 72 })
 
     const project = await t.service.setProject(t.project.id, 'planning', { minRating: 90, maxMajor: 2 })
-    assert.deepEqual(project.settings, { gateAfterEachReview: false, maxReviewCycles: 3, minRating: 90, maxBlockers: 0, maxMajor: 2 })
+    assert.deepEqual(project.settings, { gateAfterEachReview: false, maxReviewCycles: 3, minRating: 90, maxBlockers: 0, maxMajor: 2, gateReminderHours: 72 })
     assert.equal(project.source, 'project')
 
     await t.service.updateFactoryDefaults('planning', { minRating: 0, maxBlockers: 0, maxMajor: 0 })
@@ -111,7 +111,7 @@ test('corrupt stored defaults fall back instead of breaking every run', { skip }
       await pool.query(`INSERT INTO settings (key, value) VALUES ('stage_defaults', '"not an object"'::jsonb)
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`)
       assert.deepEqual((await t.service.factoryDefaults()).planning, {
-        gateAfterEachReview: false, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0,
+        gateAfterEachReview: false, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72,
       })
     } finally {
       await pool.end()

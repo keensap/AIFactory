@@ -2536,6 +2536,90 @@ paths:
         '502':
           $ref: '#/components/responses/HarnessError'
 
+  /api/stage-runs:
+    get:
+      tags: [stage-runs]
+      summary: Runs waiting for a human decision
+      description: Staleness is judged by each run's own gateReminderHours snapshot; a stale gate gets one gate_stale event and is never auto-approved.
+      parameters:
+        - {name: awaiting, in: query, required: true, schema: {type: string, enum: ['1', 'true']}}
+        - {name: staleOnly, in: query, required: false, schema: {type: string, enum: ['1', 'true']}}
+      responses:
+        '200':
+          description: Awaiting runs with their waiting time
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        run: {$ref: '#/components/schemas/StageRunDetail'}
+                        stale: {type: boolean}
+                        waitingHours: {type: number}
+                        reminderAfterHours: {type: integer}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/stage-runs/{runId}/cancel:
+    post:
+      tags: [stage-runs]
+      summary: Ask a run to stop
+      description: A run that is not executing is cancelled at once; a leased run aborts at its next heartbeat and ends as cancelled.
+      parameters:
+        - {name: runId, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: {type: string}
+      responses:
+        '200':
+          description: The run after the request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run: {$ref: '#/components/schemas/StageRunDetail'}
+        '409':
+          description: STAGE_RUN_TERMINAL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/stage-runs/{runId}/rebind:
+    post:
+      tags: [stage-runs]
+      summary: Adopt the current model and agents on a paused run (admin)
+      description: The only way a run's bindings change. Records run_rebound with the before and after values.
+      parameters:
+        - {name: runId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Bindings before and after
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  before: {type: [object, 'null']}
+                  after: {type: [object, 'null']}
+                  run: {$ref: '#/components/schemas/StageRunDetail'}
+        '403':
+          description: ADMIN_FORBIDDEN
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/stage-runs/{runId}/retry:
     post:
       tags: [stage-runs]

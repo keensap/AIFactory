@@ -12,7 +12,7 @@ import { MemoryProjectStore } from './support/memory-project-store.ts'
 import { MemorySettingsStore } from './support/memory-settings-store.ts'
 
 /** The example from the request: 5 autonomous iterations, rating 95, 0 blockers, 1 major. */
-const EXAMPLE: PlanningStageSettings = { gateAfterEachReview: false, maxReviewCycles: 5, minRating: 95, maxBlockers: 0, maxMajor: 1 }
+const EXAMPLE: PlanningStageSettings = { gateAfterEachReview: false, maxReviewCycles: 5, minRating: 95, maxBlockers: 0, maxMajor: 1, gateReminderHours: 72 }
 
 const review = (rating: number, findings: Array<{ severity: string; id?: string }> = [], decision: 'approved' | 'needs_revision' = 'needs_revision') =>
   JSON.stringify({ decision, rating, findings: findings.map((finding) => ({ ...finding, section: 'Economic', finding: 'x', required_change: 'y' })) })

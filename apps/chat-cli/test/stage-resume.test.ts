@@ -49,7 +49,7 @@ function harness(options: { reviewerFailsAfter?: number } = {}) {
       return reviews === 1 ? CHANGES : APPROVED
     },
     stageSettings: {
-      planning: async () => ({ gateAfterEachReview: true, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0 }),
+      planning: async () => ({ gateAfterEachReview: true, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72 }),
     },
   })
 

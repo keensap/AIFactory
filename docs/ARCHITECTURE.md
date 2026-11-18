@@ -1,6 +1,6 @@
 # AI Factory — Architecture
 
-**Status:** current state, 2026-11-18; corrected after the code review; Phase 1 hotfixes and Phase 2 foundations applied, including the route table  
+**Status:** current state, 2026-11-18; corrected after the code review; Phases 1–3 applied (hotfixes, foundations, run integrity)  
 **Scope:** the backend as implemented (`apps/chat-cli`). The UI is a separate workstream; its contracts are described in [`docs/ui/`](ui/).  
 **Related:** [`AI-Factory-Requirements.md`](AI-Factory-Requirements.md) (what to build), [`design/`](design/) (per-area decisions), [`design/ARCHITECTURE-REMEDIATION.md`](design/ARCHITECTURE-REMEDIATION.md) (known defects and the plan to fix them).
 
@@ -157,8 +157,8 @@ stateDiagram-v2
   reviewing --> failed: role error, invalid review
   drafting --> failed: role error
   analyzing --> failed: role error
-  pending --> cancelled: planned, AR-11
-  reviewing --> cancelled: planned, AR-11
+  pending --> cancelled: POST /cancel
+  reviewing --> cancelled: POST /cancel (aborted at the heartbeat)
   completed --> [*]
   failed --> [*]
   cancelled --> [*]
@@ -170,8 +170,8 @@ The status column also carries `execution_attempts` and `locked_by`/`lease_expir
 
 > **Status** ([remediation register](design/ARCHITECTURE-REMEDIATION.md)):
 > - A failed resume **restores the gate** instead of failing the run, and a failed run can be retried explicitly ([AR-04](design/ARCHITECTURE-REMEDIATION.md#ar-04), fixed).
-> - The `cancelled` transitions are still **not reachable**: no code sets the status and there is no cancel endpoint ([AR-11](design/ARCHITECTURE-REMEDIATION.md#ar-11), open).
-> - The model target is pinned per lease segment, not per run, so a resumed run uses the target current at resume time ([AR-06](design/ARCHITECTURE-REMEDIATION.md#ar-06), open).
+> - A run is **cancelled** by `POST /stage-runs/:id/cancel`: at once if unleased, otherwise at its owner's next heartbeat, which aborts the running harness ([AR-11](design/ARCHITECTURE-REMEDIATION.md#ar-11), fixed).
+> - Each run **freezes** its model target and agents at start (`bindings`), so a resume uses what it started with; `POST /stage-runs/:id/rebind` adopts the current ones explicitly ([AR-06](design/ARCHITECTURE-REMEDIATION.md#ar-06), fixed).
 
 ---
 
@@ -286,7 +286,7 @@ flowchart LR
 
 Credentials never enter the database or the patch file: a route references `apiKeyEnv`, and the child process receives only the variables it needs. A failed refresh keeps the last good patch, so a bad model setting cannot stop runs.
 
-> **Known defect — fallback and breaker apply to direct calls only.** The fallback chain and circuit breaker drawn above live in `ModelRouter`, whose only caller is `POST /api/models/test`. Stage runs select the primary target through `agent-default-model` and **never fall back**: the fallback models are declared as routes in the patch but never chosen ([AR-03](design/ARCHITECTURE-REMEDIATION.md#ar-03)).
+> **Failover on runs** ([AR-03](design/ARCHITECTURE-REMEDIATION.md#ar-03), fixed): a role that fails retryably moves to the next candidate in the run's fallback chain, one attempt each, using the **same** circuit breaker as direct calls. `aborted` and `content_filter` never fall back, because another model would make the same decision. Every attempt is attributed to the model that actually ran, and `role_fallback` / `role_fallback_skipped` record what happened.
 
 ---
 
@@ -564,7 +564,8 @@ These gaps are deliberate scope limits rather than defects:
 - **Only the planning stage executes.** Other stages have a prerequisite catalogue and empty settings, but no runtime ([AR-15](design/ARCHITECTURE-REMEDIATION.md#ar-15)).
 - **Models and agents are configured globally.** Agent assignments can be project-scoped; model targets cannot yet.
 - **The agent probe is offline by default**: a stand-in endpoint with no credentials, asserting the request the harness actually made. `?mode=online` uses the real model ([AR-08](design/ARCHITECTURE-REMEDIATION.md#ar-08), fixed).
-- **Paused runs never expire.** A gate can wait indefinitely. Auto-approval is rejected by design; reminders are planned ([AR-16](design/ARCHITECTURE-REMEDIATION.md#ar-16)).
+- **A gate never expires by itself.** It is reported stale after `gateReminderHours` and listed by `GET /api/stage-runs?awaiting=1&staleOnly=1`; approval stays a human decision ([AR-16](design/ARCHITECTURE-REMEDIATION.md#ar-16), fixed).
+- **Paused runs never expire.** A gate can wait indefinitely; auto-approval is rejected by design, so the only response is a stale flag ([AR-16](design/ARCHITECTURE-REMEDIATION.md#ar-16), fixed).
 - **Reverse engineering an existing codebase** is designed but not built; the waiver and document-kind mechanisms are the hooks it will use.
 - **Harness presets are unused.** The headless runner does not bind them; the composition patch is the supported path.
 

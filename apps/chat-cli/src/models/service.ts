@@ -142,6 +142,28 @@ export class ModelService {
     return this.registry.runtime()
   }
 
+  /**
+   * Provider health as the harness sees it (AR-03).
+   *
+   * Harness runs are separate processes, so they cannot go through the router;
+   * they share its breaker instead, via these three calls.
+   */
+  async providerHealth(providerId: string): Promise<{
+    tryAcquire(): boolean
+    recordSuccess(): void
+    recordFailure(error: unknown): void
+  } | null> {
+    const { providers } = await this.snapshot()
+    const provider = providers.find((candidate) => candidate.id === providerId)
+    if (provider === undefined) return null
+    const breaker = this.registry.breakerFor(provider)
+    return {
+      tryAcquire: () => breaker.tryAcquire(),
+      recordSuccess: () => breaker.success(),
+      recordFailure: (error: unknown) => breaker.failure(error instanceof Error ? error.message : String(error)),
+    }
+  }
+
   /** Close a provider's breaker by hand. */
   async resetBreaker(providerId: string): Promise<{ provider: string; reset: boolean }> {
     await this.requireProvider(providerId)

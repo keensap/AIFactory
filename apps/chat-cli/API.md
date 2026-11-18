@@ -623,6 +623,42 @@ curl -X PUT /api/stages/planning/assignments/author \
 
 **In a run:** each role resolves its agent at start, materialises its skills as `SKILL.md` under `.aifactory/agents/<id>/skills/`, and launches with a patch carrying persona, tool allowlist and model. `role_start` events record `agent`, `agentId` and the effective `model`.
 
+### Run control
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/stage-runs?awaiting=1[&staleOnly=1]` | Gates waiting on a human, with staleness |
+| `POST` | `/api/stage-runs/:runId/cancel` | Ask a run to stop |
+| `POST` | `/api/stage-runs/:runId/rebind` | Adopt the current model and agents (admin) |
+| `POST` | `/api/stage-runs/:runId/retry` | Retry a failed run (admin) |
+
+**Cancelling.** An unleased run is cancelled immediately. A leased one records `cancel_requested_at`; its owner aborts the running harness at the next heartbeat and the run ends `cancelled` — not `failed` — with a `run_cancelled` event. The gate is cleared either way, and a terminal run returns `409 STAGE_RUN_TERMINAL`.
+
+```bash
+curl -X POST /api/stage-runs/<id>/cancel -H 'Content-Type: application/json' \
+  -d '{"reason":"duplicate of the earlier run"}'
+```
+
+**Bindings.** A run freezes what it uses at start: the model target with its fallback chain, and the agent for each process.
+
+```json
+{ "bindings": {
+    "model": { "provider": "acme", "model": "m1", "fallback": [], "catalogDigest": "9f2c…" },
+    "agents": { "analyzer": null, "author": { "id": "…", "name": "feasibility-author", "persona": "…" }, "reviewer": null } } }
+```
+
+A resume pins **that** target and uses **those** agents, so changing settings or assignments mid-run has no effect on it. `model: null` means no target was configured and the harness profile default applied. When a bound provider or model has since been removed, resuming returns `409 MODEL_BINDING_UNAVAILABLE` with the gate intact — the model is never swapped silently. `POST …/rebind` is the explicit way to adopt the current settings; it records `run_rebound` with the before and after values.
+
+**Stale gates.** `gateReminderHours` (per stage, default 72) is snapshotted into the run. After that, the gate is reported stale and gets **one** `gate_stale` event:
+
+```json
+{ "runs": [ { "run": { "id": "…", "status": "awaiting_human" }, "stale": true, "waitingHours": 101.4, "reminderAfterHours": 72 } ] }
+```
+
+Nothing is auto-approved, rejected or cancelled: stale is a reminder, because completion must stay a human decision.
+
+**Failover.** A role that fails retryably (transport, rate limit, timeout, missing credential) moves to the next model in the run's fallback chain — one attempt each, through the same circuit breaker as direct calls. `aborted` and `content_filter` never fall back. `role_fallback` and `role_fallback_skipped` events record each move, and usage is attributed to the model that actually ran.
+
 ### Health
 
 ```json

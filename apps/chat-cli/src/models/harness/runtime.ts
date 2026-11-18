@@ -10,12 +10,14 @@
  * default; it never stops the Factory.
  */
 
+import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { chmod, mkdir, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { DshHarness } from '../../harness.ts'
 import { noopLogger, type Logger } from '../../logging/index.ts'
-import { buildModelPatch, keysToScrub, type ModelPatch, type RouteProfile } from './patch.ts'
+import { assertRoutable, buildModelPatch, keysToScrub, type ModelPatch, type RouteProfile } from './patch.ts'
+import { ModelSettingsError, type ModelTarget } from '../settings.ts'
 import { attributionForModel, type ModelAttribution } from '../attribution.ts'
 import type { ModelPrice, ModelRecord } from '../catalog/types.ts'
 import type { ModelService } from '../service.ts'
@@ -218,6 +220,20 @@ export class ModelRuntime {
     return this.buildHarness(this.patchPath, keysToScrub(this.env, this.requiredEnv), cwd, timeoutMs)
   }
 
+  /** The target this runtime currently applies, for a run to snapshot (AR-06). */
+  currentTarget(): ModelTarget | null {
+    return this.resolved?.target ?? null
+  }
+
+  /** A short digest of the catalogue, so a price or window change is detectable. */
+  catalogDigest(): string | null {
+    if (this.catalogSnapshot.length === 0) return null
+    const rows = this.catalogSnapshot
+      .map((entry) => `${entry.provider}/${entry.model}/${entry.contextWindow ?? 0}`)
+      .sort()
+    return createHash('sha256').update(rows.join('\n'), 'utf8').digest('hex').slice(0, 16)
+  }
+
   /** Freeze the current target for one stage run. */
   pin(): ModelPin {
     const patchPath = this.patchPath
@@ -244,6 +260,81 @@ export class ModelRuntime {
         void this.prune().catch(() => {})
       },
     }
+  }
+
+  /**
+   * Freeze a specific target for one run (AR-06).
+   *
+   * A run stores what it started with, so resuming it days later uses the same
+   * model rather than whatever the settings say then. Returns `null` when no
+   * target is configured - the profile default then applies, as it does for a
+   * live pin.
+   *
+   * Throws `ModelSettingsError('MODEL_BINDING_UNAVAILABLE')` when the bound
+   * provider or model is gone: silently substituting another model would make the
+   * run's review history meaningless.
+   */
+  async pinTarget(target: ModelTarget): Promise<ModelPin> {
+    const { providers, models } = await this.service.snapshot()
+    const provider = providers.find((candidate) => candidate.id === target.provider)
+    if (provider === undefined || !provider.enabled) {
+      throw new ModelSettingsError(
+        409,
+        'MODEL_BINDING_UNAVAILABLE',
+        `the provider this run is bound to ("${target.provider}") is missing or disabled; rebind the run to continue`,
+      )
+    }
+    const known = models.some((entry) => entry.provider === target.provider && entry.model === target.model)
+    if (models.length > 0 && !known) {
+      throw new ModelSettingsError(
+        409,
+        'MODEL_BINDING_UNAVAILABLE',
+        `the model this run is bound to ("${target.model}") is no longer in the ${target.provider} catalogue; rebind the run to continue`,
+      )
+    }
+    assertRoutable(provider)
+    const patch = buildModelPatch({ target, providers, models })
+    const path = await this.writePatch(patch.content)
+    return this.pinFor(path, patch, {
+      provider: patch.provider,
+      model: patch.model,
+      source: 'run-binding',
+      price: priceFor(models, patch.provider, patch.model),
+      contextWindow: contextWindowFor(models, patch.provider, patch.model),
+    })
+  }
+
+  /**
+   * Build a pin around an already-written patch.
+   *
+   * Shared by `pin()` and `pinTarget()` so a run's binding and the live target
+   * behave identically: same leases, same scrub list, same attribution shape.
+   */
+  private pinFor(path: string | null, patch: ModelPatch | null, attribution: ModelAttribution | null): ModelPin {
+    const scrub = keysToScrub(this.env, this.requiredEnvFor(patch))
+    if (path !== null) this.leases.set(path, (this.leases.get(path) ?? 0) + 1)
+    const models = [...this.catalogSnapshot]
+    let released = false
+    return {
+      attribution,
+      routes: patch === null ? null : { ...patch.routes },
+      attributionFor: (model?: string) => attributionForModel(attribution, models, model),
+      harness: (cwd, timeoutMs, extraPatchPath) => this.buildHarness(path, scrub, cwd, timeoutMs, extraPatchPath),
+      release: () => {
+        if (released) return
+        released = true
+        if (path === null) return
+        const remaining = (this.leases.get(path) ?? 1) - 1
+        if (remaining <= 0) this.leases.delete(path)
+        else this.leases.set(path, remaining)
+        void this.prune().catch(() => {})
+      },
+    }
+  }
+
+  /** Environment variables a specific patch needs scrubbed from its children. */
+  private requiredEnvFor(patch: ModelPatch | null): string[] {
+    return patch === null ? this.requiredEnv : patch.requiredEnv
   }
 
   /** Number of patch files currently held by running stage runs (diagnostics). */

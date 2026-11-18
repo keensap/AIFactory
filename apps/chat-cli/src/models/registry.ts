@@ -128,6 +128,18 @@ export class EngineRegistry {
     }
   }
 
+  /**
+   * The circuit breaker a provider's engine uses, creating the entry if needed.
+   *
+   * Exposed so harness runs share one view of provider health with direct calls
+   * (AR-03): a provider that direct calls have already found unhealthy should not
+   * be tried first by every role.
+   */
+  breakerFor(provider: ProviderRecord): CircuitBreaker {
+    this.engineFor(provider)
+    return this.entries.get(provider.id)!.breaker
+  }
+
   /** The resilient engine for a provider, rebuilt when its configuration changed. */
   engineFor(provider: ProviderRecord): ResilientEngine {
     const print = fingerprint(provider)

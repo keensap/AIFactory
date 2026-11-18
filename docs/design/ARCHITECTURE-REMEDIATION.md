@@ -1,6 +1,6 @@
 # Architecture Review — Shortcomings, Remedies and Execution Plan
 
-**Status:** Phases 0–2 complete (2026-11-18); Phases 3–4 pending  
+**Status:** Phases 0–3 complete (2026-11-18); Phase 4 pending  
 **Scope:** the backend as implemented (`apps/chat-cli`), reviewed against the code, not against [`../ARCHITECTURE.md`](../ARCHITECTURE.md)  
 **Method:** every finding cites the code that proves it; every remedy states how it is verified as resolved.
 
@@ -30,20 +30,20 @@ Work is planned in five phases (§5). Phases 0–1 fix the defects that can lose
 |---|---|---|---|---|
 | [AR-01](#ar-01) | Settings writes are not admin-only; "admin" means any token holder | High | 1, 3 | open — settings writes now admin-only; operator/admin split done |
 | [AR-02](#ar-02) | Agent model overrides are billed and measured as the Factory model | High | 1 | fixed |
-| [AR-03](#ar-03) | Stage runs have no fallback and no circuit breaker | High | 3 | open |
+| [AR-03](#ar-03) | Stage runs have no fallback and no circuit breaker | High | 3 |  fixed |
 | [AR-04](#ar-04) | A transient error during a resume destroys a run waiting for approval | High | 1 | fixed |
 | [AR-05](#ar-05) | The tool allowlist fails open for tools it does not know | High | 1 | fixed |
-| [AR-06](#ar-06) | Model and agents are re-resolved on every resume, not once per run | Medium | 3 | open |
+| [AR-06](#ar-06) | Model and agents are re-resolved on every resume, not once per run | Medium | 3 |  fixed |
 | [AR-07](#ar-07) | Prerequisites accept rejected documents and failed-run briefs | Medium | 1 | fixed |
 | [AR-08](#ar-08) | The agent probe reports broken compositions as accepted | Medium | 1 | fixed |
 | [AR-09](#ar-09) | Agent assignments outlive their project | Medium | 2 |  fixed |
 | [AR-10](#ar-10) | Allowlisting tools can silently disable an agent's skills | Medium | 1 | fixed |
-| [AR-11](#ar-11) | Runs cannot be cancelled | Medium | 3 | open |
+| [AR-11](#ar-11) | Runs cannot be cancelled | Medium | 3 |  fixed |
 | [AR-12](#ar-12) | Twelve connection pools per process | Medium | 2 |  fixed |
 | [AR-13](#ar-13) | No migration runner; seeds never update existing databases | Medium | 2, 4 |  fixed |
 | [AR-14](#ar-14) | Positional router | Medium | 2 | fixed — route table, auth as data, both guards |
 | [AR-15](#ar-15) | The runtime only knows the planning stage | Medium | 4 | open |
-| [AR-16](#ar-16) | Dead tables from the superseded role-config design; gates never expire | Low | 2, 3 |  partly fixed — dead tables dropped; gate reminders still open |
+| [AR-16](#ar-16) | Dead tables from the superseded role-config design; gates never expire | Low | 2, 3 |  fixed |
 | [AR-17](#ar-17) | Architecture documentation claimed enforcement that did not exist | Low | 0 | fixed |
 
 ---
@@ -727,7 +727,7 @@ Rehearsed on a restored copy of the real database and on an empty one, then appl
 
 **Verification:** 557 tests, both guards, live smoke test across every resource and the run sub-resources (200s), validation codes (`INVALID_ATTACHMENTS`, `INVALID_BRIEF`, `STAGE_RUN_NOT_FOUND`, `INVALID_STAGE`) and an unknown path returning `404 NOT_FOUND`.
 
-#### Phase 3 — Run integrity (6–8 days)
+#### Phase 3 — Run integrity (6–8 days) — **done**
 
 | Item | Work |
 |---|---|
@@ -744,6 +744,26 @@ Rehearsed on a restored copy of the real database and on an empty one, then appl
 - Cancelling a long role stops it within one heartbeat.
 
 **Risk.** Failover across providers changes cost unexpectedly. Mitigation: `role_fallback` events carry both models, and the status bar shows when the model in use is not the primary.
+
+#### Phase 3 — done (2026-11-18)
+
+| Finding | Now |
+|---|---|
+| AR-06 | Each run freezes `bindings` - the model target with its fallback chain and digest, plus the agent for every process. A resume pins **that** target and uses **those** agents; changing settings or assignments mid-run has no effect. `POST /stage-runs/:id/rebind` is the only way it changes, and records `run_rebound` with before and after. A bound provider or model that has since gone returns `409 MODEL_BINDING_UNAVAILABLE` with the gate intact. |
+| AR-11 | `POST /stage-runs/:id/cancel`. An unleased run is cancelled at once (gate cleared, reason kept). A leased run gets `cancel_requested_at`; the heartbeat notices, aborts the running harness, and the run ends `cancelled` - not `failed` - with a `run_cancelled` event. `assertLease` also refuses further phases after a cancel. |
+| AR-03 | Roles fail over through the fallback chain. Harness errors are classified; only retryable ones fall back (`aborted` and `content_filter` never do). Each candidate gets one attempt, uses the **shared** circuit breaker (`providerHealth`), and is attributed to the model that actually ran. `role_fallback` and `role_fallback_skipped` events record what happened and why. |
+| AR-16 | `gateReminderHours` (default 72, 1–720) is a per-stage setting snapshotted into the run. `GET /api/stage-runs?awaiting=1[&staleOnly=1]` lists gates waiting on a human with `stale`, `waitingHours` and `reminderAfterHours`; a stale gate gets **one** `gate_stale` event. Nothing is auto-approved, rejected or cancelled: stale is a reminder. |
+
+**Migration `0004`** adds `bindings`, `cancel_requested_at`, `cancel_reason` and a status index. Applied live; head is `0004`.
+
+**Decisions honoured.** D-1 (bind only at start, explicit rebind) and D-2 (failover uses the Factory chain and may cross providers; the agent keeps its persona, tools and skills because only the model changes).
+
+**Two things the tests caught after the fact:**
+
+- the immediate-cancel path dropped the reason (only the leased path stored it) - fixed, and covered;
+- "no model target" was recorded as `provider: ''`, which reads like a provider with an empty name; the model binding is now explicitly `null`.
+
+**Verification:** 572 tests. New: `test/stage-failover.test.ts` (classification, fallback, non-retryable refusal, open-breaker skip, attribution) and `test/stage-bindings.test.ts` (freezing, mid-run immunity, rebind, cancel, one-shot staleness). Live: migration applied, cancel keeps its reason, a run with an assigned agent records the binding, rebind returns both sides.
 
 #### Phase 4 — Stage engine (8–10 days)
 
@@ -766,7 +786,7 @@ Rehearsed on a restored copy of the real database and on an empty one, then appl
 | 0 | 0.5 d | 0.5 d | Docs true — **done** |
 | 1 | 4–5 d | ~5 d | Defects that lose money, work or access control are closed — **done** |
 | 2 | 6–8 d | ~12 d | Schema under control — **done**; routing deferred (AR-14) |
-| 3 | 6–8 d | ~19 d | Runs reproducible, cancellable, fail over |
+| 3 | 6–8 d | ~19 d | Runs reproducible, cancellable, fail over — **done** |
 | 4 | 8–10 d | ~28 d | Second stage is configuration, not a copy |
 
 Each phase is a separate set of commits with its own tests, live verification and an ARCHITECTURE.md update (AR-17). A phase can be released on its own; none depends on a later one.

@@ -18,7 +18,7 @@ function scratch(files: Record<string, string>): string {
 test('the shipped migrations are numbered and ordered', () => {
   const migrations = loadMigrations()
   assert.ok(migrations.length >= 3)
-  assert.deepEqual(migrations.map((migration) => migration.version), ['0001', '0002', '0003'])
+  assert.deepEqual(migrations.map((migration) => migration.version), ['0001', '0002', '0003', '0004'])
   assert.equal(migrations[0]?.name, 'baseline')
   for (const migration of migrations) {
     assert.match(migration.checksum, /^[0-9a-f]{64}$/)
@@ -45,7 +45,7 @@ test('the baseline is idempotent, so it can run on a database that already has i
     assert.equal(second.alreadyUpToDate, true)
     const head = await schemaVersion(pool)
     assert.ok(head.applied >= 3)
-    assert.equal(head.version, '0003')
+    assert.equal(head.version, '0004')
   } finally {
     await pool.end()
   }
