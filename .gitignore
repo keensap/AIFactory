@@ -28,3 +28,20 @@ coverage/
 
 # FUSE leftovers from replacing an open file
 .fuse_hidden*
+
+# editors and OS noise
+.idea/
+.vscode/
+Thumbs.db
+*.swp
+
+# python tooling (scripts, local helpers)
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# playwright smoke scripts and artifacts
+.pw-*.cjs
+.playwright/
+test-results/
