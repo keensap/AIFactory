@@ -139,7 +139,9 @@ test('refining once runs another review and revision, then asks again', async ()
 
     const refined = await h.runtime.decide(run.id, { refine: true })
     assert.equal(refined.pendingGate?.kind, 'final', 'the operator is asked again')
-    assert.equal(h.counters().reviews, 2, 'one extra review')
+    // The refined pass reviews, revises, then reviews the revision: the gate must
+    // describe the document it hands over, not the one before the revision.
+    assert.equal(h.counters().reviews, 3, 'the re-review of the revision is not skipped')
     assert.equal(h.counters().authors, 2, 'one extra revision')
     assert.equal(refined.status, 'awaiting_human')
     assert.equal(refined.documents.length, 0, 'still no artifact before approval')

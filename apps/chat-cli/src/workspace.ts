@@ -147,6 +147,8 @@ export interface PendingGate {
   accepted: boolean
   /** The criteria in force when the gate was raised. */
   criteria: { minRating: number; maxBlockers: number; maxMajor: number }
+  /** Size and digest of the draft the review judged (absent on runs before this field). */
+  reviewedDraft?: { chars: number; sha256: string }
   waitingSince: string
 }
 

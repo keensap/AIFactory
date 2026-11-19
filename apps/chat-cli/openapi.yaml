@@ -3375,6 +3375,12 @@ components:
             minRating: {type: integer}
             maxBlockers: {type: integer}
             maxMajor: {type: integer}
+        reviewedDraft:
+          type: object
+          description: Size and SHA-256 of the draft the findings describe; compare with run.draftMarkdown to detect a stale review.
+          properties:
+            chars: {type: integer}
+            sha256: {type: string}
         waitingSince: {type: string, format: date-time}
         coverage:
           $ref: '#/components/schemas/RequirementsCoverage'

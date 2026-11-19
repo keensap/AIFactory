@@ -10,6 +10,7 @@ import { STAGE_DEFINITIONS, stageDefinition } from '../src/stages/index.ts'
 import { STAGE_PROCESSES } from '../src/agents.ts'
 import { STAGE_SETTINGS_DEFINITIONS } from '../src/stage-settings.ts'
 import type { StageRunEvent } from '../src/workspace.ts'
+import { createHash } from 'node:crypto'
 import { COVERED_REQUIREMENTS } from './support/requirements-fixture.ts'
 import { fakeWorkspace } from './support/fake-stage-workspace.ts'
 import { MemoryProjectStore } from './support/memory-project-store.ts'
@@ -19,8 +20,14 @@ const SETTINGS = {
   maxReviewCycles: 2, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72,
 }
 const REVIEW_OK = '{"decision":"approved","rating":95,"findings":[]}'
+const digest = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex')
 
-function harness(definition = stageDefinition('requirements')!, draft: string | string[] = COVERED_REQUIREMENTS, reviews: string[] = [REVIEW_OK]) {
+function harness(
+  definition = stageDefinition('requirements')!,
+  draft: string | string[] = COVERED_REQUIREMENTS,
+  reviews: string[] = [REVIEW_OK],
+  settings = SETTINGS,
+) {
   const drafts = typeof draft === 'string' ? [draft] : [...draft]
   const answers = [...reviews]
   const root = mkdtempSync(join(tmpdir(), 'aifactory-req-'))
@@ -39,7 +46,7 @@ function harness(definition = stageDefinition('requirements')!, draft: string | 
       if (role === 'author') return (drafts.length > 1 ? drafts.shift() : drafts[0])!
       return (answers.length > 1 ? answers.shift() : answers[0])!
     },
-    stageSettings: { planning: async () => SETTINGS, requirements: async () => SETTINGS },
+    stageSettings: { planning: async () => settings, requirements: async () => settings },
   })
 
   return {
@@ -400,4 +407,76 @@ test('a planning engine refuses a requirements run', async () => {
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+// ---- review provenance and the refine pass --------------------------------
+
+test('a refine pass reviews the revised draft before the gate, never an unreviewed one', async () => {
+  const first = COVERED_REQUIREMENTS.replace('Shows orders', 'Shows orders and account history')
+  const second = COVERED_REQUIREMENTS.replace('Shows orders', 'Shows orders for the customer')
+  const third = COVERED_REQUIREMENTS.replace('Shows orders', 'Shows orders for the signed-in customer')
+  const marginal = JSON.stringify({
+    decision: 'needs_revision',
+    rating: 60,
+    findings: [{ id: 'F-001', severity: 'major', section: '3. Functional requirements', finding: 'FR-001 behaviour is imprecise', required_change: 'state the actor scope' }],
+  })
+  // cycle 1: review(first) -> revise(second) -> review(second) -> gate
+  // refine:   review(second) -> revise(third) -> review(third) -> gate
+  const h = harness(undefined, [first, second, third], [marginal, marginal, marginal, REVIEW_OK], { ...SETTINGS, maxReviewCycles: 1 })
+  try {
+    const { run } = await h.start()
+    const gated = await h.runtime.execute(run.id)
+    assert.equal(gated.status, 'awaiting_human')
+    assert.equal(gated.reviewCycles, 1)
+    assert.equal(gated.pendingGate?.reviewedDraft?.sha256, digest(gated.draftMarkdown ?? ''), 'the gate describes the draft it shows')
+    assert.equal(gated.pendingGate?.accepted, false)
+
+    const refined = await h.runtime.decide(run.id, { refine: true })
+    const reviewers = h.prompts.filter(({ role }) => role === 'reviewer')
+    assert.equal(reviewers.length, 4, 'the refine pass reviews the stored draft and then the revision')
+
+    assert.equal(refined.reviewCycles, 2)
+    assert.equal(refined.pendingGate?.reviewedDraft?.sha256, digest(refined.draftMarkdown ?? ''), 'the gate describes the revised draft')
+    assert.notEqual(refined.draftMarkdown, gated.draftMarkdown, 'the refine pass actually revised the document')
+    assert.notEqual(refined.pendingGate?.reviewedDraft?.sha256, gated.pendingGate?.reviewedDraft?.sha256)
+    assert.equal(refined.pendingGate?.accepted, true, 'acceptance comes from the review of the revised draft')
+    assert.deepEqual(refined.pendingGate?.findings, [])
+
+    const decisions = h.events().filter(({ type }) => type === 'review_decision')
+    const digests = decisions.map((event) => (event.payload as { reviewedDraft: { sha256: string } }).reviewedDraft.sha256)
+    assert.equal(digests.length, 4)
+    assert.deepEqual(digests.slice(2, 3), [gated.pendingGate?.reviewedDraft?.sha256], 'refine re-reviews exactly the stored draft first')
+    assert.equal(digests[3], refined.pendingGate?.reviewedDraft?.sha256, 'the last review judged the draft at the gate')
+    assert.notEqual(digests[0], digests[1], 'the revision changed what the reviewer saw')
+  } finally { rmSync(h.root, { recursive: true, force: true }) }
+})
+
+test('the revision prompt puts the findings first and forbids scope growth', () => {
+  const definition = stageDefinition('requirements')!
+  type RevisionArgs = Parameters<typeof definition.prompts.revision>
+  const context = { input: 'brief', priorStages: [], documents: [], attachments: [], baselineEvidence: [] } as unknown as RevisionArgs[1]
+  const project = { name: 'Shop' } as RevisionArgs[0]
+  const findings = [{ id: 'F-001', severity: 'major', section: '3. Functional requirements', finding: 'FR-001 is ambiguous', required_change: 'name the customer' }]
+  const prompt = definition.prompts.revision(project, context, 'analysis', COVERED_REQUIREMENTS, findings)
+
+  const findingsAt = prompt.indexOf('## Reviewer findings to fix')
+  const documentAt = prompt.indexOf('## Current document')
+  assert.ok(findingsAt >= 0 && documentAt > findingsAt, 'findings are read before a very long document')
+  assert.match(prompt, /FR-001 is ambiguous/, 'the finding text reaches the author')
+  assert.match(prompt, /smallest edit/)
+  assert.match(prompt, /Do NOT add requirements, NFRs, business rules, actors or sections/)
+  assert.match(prompt, /Do NOT renumber or delete existing ids/)
+  assert.match(prompt, /open question instead of inventing a requirement/)
+  assert.match(prompt, /roughly stable/)
+})
+
+test('the reviewer prompt keeps severity steady and refuses to invent scope', () => {
+  const definition = stageDefinition('requirements')!
+  const context = { input: 'brief', priorStages: [], documents: [], attachments: [], baselineEvidence: [] } as unknown as Parameters<typeof definition.prompts.reviewer>[1]
+  const project = { name: 'Shop' } as Parameters<typeof definition.prompts.reviewer>[0]
+  const prompt = definition.prompts.reviewer(project, context, COVERED_REQUIREMENTS, SETTINGS)
+  assert.match(prompt, /At most 12 findings/)
+  assert.match(prompt, /Do not ask for functionality the brief and baseline do not require/)
+  assert.match(prompt, /scores 85 or more/)
+  assert.match(prompt, /applied the same way on every pass/)
 })

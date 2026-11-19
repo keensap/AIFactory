@@ -529,7 +529,11 @@ curl -X POST /api/stage-runs/<runId>/decision -d '{"refine":true}'
 - `decision` is required unless `refine` is true, and an empty body never approves (`400 INVALID_HUMAN_DECISION`).
   - Planning (`feasibility`): `go`, `conditional_go` or `no_go`; all three complete the stage with the recorded decision.
   - Stages that only approve (`approval`, e.g. requirements): `approved` or `rejected`. `rejected` keeps the run at the same final gate, records the decision and note in the event log and summary, and publishes nothing. `no_go` is treated as `rejected`; `go` and `conditional_go` remain accepted as approvals.
-- `refine: true` runs one more review plus a revision if needed, then returns to the final gate. Nothing is completed.
+- `refine: true` runs one more review, a revision if one is needed, and then **reviews the revision** before returning to the final gate, so the findings always describe the draft at the gate (two reviewer calls when something was revised). Nothing is completed.
+
+The gate records `reviewedDraft` (`chars`, `sha256`) — the version the findings describe. Compare it with `run.draftMarkdown`; a mismatch means the review is stale and the run should be refined before approval.
+
+**Review settings vs convergence.** The default `maxMajor` is 0, so a document is accepted early only when the reviewer reports **no major findings**; any major means the loop runs to `maxReviewCycles` and the human decides. For a large specification that is rarely achievable, and it is the usual reason a run "never converges". Set a realistic threshold per stage (`maxMajor`, `minRating`) when the reviewer's bar is stricter than the delivery bar.
 - Without `refine` and with an approving decision, the stage becomes `completed`: the Markdown document is stored, the PDF is produced, and the stage's checklist items are marked done.
 
 **Neither the document nor the PDF exists before an approving decision.** While a run is paused, the draft is available as `run.draftMarkdown`. A rejected run keeps that draft and its gate.

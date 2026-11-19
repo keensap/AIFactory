@@ -960,8 +960,14 @@ export class StageEngine {
     analysis: string,
     cycle: number,
     settings: PlanningStageSettings,
+    options: { finalOnly?: boolean } = {},
   ): Promise<StageRunDetail> {
     const review = await this.reviewOnce(ctx, draft, settings)
+    if (options.finalOnly === true) {
+      // A refine pass is one review and one revision; it always hands the result
+      // to the human rather than starting another automatic round.
+      return this.pauseAtFinalGate(ctx, draft, cycle, review, settings)
+    }
     return this.afterReview(ctx, draft, analysis, cycle, settings, review)
   }
 
@@ -1010,7 +1016,14 @@ export class StageEngine {
     return this.reviewAndContinue(ctx, revised, analysis, next, settings)
   }
 
-  /** One more pass after the operator asked to refine: review, revise once, then the final gate. */
+  /**
+   * One more pass after the operator asked to refine: review, revise once, then
+   * review the *revised* candidate before the gate.
+   *
+   * The second review is not optional. Without it the gate showed one draft and
+   * the findings of another — the operator approved (or waived) a document no
+   * reviewer had seen.
+   */
   private async refineOnce(ctx: LeaseContext, _previous: StageReviewResult, settings: PlanningStageSettings): Promise<StageRunDetail> {
     let draft = ctx.run.draftMarkdown ?? ''
     let cycle = safeCycle(ctx.run.reviewCycles)
@@ -1021,6 +1034,7 @@ export class StageEngine {
       cycle += 1
       draft = await this.reviseOnce(ctx, draft, ctx.run.analysisMarkdown ?? '', this.revisionFindings(review, coverage))
       await ctx.update({ reviewCycles: cycle, draftMarkdown: draft })
+      return this.reviewAndContinue(ctx, draft, ctx.run.analysisMarkdown ?? '', cycle, settings, { finalOnly: true })
     }
     return this.pauseAtFinalGate(ctx, draft, cycle, review, settings)
   }
@@ -1044,6 +1058,9 @@ export class StageEngine {
       rating: acceptance.rating,
       counts: acceptance.counts,
       accepted: acceptance.accepted,
+      // Which version was judged. Without it a gate that shows a different draft
+      // is impossible to spot after the fact.
+      reviewedDraft: describeDraft(draft),
       findings: review.findings,
       ...(coverage === undefined ? {} : { coverage }),
     }, acceptance.accepted ? 'info' : 'warn')
@@ -1088,6 +1105,7 @@ export class StageEngine {
       counts: acceptance.counts,
       accepted: acceptance.accepted,
       criteria: acceptance.criteria,
+      reviewedDraft: describeDraft(draft),
       ...(coverage === undefined ? {} : { coverage }),
       waitingSince: new Date().toISOString(),
     }
@@ -1096,7 +1114,12 @@ export class StageEngine {
       pendingGate: gate,
       summaryMarkdown: buildGateSummary(ctx.run.analysisMarkdown ?? '', review, cycle, settings.maxReviewCycles, 'final', acceptance, STAGE_LABELS[ctx.run.stage]) + renderCoverageSummary(coverage),
     })
-    await this.appendRunEvent(ctx.project.id, ctx.run.id, 'final_gate', { cycle, decision: review.decision, ...(coverage === undefined ? {} : { coverage }) })
+    await this.appendRunEvent(ctx.project.id, ctx.run.id, 'final_gate', {
+      cycle,
+      decision: review.decision,
+      reviewedDraft: gate.reviewedDraft,
+      ...(coverage === undefined ? {} : { coverage }),
+    })
     this.log.info({ event: 'stage.gate.final', cycle, decision: review.decision })
     return (await this.workspace.getStageRunDetail(ctx.run.id))!
   }
@@ -1812,6 +1835,11 @@ export interface LeaseContext {
 }
 
 /** Summary shown while a run waits at a gate. */
+/** Size and digest of a draft, so every record names the version it describes. */
+export function describeDraft(draft: string): { chars: number; sha256: string } {
+  return { chars: draft.length, sha256: createHash('sha256').update(draft, 'utf8').digest('hex') }
+}
+
 function renderCoverageSummary(coverage?: RequirementsCoverageReport, waiverReason?: string): string {
   if (coverage === undefined) return ''
   const blocking = coverage.findings.filter((finding) => finding.severity === 'blocking').length
