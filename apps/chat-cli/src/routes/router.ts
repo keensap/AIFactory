@@ -7,7 +7,7 @@
  * something each handler had to remember. Here a route declares its path once and
  * its policy once:
  *
- *     route('POST', '/api/stage-runs/:runId/gate', 'operator', answerGate)
+ *     route('POST', '/api/stage-runs/:runId/decision', 'operator', decide)
  *
  * The matcher returns named `params`, and `dispatch` enforces `auth` before the
  * handler runs, so a route cannot be added without deciding who may call it.

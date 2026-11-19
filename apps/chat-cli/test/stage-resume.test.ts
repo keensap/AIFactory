@@ -49,7 +49,7 @@ function harness(options: { reviewerFailsAfter?: number } = {}) {
       return reviews === 1 ? CHANGES : APPROVED
     },
     stageSettings: {
-      planning: async () => ({ gateAfterEachReview: true, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72 }),
+      planning: async () => ({ maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72 }),
     },
   })
 
@@ -75,42 +75,24 @@ async function withHarness(fn: (h: ReturnType<typeof harness>) => Promise<void>,
   }
 }
 
-// ---- AR-04: a failed resume keeps the run at its gate ----------------
+// ---- autonomous review failures -------------------------------------
 
-test('a reviewer failure while applying changes leaves the run at the same gate', async () => {
+test('a reviewer failure during autonomous iteration fails the run for retry', async () => {
   await withHarness(async (h) => {
     const { run } = await h.start()
-    const gated = await h.runtime.execute(run.id)
-    assert.equal(gated.pendingGate?.kind, 'review_changes')
-    const before = { gate: gated.pendingGate, draft: gated.draftMarkdown, cycles: gated.reviewCycles }
-
     h.failNextReviewer()
-    await assert.rejects(
-      () => h.runtime.answerGate(run.id, 'apply'),
-      (error: unknown) => (error as { code?: string }).code === 'STAGE_RESUME_FAILED',
-    )
-
+    await assert.rejects(() => h.runtime.execute(run.id))
     const after = await h.runtime.get(run.id)
-    assert.equal(after.status, 'awaiting_human', 'the run is still waiting, not failed')
-    assert.deepEqual(after.pendingGate, before.gate, 'the same gate is still open')
-    assert.equal(after.draftMarkdown, before.draft, 'the approvable draft survived')
-    assert.equal(after.reviewCycles, before.cycles)
-
-    const failures = h.events().filter((event) => event.type === 'gate_resume_failed')
-    assert.equal(failures.length, 1, 'the failure is recorded')
-
-    // And the operator can simply try again.
-    const applied = await h.runtime.answerGate(run.id, 'apply')
-    assert.equal(applied.pendingGate?.kind, 'final')
+    assert.equal(after.status, 'failed')
+    assert.equal(after.pendingGate, null)
   })
 })
 
 test('a reviewer failure while refining leaves the final gate open', async () => {
   await withHarness(async (h) => {
     const { run } = await h.start()
-    // First review requests changes; accept them so the run reaches the final gate.
-    await h.runtime.execute(run.id)
-    const accepted = await h.runtime.answerGate(run.id, 'accept')
+    // Initial review requests changes, then the automatic revision succeeds.
+    const accepted = await h.runtime.execute(run.id)
     assert.equal(accepted.pendingGate?.kind, 'final')
     const before = accepted.pendingGate
 
@@ -145,7 +127,6 @@ test('completion approves the document and completes the run together', async ()
   await withHarness(async (h) => {
     const { run } = await h.start()
     await h.runtime.execute(run.id)
-    await h.runtime.answerGate(run.id, 'accept')
     const completed = await h.runtime.decide(run.id, { decision: 'go' })
 
     assert.equal(completed.status, 'completed')
@@ -161,7 +142,6 @@ test('a completion that cannot write the document leaves the run at its gate', a
   await withHarness(async (h) => {
     const { run } = await h.start()
     await h.runtime.execute(run.id)
-    await h.runtime.answerGate(run.id, 'accept')
 
     // Make the document write fail the way a full disk or bad path would.
     const workspace = h.workspace as unknown as { addDocument: (input: unknown) => Promise<unknown> }
@@ -207,11 +187,11 @@ test('retry resumes a failed run without repeating the completed phases', async 
     assert.equal(retried.status, 'pending')
 
     const gated = await h.runtime.execute(run.id)
-    assert.equal(gated.pendingGate?.kind, 'review_changes')
+    assert.equal(gated.pendingGate?.kind, 'final')
     const after = h.counters()
     assert.equal(after.calls.filter((role) => role === 'analyzer').length, 1, 'the analyzer was not run again')
-    assert.equal(after.calls.filter((role) => role === 'author').length, 1, 'the draft was not paid for twice')
-    assert.equal(after.reviews, 1, 'only the reviewer ran again')
+    assert.equal(after.calls.filter((role) => role === 'author').length, 2, 'the existing draft was reused, followed by one automatic revision')
+    assert.equal(after.reviews, 2, 'the retry reviews the draft and then its revision')
 
     const events = h.events().filter((event) => event.type === 'run_retried')
     assert.equal(events.length, 1)

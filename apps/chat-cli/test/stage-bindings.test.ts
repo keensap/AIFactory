@@ -13,7 +13,7 @@ import { MemoryProjectStore } from './support/memory-project-store.ts'
 import { MemorySettingsStore } from './support/memory-settings-store.ts'
 
 const SETTINGS = {
-  gateAfterEachReview: true, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72,
+  maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72,
 }
 
 function pin(provider: string, model: string): ModelPin {
@@ -126,7 +126,7 @@ test('changing the target mid-run does not affect the paused run', async () => {
     h.setTarget({ provider: 'other', model: 'model-b', fallback: [] })
     h.setAgents({ author: AGENT_B })
 
-    const applied = await h.runtime.answerGate(run.id, 'apply')
+    const applied = await h.runtime.get(run.id)
     assert.equal(applied.status, 'awaiting_human')
 
     const bindings = (await h.runtime.get(run.id)).bindings!
@@ -160,7 +160,6 @@ test('a completed run cannot be rebound', async () => {
   await withHarness({}, async (h) => {
     const { run } = await h.start()
     await h.runtime.execute(run.id)
-    await h.runtime.answerGate(run.id, 'accept')
     await h.runtime.decide(run.id, { decision: 'go' })
     await assert.rejects(
       () => h.runtime.rebind(run.id),
@@ -206,7 +205,6 @@ test('a terminal run cannot be cancelled', async () => {
   await withHarness({}, async (h) => {
     const { run } = await h.start()
     await h.runtime.execute(run.id)
-    await h.runtime.answerGate(run.id, 'accept')
     await h.runtime.decide(run.id, { decision: 'go' })
     await assert.rejects(
       () => h.runtime.cancel(run.id),

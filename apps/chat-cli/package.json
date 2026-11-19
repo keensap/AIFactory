@@ -14,7 +14,8 @@
     "api": "node src/api.ts",
     "check:observability": "node scripts/check-observability-imports.mjs",
     "check:observability:strict": "node scripts/check-observability-imports.mjs --strict",
-    "check:models": "node scripts/check-model-imports.mjs"
+    "check:models": "node scripts/check-model-imports.mjs",
+    "smoke:requirements": "node scripts/smoke-requirements.mjs"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",

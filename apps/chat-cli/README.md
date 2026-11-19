@@ -246,6 +246,23 @@ The tests use a fake harness process, so they need no model, API key or network.
 - timeout and child cleanup,
 - empty-prompt rejection.
 
+Stage-run and repository tests also use PostgreSQL. Point `AIFACTORY_TEST_DATABASE_URL` at a disposable database (for example the `aifactory_test` database next to `DATABASE_URL`); tests that need it are skipped without it.
+
+The requirements stage regressions (`test/stage-requirements*.test.ts`, `test/requirements-*.test.ts`) use a realistic contract-complete fixture and one fixture per failure mode in `test/support/requirements-fixture.ts`. With a reviewer that approves everything, every failure fixture must still stop at the final gate unaccepted, refuse ordinary approval and publish nothing.
+
+### Live requirements smoke test (opt-in)
+
+`npm test` never calls a model. To check the real Planning → Requirements lifecycle end to end, start the API with a working generation model (a configured model target or the harness profile default) and PostgreSQL, then run:
+
+```sh
+npm run smoke:requirements            # against http://127.0.0.1:8787
+AIFACTORY_SMOKE_KEEP=1 npm run smoke:requirements   # keep the project for inspection
+```
+
+The script creates a scratch project in a temp directory, runs Planning to its gate and approves it (`go`), advances to Requirements, runs it, refines once if deterministic coverage blockers remain, and approves. It checks that the planning baseline is frozen into the run, that the gate carries a coverage report, that ordinary approval is refused while blockers remain, that a `requirements_spec` document and its PDF are produced, and that the summary and PDF are named for requirements. Drafts per pass, the final summary and `smoke-report.json` are written to `<project root>/smoke-report/`.
+
+Only deterministic coverage blockers can fail it; when the model reviewer still has findings at the gate (the budget ran out), the smoke approves and records a warning in the report, as an operator would decide. Remaining coverage blockers fail the smoke (exit 1) and leave the run at its gate. Set `AIFACTORY_SMOKE_WAIVER="reason"` to approve them with an audited waiver instead. Other settings: `AIFACTORY_SMOKE_API`, `AIFACTORY_API_TOKEN`, `AIFACTORY_SMOKE_ROOT` (must exist for, and be writable by, the API process — set it when the API runs with a different `/tmp`, e.g. `.data/smoke/<name>`), `AIFACTORY_SMOKE_BRIEF`, `AIFACTORY_SMOKE_REFINES` (default 1), `AIFACTORY_SMOKE_TIMEOUT_MS` (per run, default 45 min). Exit code 2 means the environment is not ready (API down, no database, stage not executable). CI should run it only in a job that has model credentials.
+
 To exercise the CLI against the fake harness manually:
 
 ```sh

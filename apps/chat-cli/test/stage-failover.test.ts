@@ -107,7 +107,7 @@ function harness(options: {
     harnessFactory: () => { throw new Error('the fallback path must not use the factory harness') },
     stageSettings: {
       planning: async () => ({
-        gateAfterEachReview: false, maxReviewCycles: 1, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72,
+        maxReviewCycles: 1, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72,
       }),
     },
     currentTarget: () => target,

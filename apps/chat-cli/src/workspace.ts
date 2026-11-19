@@ -126,17 +126,17 @@ export type StageReviewDecision = 'approved' | 'needs_revision' | 'rejected'
 /**
  * A run waiting for a human answer between roles.
  *
- * `review_changes` asks whether to apply a review's findings; `final` asks
- * whether to stop refining and complete the stage (with go / conditional go /
- * no-go). Both pause the run: it releases its lease and resumes on the answer.
+ * The final gate asks whether to stop refining and complete the stage (with
+ * go / conditional go / no-go). The run releases its lease and resumes on the answer.
  */
 export interface PendingGate {
-  kind: 'review_changes' | 'final'
+  /** Deterministic traceability for the actual draft at a requirements gate. */
+  coverage?: import('./stages/requirements-coverage.ts').RequirementsCoverageReport
+  kind: 'final'
   question: string
   /** Revision cycles completed when the gate was raised. */
   cycle: number
   maxReviewCycles: number
-  gateAfterEachReview: boolean
   reviewDecision: string
   findings: unknown[]
   /** Overall document rating from the review, when the reviewer provided one. */
@@ -1872,6 +1872,18 @@ interface BriefingRow {
 }
 
 function mapStageRun(row: StageRunRow): StageRun {
+  // Older runs can be paused at the removed review gate. Expose that checkpoint
+  // as a final gate so a human can choose to refine or complete it; never make
+  // the choice on their behalf. Keep the original question and all review data.
+  const storedGate = row.pendingGate as (PendingGate | (Omit<PendingGate, 'kind'> & { kind: 'review_changes' })) | null
+  const pendingGate = storedGate?.kind === 'review_changes'
+    ? {
+        ...storedGate,
+        kind: 'final' as const,
+        legacyQuestion: storedGate.question,
+        question: 'This run was interrupted at a legacy review gate. Review the findings and choose whether to refine or complete the stage.',
+      }
+    : storedGate ?? null
   return {
     id: row.id,
     projectId: row.projectId,
@@ -1885,7 +1897,7 @@ function mapStageRun(row: StageRunRow): StageRun {
     analysisMarkdown: row.analysisMarkdown,
     draftMarkdown: row.draftMarkdown,
     summaryMarkdown: row.summaryMarkdown,
-    pendingGate: row.pendingGate ?? null,
+    pendingGate,
     reviewCycles: row.reviewCycles ?? 0,
     bindings: (row.bindings ?? null) as StageRunBindings | null,
     cancelRequestedAt: toIsoOrNull(row.cancelRequestedAt),

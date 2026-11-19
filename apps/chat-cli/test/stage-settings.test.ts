@@ -35,26 +35,25 @@ test('factory defaults apply until a project overrides them', { skip }, async ()
   const t = await setup()
   try {
     const defaults = await t.service.factoryDefaults()
-    assert.deepEqual(defaults.planning, { gateAfterEachReview: false, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72 })
+    assert.deepEqual(defaults.planning, { maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72 })
     assert.deepEqual(defaults.design, {}, 'stages without a runtime have no settings yet')
     assert.deepEqual(Object.keys(defaults).sort(), ['architecture', 'deployment', 'design', 'development', 'maintenance', 'planning', 'requirements', 'testing'])
 
     const updated = await t.service.updateFactoryDefaults('planning', { maxReviewCycles: 5 })
-    assert.deepEqual(updated, { gateAfterEachReview: false, maxReviewCycles: 5, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72 })
+    assert.deepEqual(updated, { maxReviewCycles: 5, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72 })
     const fromFactory = await t.service.resolve(t.project.id, 'planning')
     assert.equal(fromFactory.source, 'factory')
     assert.equal(fromFactory.settings.maxReviewCycles, 5)
 
-    const overridden = await t.service.setProject(t.project.id, 'planning', { gateAfterEachReview: true })
-    assert.equal(overridden.settings.gateAfterEachReview, true)
+    const overridden = await t.service.setProject(t.project.id, 'planning', { maxReviewCycles: 2 })
+    assert.equal(overridden.settings.maxReviewCycles, 2)
     assert.equal(overridden.source, 'project')
-    assert.equal(overridden.settings.maxReviewCycles, 5, 'unspecified fields keep the Factory value')
 
     // Clearing the override falls back to the Factory default again.
     const cleared = await t.service.setProject(t.project.id, 'planning', null)
     assert.equal(cleared.source, 'factory')
-    assert.equal(cleared.settings.gateAfterEachReview, false)
-    await t.service.updateFactoryDefaults('planning', { gateAfterEachReview: false, maxReviewCycles: 3 })
+    assert.equal(cleared.settings.maxReviewCycles, 5)
+    await t.service.updateFactoryDefaults('planning', { maxReviewCycles: 3 })
   } finally {
     await t.cleanup()
   }
@@ -64,10 +63,10 @@ test('the acceptance criteria round-trip through Factory and project settings', 
   const t = await setup()
   try {
     const updated = await t.service.updateFactoryDefaults('planning', { minRating: 95, maxBlockers: 0, maxMajor: 1 })
-    assert.deepEqual(updated, { gateAfterEachReview: false, maxReviewCycles: 3, minRating: 95, maxBlockers: 0, maxMajor: 1, gateReminderHours: 72 })
+    assert.deepEqual(updated, { maxReviewCycles: 3, minRating: 95, maxBlockers: 0, maxMajor: 1, gateReminderHours: 72 })
 
     const project = await t.service.setProject(t.project.id, 'planning', { minRating: 90, maxMajor: 2 })
-    assert.deepEqual(project.settings, { gateAfterEachReview: false, maxReviewCycles: 3, minRating: 90, maxBlockers: 0, maxMajor: 2, gateReminderHours: 72 })
+    assert.deepEqual(project.settings, { maxReviewCycles: 3, minRating: 90, maxBlockers: 0, maxMajor: 2, gateReminderHours: 72 })
     assert.equal(project.source, 'project')
 
     await t.service.updateFactoryDefaults('planning', { minRating: 0, maxBlockers: 0, maxMajor: 0 })
@@ -82,7 +81,7 @@ test('settings are validated', { skip }, async () => {
     const expect = (code: string, fn: () => Promise<unknown>) => assert.rejects(fn, (error: unknown) => error instanceof StageSettingsError && error.code === code)
     await expect('INVALID_BODY', () => t.service.updateFactoryDefaults('planning', []))
     await expect('NO_FIELDS', () => t.service.updateFactoryDefaults('planning', {}))
-    await expect('INVALID_GATE_SETTING', () => t.service.updateFactoryDefaults('planning', { gateAfterEachReview: 'yes' }))
+    await expect('NO_FIELDS', () => t.service.updateFactoryDefaults('planning', { gateAfterEachReview: 'yes' }))
     await expect('INVALID_REVIEW_CYCLES', () => t.service.updateFactoryDefaults('planning', { maxReviewCycles: 0 }))
     await expect('INVALID_REVIEW_CYCLES', () => t.service.updateFactoryDefaults('planning', { maxReviewCycles: 11 }))
     await expect('INVALID_REVIEW_CYCLES', () => t.service.updateFactoryDefaults('planning', { maxReviewCycles: 2.5 }))
@@ -111,7 +110,7 @@ test('corrupt stored defaults fall back instead of breaking every run', { skip }
       await pool.query(`INSERT INTO settings (key, value) VALUES ('stage_defaults', '"not an object"'::jsonb)
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`)
       assert.deepEqual((await t.service.factoryDefaults()).planning, {
-        gateAfterEachReview: false, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72,
+        maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72,
       })
     } finally {
       await pool.end()
@@ -148,19 +147,18 @@ const json = (body: unknown): RequestInit => ({ headers: { 'Content-Type': 'appl
 
 test('factory defaults are read and updated over HTTP', { skip }, async () => {
   await withApi(async ({ base }) => {
-    const initial = await (await fetch(`${base}/api/settings/stage-defaults`)).json() as { stageDefaults: { gateAfterEachReview: boolean; maxReviewCycles: number } }
-    assert.equal(initial.stageDefaults.gateAfterEachReview, false)
+    const initial = await (await fetch(`${base}/api/settings/stage-defaults`)).json() as { stageDefaults: { maxReviewCycles: number } }
     assert.equal(initial.stageDefaults.maxReviewCycles, 3)
 
-    const patched = await fetch(`${base}/api/settings/stage-defaults`, { method: 'POST', ...json({ gateAfterEachReview: true }) })
+    const patched = await fetch(`${base}/api/settings/stage-defaults`, { method: 'POST', ...json({ maxReviewCycles: 4 }) })
     assert.equal(patched.status, 200)
-    assert.equal(((await patched.json()) as { stageDefaults: { gateAfterEachReview: boolean } }).stageDefaults.gateAfterEachReview, true, 'POST behaves like PATCH')
+    assert.equal(((await patched.json()) as { stageDefaults: { maxReviewCycles: number } }).stageDefaults.maxReviewCycles, 4, 'POST behaves like PATCH')
 
     const invalid = await fetch(`${base}/api/settings/stage-defaults`, { method: 'PATCH', ...json({ maxReviewCycles: 99 }) })
     assert.equal(invalid.status, 400)
     assert.equal(((await invalid.json()) as { error: { code: string } }).error.code, 'INVALID_REVIEW_CYCLES')
 
-    await fetch(`${base}/api/settings/stage-defaults`, { method: 'PATCH', ...json({ gateAfterEachReview: false }) })
+    await fetch(`${base}/api/settings/stage-defaults`, { method: 'PATCH', ...json({ maxReviewCycles: 3 }) })
   })
 })
 
@@ -172,11 +170,10 @@ test('a project override is set, read and cleared over HTTP', { skip }, async ()
     assert.ok(['factory', 'defaults'].includes(initial.source), initial.source)
     assert.equal(initial.settings.maxReviewCycles, 3)
 
-    const patched = await fetch(path, { method: 'POST', ...json({ gateAfterEachReview: true, maxReviewCycles: 2 }) })
+    const patched = await fetch(path, { method: 'POST', ...json({ maxReviewCycles: 2 }) })
     assert.equal(patched.status, 200)
-    const patchedBody = await patched.json() as { settings: { gateAfterEachReview: boolean; maxReviewCycles: number }; source: string }
+    const patchedBody = await patched.json() as { settings: { maxReviewCycles: number }; source: string }
     assert.equal(patchedBody.source, 'project')
-    assert.equal(patchedBody.settings.gateAfterEachReview, true)
     assert.equal(patchedBody.settings.maxReviewCycles, 2)
 
     const cleared = await fetch(path, { method: 'DELETE' })
@@ -189,6 +186,7 @@ test('a project override is set, read and cleared over HTTP', { skip }, async ()
 
     const invalid = await fetch(path, { method: 'PATCH', ...json({ gateAfterEachReview: 1 }) })
     assert.equal(invalid.status, 400)
+    assert.equal(((await invalid.json()) as { error: { code: string } }).error.code, 'NO_FIELDS')
   })
 })
 
@@ -213,6 +211,6 @@ test('per-stage Factory defaults are listed and edited one stage at a time', { s
     assert.equal(unknown.status, 400)
 
     await fetch(`${base}/api/settings/stages/planning`, { method: 'PATCH', ...json({ minRating: 0 }) })
-    await fetch(`${base}/api/settings/stage-defaults`, { method: 'PATCH', ...json({ minRating: 0, gateAfterEachReview: false, maxReviewCycles: 3 }) })
+    await fetch(`${base}/api/settings/stage-defaults`, { method: 'PATCH', ...json({ minRating: 0, maxReviewCycles: 3 }) })
   })
 })

@@ -300,17 +300,6 @@ export const stageRunRoutes: RouteDef[] = [
     sendJson(response, 202, { run: await runtime.get(runId) })
   }, 'executeStageRun'),
 
-  route('POST', '/api/stage-runs/:runId/gate', 'operator', async ({ request, params, response, options }) => {
-    const runId = requiredParam(params, 'runId')
-    const runtime = await engineForRun(options, runId)
-    const body = await readJson(request)
-    const record = body !== null && typeof body === 'object' ? body as Record<string, unknown> : {}
-    if (record.action !== 'apply' && record.action !== 'accept') {
-      throw new HttpError(400, 'action must be "apply" or "accept"', 'INVALID_GATE_ACTION')
-    }
-    sendJson(response, 200, { run: await runtime.answerGate(requiredParam(params, 'runId'), record.action) })
-  }, 'answerStageGate'),
-
   route('POST', '/api/stage-runs/:runId/cancel', 'operator', async ({ request, params, response, options }) => {
     const runId = requiredParam(params, 'runId')
     const runtime = await engineForRun(options, runId)
@@ -342,17 +331,27 @@ export const stageRunRoutes: RouteDef[] = [
     const runtime = await engineForRun(options, runId)
     const body = await readJson(request)
     const record = body !== null && typeof body === 'object' ? body as Record<string, unknown> : {}
+    const waiver = record.coverageWaiverReason
+    if (waiver !== undefined && (typeof waiver !== 'string' || record.refine === true)) {
+      throw new HttpError(400, 'coverageWaiverReason must be a string and cannot accompany refinement', 'INVALID_COVERAGE_WAIVER')
+    }
     if (record.refine === true) {
       sendJson(response, 200, { run: await runtime.decide(runId, { refine: true }) })
       return
     }
     const decision = record.decision
-    if (decision !== 'go' && decision !== 'conditional_go' && decision !== 'no_go') {
-      throw new HttpError(400, 'decision must be go, conditional_go or no_go when refine is false', 'INVALID_HUMAN_DECISION')
+    if (decision !== 'approved' && decision !== 'rejected' && decision !== 'go'
+      && decision !== 'conditional_go' && decision !== 'no_go') {
+      throw new HttpError(
+        400,
+        'decision must be approved or rejected (go, conditional_go and no_go remain accepted for compatibility) when refine is false',
+        'INVALID_HUMAN_DECISION',
+      )
     }
     sendJson(response, 200, {
       run: await runtime.decide(runId, {
         decision,
+        ...(typeof waiver === 'string' ? { coverageWaiverReason: waiver } : {}),
         ...(typeof record.note === 'string' ? { note: record.note } : {}),
       }),
     })

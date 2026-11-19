@@ -455,7 +455,7 @@ The stage controller is implemented for **Planning & Feasibility** first. A stag
 | `GET` | `/api/stage-runs/:runId` | Run, reviews, documents and summary |
 | `GET` | `/api/stage-runs/:runId/reviews` | Review history |
 | `POST` | `/api/stage-runs/:runId/execute` | Start analyzer → TELOS author → reviewer; returns `202` |
-| `POST` | `/api/stage-runs/:runId/decision` | Human gate: `go`, `conditional_go` or `no_go` |
+| `POST` | `/api/stage-runs/:runId/decision` | Human gate: feasibility `go`/`conditional_go`/`no_go`, approval `approved`/`rejected` |
 
 Start:
 
@@ -477,7 +477,9 @@ Use `POST .../execute?wait=1` to block until completion (useful for scripts, but
 
 Each execute claim takes a database lease (`lockedBy`, `leaseExpiresAt`). A second worker gets `409 STAGE_RUN_LEASED`; a worker renews the lease while the run is active. On API start, and every 60 seconds, runs with expired leases are marked `failed` with a `run_recovered` event so a new attempt can be started.
 
-Role outputs are saved on the run as `analysisMarkdown` and `draftMarkdown`, so a later reviewer timeout does not discard the analysis or draft. The default per-role timeout is 300 seconds, separate from the 120-second chat timeout; override it with `AIFACTORY_STAGE_ROLE_TIMEOUT_MS`.
+Role outputs are saved on the run as `analysisMarkdown` and `draftMarkdown`, so a later reviewer timeout does not discard the analysis or draft. The default per-role timeout is 900 seconds (15 minutes), separate from the 120-second chat timeout; override it with `AIFACTORY_STAGE_ROLE_TIMEOUT_MS`. A live requirements run took up to about 5 minutes for one review or revision of a 70,000-character specification, so a lower limit can fail realistic runs.
+
+For `requirements` runs, creation also snapshots the latest `telos_report` contents into `context.baselineEvidence` before hashing the context. Selection matches readiness (highest version, then creation date); a rejected/superseded latest version never falls back to an older approved report. Each source records its document ID, version, source status, recorded hash and storage path, separately from the brief and requester attachments. Uploaded/in-review imported reports remain usable evidence but are explicitly labelled not approved. Text is capped at 20,000 characters (the existing per-input-document limit), with an explicit truncation marker in every role prompt. Markdown/plain text is read directly; imported PDF baselines use the existing PDF extractor. Missing, changed, unsupported or unsafe content is labelled unavailable, never silently treated as read. Runs without a planning baseline can still use a brief or attachment; legacy runs without this snapshot say it is unavailable rather than loading current files during resume.
 
 The controller:
 
@@ -485,11 +487,11 @@ The controller:
 2. runs the analyzer;
 3. drafts the single TELOS report;
 4. runs the independent reviewer;
-5. sends blocker/major findings back to the author, up to three revisions;
-6. stores the approved TELOS document and marks planning evidence;
-7. moves the run to `awaiting_human`.
+5. automatically revises and reviews until acceptance criteria are met or the configured revision budget is spent;
+6. moves the run to `awaiting_human` for the final decision;
+7. stores the TELOS document and marks planning evidence after the human decision.
 
-A needs-revision reviewer response produces a new author pass; the review history remains in `stage_reviews`. A run that exceeds the cycle limit is marked `failed` with `REVIEW_CYCLE_LIMIT`.
+A review that does not meet the acceptance criteria produces a new author pass while budget remains; the review history remains in `stage_reviews`. Acceptance or budget exhaustion leads to the final human gate, not a cycle-limit failure.
 
 The API process must have write access to the project root because the TELOS document is stored under `<project-root>/.aifactory/documents/planning/`. Missing write access fails fast with `PROJECT_ROOT_NOT_WRITABLE`; a failure during document persistence is reported as `DOCUMENT_WRITE_FAILED`.
 
@@ -503,49 +505,36 @@ curl -s -X POST http://127.0.0.1:8787/api/stage-runs/<runId>/decision \
 
 The decision completes the `feasibility_decision` checklist item and the run. Advancing the project to Requirements remains a separate `PATCH /api/projects/:id/stage` action.
 
-Only `planning` is executable today; other stages return `501 STAGE_RUNTIME_NOT_IMPLEMENTED`. Stage-scoped chat is not implemented yet.
+`planning` and `requirements` are executable today; other stages return `501 STAGE_RUNTIME_NOT_IMPLEMENTED`. Operating the requirements stage (configuration, inspection, recovery) is described in [REQUIREMENTS-STAGE-OPERATIONS.md](../../docs/operations/REQUIREMENTS-STAGE-OPERATIONS.md). Stage-scoped chat is not implemented yet.
 
-### Review gates and the final decision
+### Final human decision
 
-A planning run does **not** complete on its own. It pauses at a **gate** with status `awaiting_human` and a `pendingGate`, releases its lease, and resumes when a human answers. Two gates exist:
-
-| `pendingGate.kind` | When | Asked | Answered with |
-|---|---|---|---|
-| `review_changes` | after a review that is not `approved`, **when gating is on** | "Apply the reviewer findings, or accept the draft as it is?" | `POST …/gate {action:"apply"\|"accept"}` |
-| `final` | an approved review, or the automatic cycle budget is spent | "Complete the stage, or refine it further?" | `POST …/decision {decision, refine}` |
+The author and reviewer iterate automatically until the review meets the configured acceptance criteria or the revision budget is exhausted. The run then pauses at the final gate with status `awaiting_human` and a `pendingGate`, and releases its lease. Budget exhaustion does not imply acceptance; the gate reports the review outcome.
 
 ```json
 { "run": { "status": "awaiting_human",
-  "pendingGate": { "kind": "review_changes", "cycle": 0, "maxReviewCycles": 3,
-    "gateAfterEachReview": true, "reviewDecision": "needs_revision",
+  "pendingGate": { "kind": "final", "cycle": 3, "maxReviewCycles": 3,
+    "accepted": false, "reviewDecision": "needs_revision",
     "findings": [ { "id": "F-001", "severity": "major" } ],
-    "question": "Apply the reviewer findings, or accept the draft as it is?",
     "waitingSince": "2026-11-16T17:00:00.000Z" } } }
 ```
-
-**Applying or accepting a review**
-
-```bash
-curl -X POST /api/stage-runs/<runId>/gate -d '{"action":"apply"}'   # revise, then review again
-curl -X POST /api/stage-runs/<runId>/gate -d '{"action":"accept"}'  # skip changes, go to the final gate
-```
-
-`apply` runs the author with the findings, then reviews again (another review gate if gating is on). `accept` overrides the reviewer and moves straight to the final gate, recording the override.
-
-**The final gate**
 
 ```bash
 curl -X POST /api/stage-runs/<runId>/decision -d '{"decision":"go","note":"Approved by sponsor"}'
 curl -X POST /api/stage-runs/<runId>/decision -d '{"refine":true}'
 ```
 
-- `decision` (`go` / `conditional_go` / `no_go`) is required unless `refine` is true.
+- `decision` is required unless `refine` is true, and an empty body never approves (`400 INVALID_HUMAN_DECISION`).
+  - Planning (`feasibility`): `go`, `conditional_go` or `no_go`; all three complete the stage with the recorded decision.
+  - Stages that only approve (`approval`, e.g. requirements): `approved` or `rejected`. `rejected` keeps the run at the same final gate, records the decision and note in the event log and summary, and publishes nothing. `no_go` is treated as `rejected`; `go` and `conditional_go` remain accepted as approvals.
 - `refine: true` runs one more review plus a revision if needed, then returns to the final gate. Nothing is completed.
-- Without `refine`, the stage becomes `completed`: the Markdown document is stored, the PDF is produced, and the `feasibility_decision` checklist item is marked done.
+- Without `refine` and with an approving decision, the stage becomes `completed`: the Markdown document is stored, the PDF is produced, and the stage's checklist items are marked done.
 
-**Neither the document nor the PDF exists before approval.** While a run is paused, the draft is available as `run.draftMarkdown`.
+**Neither the document nor the PDF exists before an approving decision.** While a run is paused, the draft is available as `run.draftMarkdown`. A rejected run keeps that draft and its gate.
 
-Errors: `409 STAGE_RUN_NOT_AT_REVIEW_GATE` (wrong gate kind for `/gate`), `409 STAGE_RUN_NOT_AWAITING_DECISION` (wrong gate kind for `/decision`), `400 INVALID_GATE_ACTION`, `400 INVALID_HUMAN_DECISION`.
+Requirements runs report acceptance-criteria, source, and goal coverage in `pendingGate.coverage`, the run summary, and `review_decision` / `final_gate` events. Missing source or goal links are advisory. Broken IDs, missing acceptance coverage, missing NFR verification, and deterministic contract violations (reported with `CONTRACT_` codes) block ordinary approval (`409 REQUIREMENTS_COVERAGE_BLOCKED`). To waive those findings for the draft being approved, send `{"decision":"approved","coverageWaiverReason":"reason"}` (nonblank, up to 2,000 characters). The reason and waived findings are recorded with the human decision. Invalid waiver requests return `400 INVALID_COVERAGE_WAIVER`.
+
+Other errors: `409 STAGE_RUN_NOT_AWAITING_DECISION`, `400 INVALID_HUMAN_DECISION`.
 
 ### Agents
 
@@ -627,7 +616,7 @@ curl -X PUT /api/stages/planning/assignments/author \
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/sdlc/stages` | The eight SDLC stages |
+| `GET` | `/api/sdlc/stages` | The eight SDLC stages, each with `executable` indicating whether this API instance has a run engine for it |
 | `GET` | `/api/settings/stages/:stage` | Settings and defaults for a stage |
 | `PATCH` | `/api/settings/stages/:stage` | Update Factory defaults (admin) |
 | `GET` | `/api/stages` | The prerequisite catalogue |
@@ -755,13 +744,13 @@ Resolution is **definition defaults ← Factory default ← project override**, 
 
 ```json
 { "stages": {
-    "planning": { "gateAfterEachReview": false, "maxReviewCycles": 3, "minRating": 0, "maxBlockers": 0, "maxMajor": 0 },
+    "planning": { "maxReviewCycles": 3, "minRating": 0, "maxBlockers": 0, "maxMajor": 0 },
     "requirements": {}, "design": {}, "architecture": {}, "development": {}, "testing": {}, "deployment": {}, "maintenance": {} } }
 ```
 
 ```json
 { "stage": "planning", "source": "project",
-  "settings": { "gateAfterEachReview": true, "maxReviewCycles": 3, "minRating": 92, "maxBlockers": 0, "maxMajor": 2 } }
+  "settings": { "maxReviewCycles": 3, "minRating": 92, "maxBlockers": 0, "maxMajor": 2 } }
 ```
 
 `source` is `project` | `factory` | `defaults`.
@@ -770,8 +759,7 @@ Resolution is **definition defaults ← Factory default ← project override**, 
 
 | Field | Default | Meaning |
 |---|---|---|
-| `gateAfterEachReview` | `false` | Pause after **every** non-approved review and ask before applying its changes |
-| `maxReviewCycles` | `3` | Autonomous write→review cycles when gating is off, counted **after** the first review (1–10) |
+| `maxReviewCycles` | `3` | Automatic write→review cycles, counted **after** the first review (1–10) |
 | `minRating` | `0` | Minimum overall document rating (0–100) to stop revising early |
 | `maxBlockers` | `0` | Blockers tolerated before revising again |
 | `maxMajor` | `0` | Major findings tolerated before revising again |
@@ -782,7 +770,7 @@ Resolution is **definition defaults ← Factory default ← project override**, 
 blockers <= maxBlockers   AND   major <= maxMajor   AND   rating >= minRating
 ```
 
-Otherwise it keeps revising (or gates, when `gateAfterEachReview` is on) until `maxReviewCycles` is spent, then it asks for approval anyway. A reviewer that returns no rating (older/simpler reviewer) falls back to its `decision`: `approved` plus the issue limits.
+Otherwise it automatically keeps revising until `maxReviewCycles` is spent, then it asks for approval anyway. A reviewer that returns no rating (older/simpler reviewer) falls back to its `decision`: `approved` plus the issue limits.
 
 Severities count as: `blocker`/`critical`/`blocking` → blockers, `major` → major, everything else → minor.
 
@@ -794,51 +782,9 @@ The gate payload reports the outcome, so the UI can show why the run stopped:
   "criteria": { "minRating": 95, "maxBlockers": 0, "maxMajor": 1 } } }
 ```
 
-Validation: `400 INVALID_GATE_SETTING`, `400 INVALID_REVIEW_CYCLES` (1–10), `400 INVALID_MIN_RATING` (0–100), `400 INVALID_MAX_BLOCKERS` (0–20), `400 INVALID_MAX_MAJOR` (0–50), `400 NO_FIELDS`, `400 INVALID_STAGE`, `501 STAGE_SETTINGS_NOT_IMPLEMENTED`.
+Validation: `400 INVALID_REVIEW_CYCLES` (1–10), `400 INVALID_MIN_RATING` (0–100), `400 INVALID_MAX_BLOCKERS` (0–20), `400 INVALID_MAX_MAJOR` (0–50), `400 NO_FIELDS`, `400 INVALID_STAGE`, `501 STAGE_SETTINGS_NOT_IMPLEMENTED`.
 
 `GET/PATCH /api/settings/stage-defaults` remains as a **deprecated alias** for the planning stage.
-
-### Review gates and the final decision
-
-A planning run does **not** complete on its own. It pauses at a **gate** with status `awaiting_human` and a `pendingGate`, releases its lease, and resumes when a human answers. Two gates exist:
-
-| `pendingGate.kind` | When | Asked | Answered with |
-|---|---|---|---|
-| `review_changes` | after a review that is not `approved`, **when gating is on** | "Apply the reviewer findings, or accept the draft as it is?" | `POST …/gate {action:"apply"\|"accept"}` |
-| `final` | an approved review, or the automatic cycle budget is spent | "Complete the stage, or refine it further?" | `POST …/decision {decision, refine}` |
-
-```json
-{ "run": { "status": "awaiting_human",
-  "pendingGate": { "kind": "review_changes", "cycle": 0, "maxReviewCycles": 3,
-    "gateAfterEachReview": true, "reviewDecision": "needs_revision",
-    "findings": [ { "id": "F-001", "severity": "major" } ],
-    "question": "Apply the reviewer findings, or accept the draft as it is?",
-    "waitingSince": "2026-11-16T17:00:00.000Z" } } }
-```
-
-**Applying or accepting a review**
-
-```bash
-curl -X POST /api/stage-runs/<runId>/gate -d '{"action":"apply"}'   # revise, then review again
-curl -X POST /api/stage-runs/<runId>/gate -d '{"action":"accept"}'  # skip changes, go to the final gate
-```
-
-`apply` runs the author with the findings, then reviews again (another review gate if gating is on). `accept` overrides the reviewer and moves straight to the final gate, recording the override.
-
-**The final gate**
-
-```bash
-curl -X POST /api/stage-runs/<runId>/decision -d '{"decision":"go","note":"Approved by sponsor"}'
-curl -X POST /api/stage-runs/<runId>/decision -d '{"refine":true}'
-```
-
-- `decision` (`go` / `conditional_go` / `no_go`) is required unless `refine` is true.
-- `refine: true` runs one more review plus a revision if needed, then returns to the final gate. Nothing is completed.
-- Without `refine`, the stage becomes `completed`: the Markdown document is stored, the PDF is produced, and the `feasibility_decision` checklist item is marked done.
-
-**Neither the document nor the PDF exists before approval.** While a run is paused, the draft is available as `run.draftMarkdown`.
-
-Errors: `409 STAGE_RUN_NOT_AT_REVIEW_GATE` (wrong gate kind for `/gate`), `409 STAGE_RUN_NOT_AWAITING_DECISION` (wrong gate kind for `/decision`), `400 INVALID_GATE_ACTION`, `400 INVALID_HUMAN_DECISION`.
 
 ### Stage prerequisites and readiness
 
@@ -894,14 +840,13 @@ How much review happens before a human is asked. Values resolve **project overri
 | `DELETE` | `/api/projects/:id/stages/planning/settings` | Clear the override (back to the Factory default) |
 
 ```json
-{ "stageDefaults": { "gateAfterEachReview": false, "maxReviewCycles": 3, "minRating": 0, "maxBlockers": 0, "maxMajor": 0 } }
-{ "settings": { "gateAfterEachReview": true, "maxReviewCycles": 3, "minRating": 95, "maxBlockers": 0, "maxMajor": 1, "source": "project" } }
+{ "stageDefaults": { "maxReviewCycles": 3, "minRating": 0, "maxBlockers": 0, "maxMajor": 0 } }
+{ "settings": { "maxReviewCycles": 3, "minRating": 95, "maxBlockers": 0, "maxMajor": 1, "source": "project" } }
 ```
 
 | Field | Meaning |
 |---|---|
-| `gateAfterEachReview` | `true`: pause after **every** review and ask before applying its changes. `false`: apply changes automatically. |
-| `maxReviewCycles` | Autonomous write→review cycles when gating is off, counted **after** the first review (1–10). When the budget is spent, the run stops at the final gate instead of failing. |
+| `maxReviewCycles` | Automatic write→review cycles, counted **after** the first review (1–10). When the budget is spent, the run stops at the final gate instead of failing. |
 | `minRating` | Minimum overall document rating (0–100) for the run to stop revising early. |
 | `maxBlockers` | Blockers tolerated before the run keeps revising (0–20). |
 | `maxMajor` | Major findings tolerated before the run keeps revising (0–50). |
@@ -912,7 +857,7 @@ How much review happens before a human is asked. Values resolve **project overri
 blockers <= maxBlockers   AND   major <= maxMajor   AND   rating >= minRating
 ```
 
-Otherwise it keeps revising (or gates, when `gateAfterEachReview` is on) until the `maxReviewCycles` budget is spent, then it asks for approval anyway. A reviewer that returns no rating (older/simpler reviewer) falls back to its `decision`: `approved` plus the issue limits.
+Otherwise it automatically keeps revising until the `maxReviewCycles` budget is spent, then it asks for approval anyway. A reviewer that returns no rating (older/simpler reviewer) falls back to its `decision`: `approved` plus the issue limits.
 
 Severities count as: `blocker`/`critical`/`blocking` → blockers, `major` → major, everything else → minor.
 
@@ -924,7 +869,7 @@ The gate payload reports the outcome, so the UI can show why the run stopped:
   "criteria": { "minRating": 95, "maxBlockers": 0, "maxMajor": 1 } } }
 ```
 
-Validation: `400 INVALID_GATE_SETTING`, `400 INVALID_REVIEW_CYCLES` (1–10), `400 INVALID_MIN_RATING` (0–100), `400 INVALID_MAX_BLOCKERS` (0–20), `400 INVALID_MAX_MAJOR` (0–50), `400 NO_FIELDS`. Settings exist only for `planning` so far (`501 STAGE_SETTINGS_NOT_IMPLEMENTED` otherwise). A corrupt stored value falls back to the defaults rather than blocking runs.
+Validation: `400 INVALID_REVIEW_CYCLES` (1–10), `400 INVALID_MIN_RATING` (0–100), `400 INVALID_MAX_BLOCKERS` (0–20), `400 INVALID_MAX_MAJOR` (0–50), `400 NO_FIELDS`. Settings exist only for `planning` so far (`501 STAGE_SETTINGS_NOT_IMPLEMENTED` otherwise). A corrupt stored value falls back to the defaults rather than blocking runs.
 
 ### Stage event log
 

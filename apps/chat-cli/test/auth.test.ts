@@ -16,7 +16,7 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 /** Minimal stage-settings service: these tests only care about authorisation. */
 function settingsStub(): import('../src/stage-settings.ts').StageSettingsService {
-  let planning = { gateAfterEachReview: false, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0 }
+  let planning = { maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0 }
   const stub = {
     async migrate() {},
     async factoryDefaults() { return { planning } },

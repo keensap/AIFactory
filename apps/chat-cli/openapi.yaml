@@ -1716,39 +1716,6 @@ paths:
                     items:
                       $ref: '#/components/schemas/StageReview'
 
-  /api/stage-runs/{runId}/gate:
-    post:
-      tags: [stage-runs]
-      summary: Answer a review gate (apply its findings or accept the draft)
-      parameters:
-        - {name: runId, in: path, required: true, schema: {type: string, format: uuid}}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [action]
-              properties:
-                action: {type: string, enum: [apply, accept]}
-      responses:
-        '200':
-          description: The run after applying the answer (it may pause at another gate)
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  run: {$ref: '#/components/schemas/StageRunDetail'}
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '409':
-          description: STAGE_RUN_NOT_AT_REVIEW_GATE
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-
   /api/settings/stages:
     get:
       tags: [stage-runs]
@@ -2733,23 +2700,45 @@ paths:
       - $ref: '#/components/parameters/RunId'
     post:
       tags: [stage-runs]
-      summary: Record the human go/no-go decision
+      summary: Record the explicit human decision at the final gate
+      description: |
+        Planning (`feasibility`) asks for `go`, `conditional_go` or `no_go` and
+        completes the stage in every case. Stages that only approve (`approval`)
+        require `approved` or `rejected`: `rejected` (and the compatibility alias
+        `no_go`) leaves the run at the same final gate with nothing published.
+        `go` and `conditional_go` remain accepted as approvals. `refine: true`
+        runs one more review/revision pass instead of deciding. A missing or
+        unknown decision is `400 INVALID_HUMAN_DECISION` — an empty body never
+        approves. Requirements coverage blockers return `409 REQUIREMENTS_COVERAGE_BLOCKED`
+        unless explicit approval supplies a nonblank `coverageWaiverReason`.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [decision]
+              anyOf:
+                - required: [decision]
+                - required: [refine]
+                  properties:
+                    refine:
+                      enum: [true]
               properties:
                 decision:
                   type: string
-                  enum: [go, conditional_go, no_go]
+                  enum: [go, conditional_go, no_go, approved, rejected]
+                refine:
+                  type: boolean
                 note:
                   type: string
+                coverageWaiverReason:
+                  type: string
+                  minLength: 1
+                  maxLength: 2000
+                  description: Nonblank reason for waiving blockers, valid only with explicit requirements approval.
       responses:
         '200':
-          description: Completed stage run
+          description: Completed stage run or run still at the final gate
           content:
             application/json:
               schema:
@@ -3049,6 +3038,9 @@ components:
           type: string
         position:
           type: integer
+        executable:
+          type: boolean
+          description: Whether this API instance has a run engine for the stage; returned by GET /api/sdlc/stages.
     LogLevel:
       type: string
       enum: [trace, debug, info, warn, error, fatal]
@@ -3344,8 +3336,7 @@ components:
     PlanningStageSettings:
       type: object
       properties:
-        gateAfterEachReview: {type: boolean, description: Pause after every review and ask before applying its changes}
-        maxReviewCycles: {type: integer, minimum: 1, maximum: 10, description: Autonomous write/review cycles when gating is off, counted after the first review}
+        maxReviewCycles: {type: integer, minimum: 1, maximum: 10, description: Automatic write/review cycles counted after the first review; acceptance or budget exhaustion leads to the final human gate}
         minRating: {type: integer, minimum: 0, maximum: 100, description: Minimum overall rating for the run to stop revising early}
         maxBlockers: {type: integer, minimum: 0, maximum: 20, description: Blockers tolerated before revising again}
         maxMajor: {type: integer, minimum: 0, maximum: 50, description: Major findings tolerated before revising again}
@@ -3356,17 +3347,16 @@ components:
         settings:
           type: object
           additionalProperties: true
-          description: Heterogeneous per stage; planning carries gate, cycle and acceptance fields.
+          description: Heterogeneous per stage; planning carries cycle and acceptance fields.
         source: {type: string, enum: [project, factory, defaults]}
     PendingGate:
       type: object
-      description: The question a paused run is waiting on. The draft is in run.draftMarkdown; no document or PDF exists yet.
+      description: The final human decision after automatic revisions meet acceptance criteria or exhaust the budget. The draft is in run.draftMarkdown; no document or PDF exists yet.
       properties:
-        kind: {type: string, enum: [review_changes, final]}
+        kind: {type: string, enum: [final]}
         question: {type: string}
         cycle: {type: integer, description: Revision cycles completed when the gate was raised}
         maxReviewCycles: {type: integer}
-        gateAfterEachReview: {type: boolean}
         reviewDecision: {type: string, enum: [approved, needs_revision, rejected]}
         findings:
           type: array
@@ -3386,6 +3376,39 @@ components:
             maxBlockers: {type: integer}
             maxMajor: {type: integer}
         waitingSince: {type: string, format: date-time}
+        coverage:
+          $ref: '#/components/schemas/RequirementsCoverage'
+    RequirementsCoverage:
+      type: object
+      required: [counts, findings]
+      properties:
+        counts:
+          type: object
+          required: [totalRequirements, withAcceptanceCriteria, withSource, withGoal]
+          properties:
+            totalRequirements: {type: integer}
+            withAcceptanceCriteria: {type: integer}
+            withSource: {type: integer}
+            withGoal: {type: integer}
+            priorities:
+              type: object
+              description: MoSCoW tally of declared functional requirements (FR-210)
+              properties:
+                must: {type: integer}
+                should: {type: integer}
+                could: {type: integer}
+                wont: {type: integer}
+            businessRules: {type: integer, description: Declared BR-### business rules (FR-206)}
+        findings:
+          type: array
+          items:
+            type: object
+            required: [code, message, severity]
+            properties:
+              code: {type: string}
+              message: {type: string}
+              requirementId: {type: string}
+              severity: {type: string, enum: [blocking, advisory]}
     RunTelemetry:
       type: object
       description: Everything a run status bar shows. Null means "cannot be computed", never zero.

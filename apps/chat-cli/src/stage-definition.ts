@@ -36,7 +36,7 @@ export interface StageArtifact {
 export interface StagePrompts {
   analyzer(project: Project, context: StageContextPacket): string
   author(project: Project, context: StageContextPacket, analysis: string): string
-  reviewer(project: Project, context: StageContextPacket, draft: string, settings: PlanningStageSettings): string
+  reviewer(project: Project, context: StageContextPacket, draft: string, settings: PlanningStageSettings, analysis?: string): string
   revision(
     project: Project,
     context: StageContextPacket,
@@ -52,6 +52,8 @@ export interface StageDefinition {
   /** Processes the stage runs, in agent-assignment terms. */
   processes: readonly StageRoleName[]
   prompts: StagePrompts
+  /** Approved artifact kinds whose contents are snapshotted as evidence at run start. */
+  baselineDocumentKinds?: readonly string[]
   artifact: StageArtifact
   /** Parse a reviewer response. Defaults to `parseStageReview`. */
   parseReview?(raw: string): StageReviewResult

@@ -12,7 +12,7 @@ import { MemoryProjectStore } from './support/memory-project-store.ts'
 import { MemorySettingsStore } from './support/memory-settings-store.ts'
 
 /** The example from the request: 5 autonomous iterations, rating 95, 0 blockers, 1 major. */
-const EXAMPLE: PlanningStageSettings = { gateAfterEachReview: false, maxReviewCycles: 5, minRating: 95, maxBlockers: 0, maxMajor: 1, gateReminderHours: 72 }
+const EXAMPLE: PlanningStageSettings = { maxReviewCycles: 5, minRating: 95, maxBlockers: 0, maxMajor: 1, gateReminderHours: 72 }
 
 const review = (rating: number, findings: Array<{ severity: string; id?: string }> = [], decision: 'approved' | 'needs_revision' = 'needs_revision') =>
   JSON.stringify({ decision, rating, findings: findings.map((finding) => ({ ...finding, section: 'Economic', finding: 'x', required_change: 'y' })) })
@@ -136,15 +136,6 @@ test('the budget is honoured, then the operator is asked even though criteria ar
   })
 })
 
-test('with gating on, meeting the criteria skips the review gate', async () => {
-  await withHarness([review(96, [{ severity: 'major' }])], { ...EXAMPLE, gateAfterEachReview: true }, async (h) => {
-    const run = await h.start()
-    const gated = await h.runtime.execute(run.id)
-    assert.equal(gated.pendingGate?.kind, 'final', 'no need to ask about applying changes')
-    assert.deepEqual(h.counters(), { reviewers: 1, authors: 1 })
-  })
-})
-
 test('the reviewer prompt states the criteria and asks for a rating', async () => {
   const h = harness([review(96)], EXAMPLE)
   try {
@@ -158,7 +149,7 @@ test('the reviewer prompt states the criteria and asks for a rating', async () =
         documents: [],
         attachments: [],
         input: 'portal',
-        constraints: { maxReviewCycles: 5, gateAfterEachReview: false, minRating: 95, maxBlockers: 0, maxMajor: 1, documentKind: 'telos_report', cardinality: 'one' },
+        constraints: { maxReviewCycles: 5, minRating: 95, maxBlockers: 0, maxMajor: 1, documentKind: 'telos_report', cardinality: 'one' },
       } as never,
       '# Draft',
       EXAMPLE,

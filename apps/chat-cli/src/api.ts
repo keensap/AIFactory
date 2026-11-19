@@ -450,7 +450,9 @@ async function main(): Promise<void> {
   }
   const stageRoleTimeoutMs = (() => {
     const value = Number(process.env.AIFACTORY_STAGE_ROLE_TIMEOUT_MS)
-    return Number.isSafeInteger(value) && value > 0 ? value : 300_000
+    // A live requirements run needed ~4-5 min for one reviewer pass over a
+    // 70k-character specification; 5 min left no headroom.
+    return Number.isSafeInteger(value) && value > 0 ? value : 900_000
   })()
   const pdfReview = projects === undefined
     ? undefined

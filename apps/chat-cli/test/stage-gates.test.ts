@@ -22,7 +22,7 @@ const REVIEWS = {
 
 /** Settings with every field filled; the tests only vary the gating knobs. */
 const withSettings = (overrides: Partial<PlanningStageSettings>): PlanningStageSettings => ({
-  gateAfterEachReview: false, maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72, ...overrides,
+  maxReviewCycles: 3, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72, ...overrides,
 })
 
 interface Script {
@@ -82,24 +82,24 @@ async function withHarness(script: Script, fn: (h: ReturnType<typeof harness>) =
   }
 }
 
-// ---- gating off: automatic cycles ------------------------------------
+// ---- automatic cycles and final human gate --------------------------
 
-test('gating off applies up to the configured cycles, then asks at the final gate', async () => {
-  await withHarness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.revise('F-2'), REVIEWS.revise('F-3'), REVIEWS.approved], settings: withSettings({ gateAfterEachReview: false, maxReviewCycles: 3 }) }, async (h) => {
+test('failed reviews revise automatically until accepted, then ask at the final gate', async () => {
+  await withHarness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.revise('F-2'), REVIEWS.approved], settings: withSettings({ maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     const gated = await h.runtime.execute(run.id)
 
-    // Reviewer approved on the fourth review: three revision cycles happened.
-    assert.deepEqual(h.counters(), { reviews: 4, authors: 4 }, 'one draft plus three revisions')
+    // The third review passes before the three-cycle budget is exhausted.
+    assert.deepEqual(h.counters(), { reviews: 3, authors: 3 }, 'one draft plus two revisions')
     assert.equal(gated.pendingGate?.kind, 'final')
-    assert.equal(gated.reviewCycles, 3)
+    assert.equal(gated.reviewCycles, 2)
     assert.equal(gated.status, 'awaiting_human')
     assert.equal(gated.pendingGate?.reviewDecision, 'approved')
   })
 })
 
-test('gating off stops after the cycle budget instead of failing, and keeps the last findings', async () => {
-  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: withSettings({ gateAfterEachReview: false, maxReviewCycles: 2 }) }, async (h) => {
+test('automatic review stops after the cycle budget and keeps the last findings', async () => {
+  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: withSettings({ maxReviewCycles: 2 }) }, async (h) => {
     const { run } = await h.start()
     const gated = await h.runtime.execute(run.id)
     assert.deepEqual(h.counters(), { reviews: 3, authors: 3 }, 'first review plus two revision cycles')
@@ -110,41 +110,18 @@ test('gating off stops after the cycle budget instead of failing, and keeps the 
   })
 })
 
-// ---- gating on: a question after every review ------------------------
-
-test('gating on pauses after each review and applies changes on request', async () => {
-  await withHarness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.revise('F-2'), REVIEWS.approved], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) }, async (h) => {
+test('a failed review never creates an intermediate review gate', async () => {
+  await withHarness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.approved], settings: withSettings({ maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
-    const first = await h.runtime.execute(run.id)
-    assert.equal(first.pendingGate?.kind, 'review_changes', 'the first review asks before changing anything')
-    assert.deepEqual(h.counters(), { reviews: 1, authors: 1 }, 'no revision yet')
-
-    const applied = await h.runtime.answerGate(run.id, 'apply')
-    assert.equal(applied.pendingGate?.kind, 'review_changes', 'the next review asks again')
+    const result = await h.runtime.execute(run.id)
+    assert.equal(result.pendingGate?.kind, 'final')
     assert.deepEqual(h.counters(), { reviews: 2, authors: 2 })
-    assert.equal(applied.reviewCycles, 1)
-
-    const second = await h.runtime.answerGate(run.id, 'apply')
-    assert.equal(second.pendingGate?.kind, 'final', 'an approved review goes to the final gate')
-    assert.equal(second.reviewCycles, 2)
-    assert.deepEqual(h.counters(), { reviews: 3, authors: 3 })
+    assert.equal(result.reviewCycles, 1)
   })
 })
 
-test('accepting a review skips its changes and moves to the final gate', async () => {
-  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) }, async (h) => {
-    const { run } = await h.start()
-    await h.runtime.execute(run.id)
-    const accepted = await h.runtime.answerGate(run.id, 'accept')
-    assert.equal(accepted.pendingGate?.kind, 'final')
-    assert.deepEqual(h.counters(), { reviews: 1, authors: 1 }, 'accepting does not revise')
-    assert.equal(accepted.reviewCycles, 0)
-    assert.equal(accepted.pendingGate?.reviewDecision, 'needs_revision', 'the override is recorded')
-  })
-})
-
-test('an approved review goes straight to the final gate even when gating is on', async () => {
-  await withHarness({ reviews: [REVIEWS.approved], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) }, async (h) => {
+test('an approved review goes straight to the final gate', async () => {
+  await withHarness({ reviews: [REVIEWS.approved], settings: withSettings({ maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     const gated = await h.runtime.execute(run.id)
     assert.equal(gated.pendingGate?.kind, 'final')
@@ -152,41 +129,10 @@ test('an approved review goes straight to the final gate even when gating is on'
   })
 })
 
-test('gate actions are validated against the pending gate', async () => {
-  await withHarness({ reviews: [REVIEWS.approved], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) }, async (h) => {
-    const { run } = await h.start()
-    await h.runtime.execute(run.id)
-    // The run is at the final gate, so a review-gate action is refused.
-    await assert.rejects(
-      () => h.runtime.answerGate(run.id, 'apply'),
-      (error: unknown) => (error as { code?: string }).code === 'STAGE_RUN_NOT_AT_REVIEW_GATE',
-    )
-    await assert.rejects(
-      () => h.runtime.answerGate(run.id, 'nonsense' as never),
-      (error: unknown) => (error as { code?: string }).code === 'INVALID_GATE_ACTION',
-    )
-  })
-
-  // A run paused at a review gate cannot be completed directly.
-  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) }, async (h) => {
-    const { run } = await h.start()
-    const gated = await h.runtime.execute(run.id)
-    assert.equal(gated.pendingGate?.kind, 'review_changes')
-    await assert.rejects(
-      () => h.runtime.decide(run.id, { decision: 'go' }),
-      (error: unknown) => (error as { code?: string }).code === 'STAGE_RUN_NOT_AWAITING_DECISION',
-    )
-    await assert.rejects(
-      () => h.runtime.decide(run.id, { refine: true }),
-      (error: unknown) => (error as { code?: string }).code === 'STAGE_RUN_NOT_AWAITING_DECISION',
-    )
-  })
-})
-
 // ---- final gate ------------------------------------------------------
 
 test('refining once runs another review and revision, then asks again', async () => {
-  await withHarness({ reviews: [REVIEWS.approved, REVIEWS.revise('F-9')], settings: withSettings({ gateAfterEachReview: false, maxReviewCycles: 3 }) }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.approved, REVIEWS.revise('F-9')], settings: withSettings({ maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     const gated = await h.runtime.execute(run.id)
     assert.equal(gated.pendingGate?.kind, 'final')
@@ -201,7 +147,7 @@ test('refining once runs another review and revision, then asks again', async ()
 })
 
 test('refining when the review approves changes nothing but asks again', async () => {
-  await withHarness({ reviews: [REVIEWS.approved], settings: withSettings({ gateAfterEachReview: false, maxReviewCycles: 3 }) }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.approved], settings: withSettings({ maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     await h.runtime.execute(run.id)
     const refined = await h.runtime.decide(run.id, { refine: true })
@@ -212,10 +158,10 @@ test('refining when the review approves changes nothing but asks again', async (
 })
 
 test('only approval completes the stage and produces the document and PDF', async () => {
-  await withHarness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.approved], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.approved], settings: withSettings({ maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
-    await h.runtime.execute(run.id)
-    await h.runtime.answerGate(run.id, 'apply')
+    const gated = await h.runtime.execute(run.id)
+    assert.equal(gated.pendingGate?.kind, 'final')
     const decided = await h.runtime.decide(run.id, { decision: 'conditional_go', note: 'Proceed after budget confirmation' })
 
     assert.equal(decided.status, 'completed')
@@ -229,7 +175,7 @@ test('only approval completes the stage and produces the document and PDF', asyn
 })
 
 test('a decision needs go, conditional_go or no_go unless refining', async () => {
-  await withHarness({ reviews: [REVIEWS.approved], settings: withSettings({ gateAfterEachReview: false, maxReviewCycles: 3 }) }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.approved], settings: withSettings({ maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
     await h.runtime.execute(run.id)
     await assert.rejects(
@@ -245,19 +191,19 @@ test('a decision needs go, conditional_go or no_go unless refining', async () =>
 
 // ---- settings snapshot ----------------------------------------------
 
-test('a run keeps the settings it started with, even if they change mid-run', async () => {
-  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) }, async (h) => {
+test('a run keeps its review budget snapshot when settings change after start', async () => {
+  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: withSettings({ maxReviewCycles: 3 }) }, async (h) => {
     const { run } = await h.start()
-    await h.runtime.execute(run.id)
-    // The operator switches gating off while the run is paused.
-    h.setSettings(withSettings({ gateAfterEachReview: false, maxReviewCycles: 1 }))
-    const applied = await h.runtime.answerGate(run.id, 'apply')
-    assert.equal(applied.pendingGate?.kind, 'review_changes', 'the run still gates: it snapshotted the setting')
+    h.setSettings(withSettings({ maxReviewCycles: 1 }))
+    const result = await h.runtime.execute(run.id)
+    assert.equal(result.pendingGate?.kind, 'final')
+    assert.equal(result.pendingGate?.maxReviewCycles, 3)
+    assert.deepEqual(h.counters(), { reviews: 4, authors: 4 }, 'the run uses the original three-cycle snapshot')
   })
 })
 
 test('the cycle budget comes from settings, not the constructor default', async () => {
-  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: withSettings({ gateAfterEachReview: false, maxReviewCycles: 1 }) }, async (h) => {
+  await withHarness({ reviews: [REVIEWS.revise('F-1')], settings: withSettings({ maxReviewCycles: 1 }) }, async (h) => {
     const { run } = await h.start()
     const gated = await h.runtime.execute(run.id)
     assert.deepEqual(h.counters(), { reviews: 2, authors: 2 }, 'one revision cycle as configured')
@@ -267,8 +213,8 @@ test('the cycle budget comes from settings, not the constructor default', async 
 
 // ---- HTTP surface ------------------------------------------------------
 
-test('the gate and decision endpoints drive the pause/resume lifecycle', async () => {
-  const h = harness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.approved], settings: withSettings({ gateAfterEachReview: true, maxReviewCycles: 3 }) })
+test('automatic review and decision endpoints drive the pause/resume lifecycle', async () => {
+  const h = harness({ reviews: [REVIEWS.revise('F-1'), REVIEWS.approved], settings: withSettings({ maxReviewCycles: 3 }) })
   const { createChatServer, serverPort } = await import('../src/server.ts')
   const { DshHarness } = await import('../src/harness.ts')
   const { SessionStore } = await import('../src/store.ts')
@@ -283,7 +229,13 @@ test('the gate and decision endpoints drive the pause/resume lifecycle', async (
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
   const base = `http://127.0.0.1:${serverPort(server)}`
+  h.workspace.listSdlcStages = async () => [
+    { key: 'planning', name: 'Planning', position: 1 },
+    { key: 'requirements', name: 'Requirements', position: 2 },
+  ]
   try {
+    const catalogue = await (await fetch(`${base}/api/sdlc/stages`)).json() as { stages: Array<{ key: string; executable: boolean }> }
+    assert.deepEqual(catalogue.stages.map(({ key, executable }) => [key, executable]), [['planning', true], ['requirements', false]])
     const project = await h.projects.create({ name: 'Gated', rootPath: h.root, organization: null, ownerEmail: null, status: 'inactive' })
     const created = await (await fetch(`${base}/api/projects/${project.id}/stages/planning/runs`, {
       method: 'POST',
@@ -294,19 +246,7 @@ test('the gate and decision endpoints drive the pause/resume lifecycle', async (
 
     const executed = await (await fetch(`${base}/api/stage-runs/${runId}/execute?wait=1`, { method: 'POST' })).json() as { run: { status: string; pendingGate: { kind: string } | null } }
     assert.equal(executed.run.status, 'awaiting_human')
-    assert.equal(executed.run.pendingGate?.kind, 'review_changes')
-
-    // A decision is refused while a review gate is pending.
-    const early = await fetch(`${base}/api/stage-runs/${runId}/decision`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: 'go' }) })
-    assert.equal(early.status, 409)
-
-    const badAction = await fetch(`${base}/api/stage-runs/${runId}/gate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'maybe' }) })
-    assert.equal(badAction.status, 400)
-
-    const applied = await (await fetch(`${base}/api/stage-runs/${runId}/gate`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'apply' }),
-    })).json() as { run: { pendingGate: { kind: string } | null } }
-    assert.equal(applied.run.pendingGate?.kind, 'final')
+    assert.equal(executed.run.pendingGate?.kind, 'final', 'failed review was revised automatically before pausing')
 
     // Refining over HTTP returns to the final gate.
     const refined = await (await fetch(`${base}/api/stage-runs/${runId}/decision`, {

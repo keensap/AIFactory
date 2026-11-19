@@ -113,7 +113,13 @@ export const systemRoutes: RouteDef[] = [
 
   route('GET', '/api/sdlc/stages', 'operator', async ({ response, options }) => {
     const workspace = requireWorkspace(options)
-    sendJson(response, 200, { stages: await workspace.listSdlcStages() })
+    const stages = await workspace.listSdlcStages()
+    sendJson(response, 200, { stages: stages.map((stage) => ({
+      ...stage,
+      executable: options.stageEngines !== undefined
+        ? options.stageEngines.for(stage.key) !== undefined
+        : options.stageRuntime?.stage === stage.key,
+    })) })
   }, 'listSdlcStages'),
 
   route('GET', '/api/fs/directories', 'operator', async ({ response, url }) => {

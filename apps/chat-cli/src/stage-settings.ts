@@ -1,16 +1,10 @@
 /**
  * Planning-stage review settings.
  *
- * Two knobs decide how much review happens before a human is asked:
- *
- *  - `gateAfterEachReview`: pause after **every** review and ask whether to
- *    apply its changes. The operator controls each cycle.
- *  - `maxReviewCycles`: how many revision cycles run automatically when gating
- *    is off, counted *after* the first review.
- *
- * Whichever mode is used, the run ends at a final gate where a human decides
- * whether to refine further; only then is the stage completed and the PDF
- * produced.
+ * Review continues automatically until acceptance criteria are met or the
+ * revision-cycle budget is exhausted. In either case, the run pauses at a final
+ * human gate; only a human decision completes the stage and produces its PDF.
+ * `maxReviewCycles` counts revision cycles after the initial review.
  *
  * Values resolve **project override → Factory default**. A run snapshots the
  * resolved values into its context, so changing settings mid-run cannot alter a
@@ -28,7 +22,6 @@ export const MAX_BLOCKERS_LIMIT = 20
 export const MAX_MAJOR_LIMIT = 50
 
 export interface PlanningStageSettings {
-  gateAfterEachReview: boolean
   maxReviewCycles: number
   /** Minimum overall document rating (0–100) for the run to stop revising. */
   minRating: number
@@ -50,7 +43,6 @@ export interface PlanningStageSettings {
  * and any blocker or major finding keeps the run revising.
  */
 export const DEFAULT_PLANNING_STAGE_SETTINGS: PlanningStageSettings = {
-  gateAfterEachReview: false,
   maxReviewCycles: 3,
   minRating: 0,
   maxBlockers: 0,
@@ -79,12 +71,6 @@ export function parseStageSettings(input: unknown, options: { partial?: boolean 
   if (!isRecord(input)) throw new StageSettingsError(400, 'INVALID_BODY', 'request body must be a JSON object')
   const out: Partial<PlanningStageSettings> = {}
 
-  if (input.gateAfterEachReview !== undefined) {
-    if (typeof input.gateAfterEachReview !== 'boolean') {
-      throw new StageSettingsError(400, 'INVALID_GATE_SETTING', 'gateAfterEachReview must be true or false')
-    }
-    out.gateAfterEachReview = input.gateAfterEachReview
-  }
   if (input.maxReviewCycles !== undefined) {
     const value = input.maxReviewCycles
     if (typeof value !== 'number' || !Number.isInteger(value) || value < MIN_REVIEW_CYCLES || value > MAX_REVIEW_CYCLES) {
@@ -126,8 +112,8 @@ export function parseStageSettings(input: unknown, options: { partial?: boolean 
     out.maxMajor = value
   }
 
-  if (options.partial !== true && (out.gateAfterEachReview === undefined || out.maxReviewCycles === undefined)) {
-    throw new StageSettingsError(400, 'INVALID_SETTINGS', 'gateAfterEachReview and maxReviewCycles are both required')
+  if (options.partial !== true && out.maxReviewCycles === undefined) {
+    throw new StageSettingsError(400, 'INVALID_SETTINGS', 'maxReviewCycles is required')
   }
   return out
 }
@@ -136,16 +122,12 @@ export function parseStageSettings(input: unknown, options: { partial?: boolean 
 export function settingsFromContext(context: unknown): PlanningStageSettings {
   const record = isRecord(context) ? context : {}
   const constraints = isRecord(record.constraints) ? record.constraints : {}
-  const gate = typeof constraints.gateAfterEachReview === 'boolean'
-    ? constraints.gateAfterEachReview
-    : DEFAULT_PLANNING_STAGE_SETTINGS.gateAfterEachReview
   const cycles = typeof constraints.maxReviewCycles === 'number' && Number.isInteger(constraints.maxReviewCycles)
     ? Math.min(MAX_REVIEW_CYCLES, Math.max(MIN_REVIEW_CYCLES, constraints.maxReviewCycles))
     : DEFAULT_PLANNING_STAGE_SETTINGS.maxReviewCycles
   const int = (value: unknown, fallback: number, min: number, max: number): number =>
     typeof value === 'number' && Number.isInteger(value) ? Math.min(max, Math.max(min, value)) : fallback
   return {
-    gateAfterEachReview: gate,
     maxReviewCycles: cycles,
     minRating: int(constraints.minRating, DEFAULT_PLANNING_STAGE_SETTINGS.minRating, 0, 100),
     maxBlockers: int(constraints.maxBlockers, DEFAULT_PLANNING_STAGE_SETTINGS.maxBlockers, 0, MAX_BLOCKERS_LIMIT),
@@ -225,7 +207,8 @@ export function mergeStageSettings(
   for (const layer of layers) {
     if (layer === undefined) continue
     for (const [key, value] of Object.entries(layer)) {
-      if (value !== undefined) merged[key] = value
+      // Ignore retired or unknown persisted fields rather than exposing them again.
+      if (value !== undefined && Object.hasOwn(merged, key)) merged[key] = value
     }
   }
   return merged
