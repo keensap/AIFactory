@@ -45,6 +45,7 @@ Start with the design notes:
 - [Architecture](docs/ARCHITECTURE.md) — the implemented system, with diagrams.
 - [Requirements specification](docs/AI-Factory-Requirements-v2.md) — the full platform brief.
 - [Requirements contract](docs/design/REQUIREMENTS-CONTRACT.md) and [operations](docs/operations/REQUIREMENTS-STAGE-OPERATIONS.md) — what a specification must contain, and how to run, inspect and recover a requirements run.
+- [Process architecture](docs/design/PROCESS-ARCHITECTURE.md) — how the analyzer, author and reviewer roles become isolated, testable, overridable units.
 - [Known defects and remediation plan](docs/design/ARCHITECTURE-REMEDIATION.md).
 - API reference: [API.md](apps/chat-cli/API.md) and [openapi.yaml](apps/chat-cli/openapi.yaml).
 
