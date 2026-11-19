@@ -29,8 +29,8 @@ export interface PipelineActivity {
   openRole: PipelineStepKey | null
 }
 
-export function PipelineCard({ run, lastSeenStep, activity }: { run: StageRunDetail; lastSeenStep: PipelineStepKey | null; activity?: PipelineActivity }) {
-  const steps = pipelineSteps(run, lastSeenStep)
+export function PipelineCard({ run, lastSeenStep, activity, stage = run.stage }: { run: StageRunDetail; lastSeenStep: PipelineStepKey | null; activity?: PipelineActivity; stage?: string }) {
+  const steps = pipelineSteps(run, lastSeenStep, stage)
   const stateText = { waiting: 'waiting', active: 'in progress', done: 'complete', failed: 'failed' } as const
   return (
     <section className="stage-card pipeline-card" aria-label="Pipeline">
@@ -92,7 +92,7 @@ const DECISION_TEXT: Record<string, string> = {
   rejected: 'Rejected',
 }
 
-export function ReviewsCard({ reviews, cycleLimit }: { reviews: StageReview[]; cycleLimit: boolean }) {
+export function ReviewsCard({ reviews, cycleLimit, stage = 'planning' }: { reviews: StageReview[]; cycleLimit: boolean; stage?: string }) {
   const ordered = sortReviews(reviews)
   const revisions = revisionCount(reviews)
   return (
@@ -105,7 +105,11 @@ export function ReviewsCard({ reviews, cycleLimit }: { reviews: StageReview[]; c
         {cycleLimit && <span className="chip run-chip" data-status="failed"><span className="chip-glyph" aria-hidden="true" />Cycle limit reached</span>}
       </header>
       {ordered.length === 0 ? (
-        <p className="section-empty-inline">No reviews yet. The reviewer runs after the TELOS author drafts the report.</p>
+        <p className="section-empty-inline">
+          {stage === 'planning'
+            ? 'No reviews yet. The reviewer runs after the TELOS author drafts the report.'
+            : 'No reviews yet. The reviewer runs after the author finishes the first draft.'}
+        </p>
       ) : (
         <ol className="review-list">
           {ordered.map((review, index) => <ReviewItem key={review.id} review={review} index={index + 1} />)}
@@ -160,7 +164,7 @@ function ReviewItem({ review, index }: { review: StageReview; index: number }) {
 const LONG_FINDING = 320
 
 /** Reviewer output is data: rendered as plain text, long text collapses. */
-function FindingItem({ finding }: { finding: Finding }) {
+export function FindingItem({ finding }: { finding: Finding }) {
   const text = findingText(finding.finding)
   const change = findingText(finding.required_change)
   const long = text.length + change.length > LONG_FINDING
@@ -191,7 +195,7 @@ function FindingItem({ finding }: { finding: Finding }) {
 // ---------------------------------------------------------------------------
 // Decision
 
-const DECISION_HELP: Record<HumanDecision, string> = {
+export const DECISION_HELP: Record<HumanDecision, string> = {
   go: 'Feasible as described. Proceed to Requirements.',
   conditional_go: 'Proceed, subject to the conditions in your note.',
   no_go: 'Not feasible now. The stage stays in Planning.',
@@ -201,16 +205,44 @@ export function DecisionPanel({
   busy,
   error,
   onDecide,
+  stage = 'planning',
 }: {
   busy: boolean
   error: string | null
   onDecide: (decision: HumanDecision, note: string) => void
+  stage?: string
 }) {
   const [choice, setChoice] = useState<HumanDecision | null>(null)
   const [note, setNote] = useState('')
   const [confirmNoGo, setConfirmNoGo] = useState(false)
   const noteId = useId()
   const groupId = useId()
+
+  // The modern approval gate uses `approved`; older runs without a pending
+  // gate can submit its compatible `go` value through the legacy callback.
+  if (stage !== 'planning') {
+    return (
+      <section className="stage-card decision-card" aria-labelledby={groupId}>
+        <header className="stage-card-head stage-card-head-compact">
+          <div>
+            <span className="eyebrow">Human gate</span>
+            <h3 id={groupId}>Approve the stage output</h3>
+          </div>
+        </header>
+        <p className="field-hint">The reviewer approved the draft. Approve it to complete the stage.</p>
+        <div className="field">
+          <label className="field-label" htmlFor={noteId}>Note <span className="field-optional">optional</span></label>
+          <textarea id={noteId} className="text-input text-area" rows={3} value={note} disabled={busy} onChange={(event) => setNote(event.target.value)} />
+        </div>
+        {error !== null && <p className="field-error" role="alert">{error}</p>}
+        <div className="stage-card-foot">
+          <button type="button" className="button button-primary" disabled={busy} onClick={() => onDecide('go', note)}>
+            {busy ? 'Recording…' : 'Approve'}
+          </button>
+        </div>
+      </section>
+    )
+  }
 
   const submit = (): void => {
     if (choice === null || busy) return
@@ -287,8 +319,8 @@ export function DecisionPanel({
  * Analysis and latest draft the API saved before a run failed, read-only so the
  * work isn't lost. Not reviewed or approved; Markdown renders without raw HTML.
  */
-export function PartialOutputCard({ run }: { run: Pick<StageRunDetail, 'id' | 'attempt' | 'analysisMarkdown' | 'draftMarkdown'> }) {
-  const outputs = partialOutputs(run)
+export function PartialOutputCard({ run, stage = 'planning' }: { run: Pick<StageRunDetail, 'id' | 'attempt' | 'analysisMarkdown' | 'draftMarkdown'>; stage?: string }) {
+  const outputs = partialOutputs(run, stage)
   if (outputs.length === 0) return null
   return (
     <section className="stage-card partial-output" aria-labelledby={`partial-${run.id}`}>
@@ -312,7 +344,7 @@ export function PartialOutputCard({ run }: { run: Pick<StageRunDetail, 'id' | 'a
             <button
               type="button"
               className="text-button"
-              onClick={() => saveBlob(new Blob([output.markdown], { type: 'text/markdown' }), `planning-${output.key}-attempt-${run.attempt}.md`)}
+              onClick={() => saveBlob(new Blob([output.markdown], { type: 'text/markdown' }), `${stage}-${output.key}-attempt-${run.attempt}.md`)}
             >
               Download .md
             </button>

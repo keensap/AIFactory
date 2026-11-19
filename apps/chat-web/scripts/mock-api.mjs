@@ -427,11 +427,13 @@ async function streamTurn(request, response) {
   if (closed) return
   send('tool_result', { name: 'read_file', status: 'ok' })
   send('text', { text: richReply.split('\n\n')[0] + '\n\n' + richReply.split('\n\n')[1] })
+  send('telemetry', { turns: 1, steps: 1, phase: 'step_end', usage: { input: 1800, output: 640, total: 2440, cacheRead: 0, cacheWrite: 0 }, lastStep: null, tokensPerSecond: 160, averageTokensPerSecond: 160, cacheHitPercent: 0, contextUsedTokens: 1800, contextWindow: 200000, contextUsedPercent: 0.9, model: { provider: 'anthropic', model: 'claude-sonnet-4-5' }, startedAt: null, updatedAt: null })
   await sleep(420)
   if (closed) return
   send('text', { text: richReply.split('\n\n').slice(2).join('\n\n') })
   await sleep(220)
   if (closed) return
+  send('telemetry', { turns: 1, steps: 2, phase: 'turn_end', usage: { input: 4200, output: 1550, total: 5750, cacheRead: 3000, cacheWrite: 0 }, lastStep: null, tokensPerSecond: 210, averageTokensPerSecond: 185, cacheHitPercent: 41.7, contextUsedTokens: 120000, contextWindow: 200000, contextUsedPercent: 60, model: { provider: 'anthropic', model: 'claude-sonnet-4-5' }, startedAt: null, updatedAt: null })
   send('final', {
     sessionId,
     text: richReply,
@@ -622,7 +624,7 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    if (!PROJECTS_DISABLED && (url.pathname.startsWith('/api/sdlc/') || url.pathname.startsWith('/api/stage-runs/') || url.pathname.startsWith('/api/projects/'))) {
+    if (!PROJECTS_DISABLED && (url.pathname.startsWith('/api/sdlc/') || url.pathname === '/api/settings/models' || url.pathname === '/api/settings/stage-defaults' || url.pathname === '/api/models' || url.pathname.startsWith('/api/stage-runs/') || url.pathname.startsWith('/api/projects/'))) {
       if (await handleStageRoutes(request, response, url, projects, { sendJson, sendError })) return
     }
 

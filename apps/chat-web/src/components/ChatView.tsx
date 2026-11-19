@@ -6,7 +6,9 @@ import type { Project } from '../data/projects.ts'
 import type { TurnState, UiMessage } from '../data/chat.ts'
 import { useAutoScroll } from '../hooks/useAutoScroll.ts'
 import { AlertIcon, ArrowDownIcon, RefreshIcon, WifiOffIcon } from './Icons.tsx'
+import type { RunTelemetry } from '../api/types.ts'
 import { Composer } from './Composer.tsx'
+import { RunTelemetryBar } from './RunTelemetryBar.tsx'
 import { EmptyState } from './EmptyState.tsx'
 import { MessageList } from './MessageList.tsx'
 
@@ -20,6 +22,9 @@ export interface ChatViewProps {
   messagesStatus: MessagesStatus
   messagesError: string | undefined
   turn: TurnState
+  /** Latest API telemetry for the open conversation; the bar appears with the first snapshot. */
+  telemetry?: RunTelemetry | null
+  telemetryStale?: boolean
   streaming: boolean
   health: ApiHealthState
   onSend: (message: string) => void
@@ -34,6 +39,8 @@ export interface ChatViewProps {
   /** Replaces the empty state (and the composer) while the chat is empty. */
   intake?: ReactNode
   onCopy: (message: string) => void
+  /** Compact empty state with clickable prompts (stage chats); replaces the project welcome screen. */
+  compactEmpty?: { title: string; hint: string; prompts: readonly string[] }
 }
 
 export function ChatView({
@@ -44,6 +51,8 @@ export function ChatView({
   messagesStatus,
   messagesError,
   turn,
+  telemetry = null,
+  telemetryStale = false,
   streaming,
   health,
   onSend,
@@ -56,6 +65,7 @@ export function ChatView({
   newChatBlocked = false,
   intake,
   onCopy,
+  compactEmpty,
 }: ChatViewProps) {
   const [draft, setDraft] = useState('')
   const [focusToken, setFocusToken] = useState(0)
@@ -149,7 +159,19 @@ export function ChatView({
 
         {empty && intake !== undefined && intake}
 
-        {empty && intake === undefined && (
+        {empty && intake === undefined && compactEmpty !== undefined && (
+          <div className="chat-compact-empty">
+            <h2>{compactEmpty.title}</h2>
+            <p>{compactEmpty.hint}</p>
+            <div className="chat-compact-prompts">
+              {compactEmpty.prompts.map((prompt) => (
+                <button key={prompt} type="button" className="chat-compact-prompt" onClick={() => useSuggestion(prompt)}>{prompt}</button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {empty && intake === undefined && compactEmpty === undefined && (
           <EmptyState
             project={project}
             projectsMode={projectsMode}
@@ -184,6 +206,8 @@ export function ChatView({
         </p>
       )}
       {!(empty && intake !== undefined) && (
+      <>
+      <RunTelemetryBar className="chat-telemetry" telemetry={telemetry} stale={telemetryStale} hideUntilData />
       <Composer
         value={draft}
         onChange={setDraft}
@@ -194,6 +218,7 @@ export function ChatView({
         onSend={submit}
         onStop={onStop}
       />
+      </>
       )}
     </section>
   )

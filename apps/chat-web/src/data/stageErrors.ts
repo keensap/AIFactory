@@ -12,6 +12,7 @@ export type StageErrorKind =
   | 'running'
   | 'terminal'
   | 'awaiting-human'
+  | 'gate-stale'
   | 'cycle-limit'
   | 'root-unavailable'
   | 'checklist-incomplete'
@@ -38,7 +39,7 @@ function safe(message: string): string {
 
 const ROLE_TITLE: Record<string, string> = { analyzer: 'Analyzer', author: 'TELOS author', reviewer: 'Reviewer' }
 
-export function describeStageError(error: unknown): StageErrorView {
+export function describeStageError(error: unknown, stage?: string): StageErrorView {
   if (!(error instanceof ApiError)) {
     return { kind: 'other', title: 'Something went wrong', message: safe(error instanceof Error ? error.message : String(error)), retryable: true }
   }
@@ -51,6 +52,17 @@ export function describeStageError(error: unknown): StageErrorView {
     case 'STAGE_RUN_AWAITING_HUMAN':
     case 'STAGE_RUN_NOT_AWAITING_HUMAN':
       return { kind: 'awaiting-human', title: 'The run changed state', message, retryable: false }
+    case 'STAGE_RUN_NOT_AT_REVIEW_GATE':
+    case 'STAGE_RUN_NOT_AWAITING_DECISION':
+      return { kind: 'gate-stale', title: 'The gate changed', message: 'This question was already answered or has moved on. Showing the latest state.', retryable: false }
+    case 'INVALID_HUMAN_DECISION':
+      return { kind: 'other', title: 'Choose a decision', message: message || 'Choose one of the decisions offered at this gate.', retryable: false }
+    case 'REQUIREMENTS_COVERAGE_BLOCKED':
+      return { kind: 'other', title: 'Approval blocked by coverage findings', message: 'Refine the draft, or use the audited waiver when blocking findings are shown.', retryable: false }
+    case 'INVALID_COVERAGE_WAIVER':
+      return { kind: 'other', title: 'Coverage waiver not accepted', message: 'Enter a nonblank reason of at most 2,000 characters and confirm approval with a waiver.', retryable: false }
+    case 'INVALID_GATE_ACTION':
+      return { kind: 'other', title: 'That answer wasn’t accepted', message: 'Refresh the run and try again.', retryable: false }
     case 'REVIEW_CYCLE_LIMIT':
       return { kind: 'cycle-limit', title: 'Cycle limit reached', message, retryable: false }
     case 'PROJECT_ROOT_UNAVAILABLE':
@@ -63,7 +75,8 @@ export function describeStageError(error: unknown): StageErrorView {
       return { kind: 'not-implemented', title: 'Runtime not implemented yet', message: 'This stage can’t be executed yet.', retryable: false }
     case 'STAGE_ROLE_FAILED': {
       const match = /^(analyzer|author|reviewer) failed:\s*([\s\S]*)$/i.exec(message)
-      const role = match === null ? null : ROLE_TITLE[match[1]!.toLowerCase()]
+      const key = match?.[1]?.toLowerCase()
+      const role = key === 'author' && stage === 'requirements' ? 'Requirements author' : key === undefined ? null : ROLE_TITLE[key]
       return {
         kind: 'harness',
         title: role === undefined || role === null ? 'The model run failed' : `${role} failed`,

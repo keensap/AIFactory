@@ -101,6 +101,7 @@ export type ChatStreamEvent =
       event: 'status'
       data: { phase: string; turn?: number; step?: number }
     }
+  | { event: 'telemetry'; data: RunTelemetry }
   | { event: 'text'; data: { text: string } }
   | { event: 'thinking'; data: { text: string } }
   | { event: 'tool_call'; data: { name?: string; callId?: string } }
@@ -125,6 +126,37 @@ export type ChatStreamEvent =
       data: { message: string; code: string; status: number }
     }
 
+/** Token counts of one telemetry window. Every field is null when absent. */
+export interface TelemetryUsage {
+  input: number | null
+  output: number | null
+  /** Includes cache reads and writes. */
+  total: number | null
+  cacheRead: number | null
+  cacheWrite: number | null
+}
+
+/**
+ * Snapshot of everything the run status bar shows (`telemetry` SSE event and
+ * `GET /api/stage-runs/:id/telemetry`). `null` = "cannot be computed", never 0.
+ */
+export interface RunTelemetry {
+  turns: number | null
+  steps: number | null
+  phase: string | null
+  usage: TelemetryUsage
+  lastStep: (TelemetryUsage & { durationMs: number | null; tokensPerSecond: number | null }) | null
+  tokensPerSecond: number | null
+  averageTokensPerSecond: number | null
+  cacheHitPercent: number | null
+  contextUsedTokens: number | null
+  contextWindow: number | null
+  contextUsedPercent: number | null
+  model: { provider: string; model: string } | null
+  startedAt: string | null
+  updatedAt: string | null
+}
+
 // ---------------------------------------------------------------------------
 // SDLC stages and stage runs (`/api/sdlc/stages`, `/api/projects/:id`,
 // `/api/stage-runs/*`). Source of truth: `/openapi.yaml`.
@@ -143,6 +175,7 @@ export interface SdlcStage {
   key: string
   name: string
   position: number
+  executable?: boolean
 }
 
 export type StageStatus = 'not_started' | 'in_progress' | 'completed' | 'blocked' | 'skipped'
@@ -180,6 +213,8 @@ export interface ProjectDocument {
   mimeType: string
   sizeBytes?: number
   sha256?: string
+  /** Where the PDF deliverable was written (relative to the project root); set once the stage completes. */
+  exportPath?: string | null
   status: DocumentStatus
   version: number
   createdAt: string
@@ -224,11 +259,88 @@ export interface StageRun {
   analysisMarkdown?: string | null
   /** Latest author draft (initial or revised), saved before each review. */
   draftMarkdown?: string | null
+  /** The question a paused (`awaiting_human`) run waits on; null when not paused. */
+  pendingGate?: PendingGate | null
   summaryMarkdown: string | null
   startedAt: string | null
   completedAt: string | null
   createdAt: string
   updatedAt: string
+}
+
+/** A requester-supplied PDF attached to a stage run (`/api/projects/:id/attachments`). */
+export interface StageAttachment {
+  id: string
+  projectId?: string
+  stage?: StageKey
+  title: string
+  filename: string
+  pages: number | null
+  characters: number | null
+  /** Text was cut at the per-document limit before analysis. */
+  truncated: boolean
+  sizeBytes: number | null
+  createdAt: string | null
+}
+
+export type GateKind = 'final'
+
+/** Coerced `pendingGate` (see `data/gates.ts`). The draft itself is `run.draftMarkdown`. */
+export interface PendingGate {
+  kind: GateKind
+  question: string
+  /** Revision cycles completed when the gate was raised. */
+  cycle: number | null
+  maxReviewCycles: number | null
+  reviewDecision: string | null
+  findings: Finding[]
+  waitingSince: string | null
+  /** Why the run stopped revising; null from older APIs. */
+  outcome: GateOutcome | null
+  /** Deterministic Requirements checks, distinct from the model's review. */
+  coverage: RequirementsCoverageReport | null
+}
+
+export interface RequirementsCoverageFinding {
+  code: string
+  requirementId?: string
+  message: string
+  severity: 'blocking' | 'advisory'
+}
+
+export interface RequirementsCoverageReport {
+  counts: {
+    totalRequirements: number
+    withAcceptanceCriteria: number
+    withSource: number
+    withGoal: number
+    /** MoSCoW tally of functional requirements (FR-210); absent from older APIs. */
+    priorities?: { must: number; should: number; could: number; wont: number }
+    /** Declared `BR-###` business rules (FR-206); absent from older APIs. */
+    businessRules?: number
+  }
+  findings: RequirementsCoverageFinding[]
+}
+
+export interface GateOutcome {
+  accepted: boolean
+  rating: number | null
+  counts: { blockers: number; major: number; minor: number } | null
+  criteria: { minRating: number; maxBlockers: number; maxMajor: number } | null
+}
+
+/** Planning-stage review settings (project override or Factory default). */
+export interface PlanningStageSettings {
+  maxReviewCycles: number
+  /** Minimum overall rating (0–100) to stop revising early. */
+  minRating: number
+  /** Blockers / major findings tolerated before the run keeps revising. */
+  maxBlockers: number
+  maxMajor: number
+}
+
+export interface ResolvedStageSettings extends PlanningStageSettings {
+  source: 'project' | 'factory' | 'defaults' | null
 }
 
 export type FindingSeverity = 'blocker' | 'major' | 'minor'
@@ -260,6 +372,12 @@ export interface StageRunDetail extends StageRun {
 }
 
 export type HumanDecision = 'go' | 'conditional_go' | 'no_go'
+
+export type RequirementsDecisionInput =
+  | { decision: 'approved'; note?: string; coverageWaiverReason?: string }
+  | { decision: 'rejected'; note?: string }
+
+export type StageDecisionInput = { decision: HumanDecision; note?: string } | RequirementsDecisionInput | { refine: true }
 
 // ---------------------------------------------------------------------------
 // Stage-run activity events (GET /api/stage-runs/:id/events[/stream])
@@ -367,4 +485,37 @@ export interface ObservabilitySummary {
   lastSpanAt: string | null
   /** The span sample was capped; totals may be low. */
   truncated: boolean
+}
+
+// ---------------------------------------------------------------------------
+// Status bar data: model target (`GET /api/settings/models`), catalogue
+// (`GET /api/models`) and project usage (`GET /api/projects/:id/stats`).
+// Only the fields the UI uses; every one may be missing on older APIs.
+
+export interface ModelTarget {
+  provider: string
+  model: string
+}
+
+export interface ModelCatalogEntry {
+  provider: string
+  model: string
+  displayName: string | null
+  contextWindow: number | null
+}
+
+export interface TokenTotals {
+  input: number
+  output: number
+  total: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+export interface ProjectUsage {
+  tokens: TokenTotals
+  /** null = nothing priced. */
+  costUsd: number | null
+  /** Some usage had no price, so `costUsd` is partial. */
+  costPartial: boolean
 }

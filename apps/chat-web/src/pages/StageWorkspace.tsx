@@ -2,17 +2,29 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNod
 import { ApiError, isAbortError, type ChatApi } from '../api/client.ts'
 import type {
   HumanDecision,
+  RequirementsDecisionInput,
   ProjectDetail,
   SdlcStage,
   StageKey,
   StageRun,
   StageRunDetail,
+  SessionSummary,
 } from '../api/types.ts'
+import { ArtifactsCard } from '../components/stage/ArtifactsCard.tsx'
 import { ContextPanel } from '../components/stage/ContextPanel.tsx'
+import { StageChatDock } from '../components/chat/StageChatDock.tsx'
+import { buildStageContext } from '../data/stageChat.ts'
+import { ProjectPanel } from '../components/stage/ProjectPanel.tsx'
+import { StatusBar } from '../components/StatusBar.tsx'
 import { ActivityDrawer, CurrentActivityLine } from '../components/stage/Activity.tsx'
+import { FinalGatePanel, RequirementsFinalGatePanel } from '../components/stage/GatePanels.tsx'
+import { exportFailure } from '../data/attachments.ts'
+import { AttachmentsField } from '../components/stage/AttachmentsField.tsx'
+import { useStageAttachments, type StageAttachments } from '../hooks/useStageAttachments.ts'
+import { StageSettingsDialog } from '../components/stage/StageSettingsDialog.tsx'
+import { gateOf, requirementsRejectionRecorded, STALE_GATE_CODES } from '../data/gates.ts'
 import { DecisionPanel, PartialOutputCard, PipelineCard, ReviewsCard } from '../components/stage/RunPanels.tsx'
 import {
-  CopyField,
   ProgressMeter,
   RunStatusChip,
   Skeleton,
@@ -20,19 +32,21 @@ import {
   StageStatusChip,
   TimeAgo,
 } from '../components/stage/StageBits.tsx'
-import { StageRail } from '../components/stage/StageRail.tsx'
-import { TelosDocument } from '../components/stage/TelosDocument.tsx'
-import { ArrowLeftIcon, ListIcon, MessageIcon, MoonIcon, PencilIcon, RefreshIcon, SettingsIcon, SunIcon } from '../components/Icons.tsx'
+import { StageBar } from '../components/stage/StageBar.tsx'
+import { StageDocument } from '../components/stage/TelosDocument.tsx'
+import { ArrowLeftIcon, InfoIcon, RefreshIcon, SettingsIcon } from '../components/Icons.tsx'
 import { Markdown } from '../components/Markdown.tsx'
 import { loadBrief, saveBrief } from '../data/briefs.ts'
 import { runLogsHref } from '../data/logs.ts'
+import { buildStageBar, isHistoricalStage, stageBarSummary } from '../data/stageBar.ts'
+import { useStatusBarData } from '../hooks/useStatusBarData.ts'
 import type { Project } from '../data/projects.ts'
 import { describeStageError, type StageErrorView } from '../data/stageErrors.ts'
 import {
   advanceBlock,
   checklistLabelsFromError,
   DECISION_LABEL,
-  EXECUTABLE_STAGES,
+  isExecutableStage,
   failedRole,
   failureMessage,
   isCycleLimit,
@@ -47,7 +61,8 @@ import {
   sortStages,
   stageChecklist,
   stageName,
-  telosDocument,
+  stageArtifact,
+  stageArtifactTitle,
   FALLBACK_STAGES,
   type PipelineStepKey,
 } from '../data/stages.ts'
@@ -72,6 +87,9 @@ export interface StageWorkspaceProps {
   onEditProject: () => void
   /** The project's stage changed (refreshes the project list). */
   onProjectChanged: () => void
+  sessions: SessionSummary[]
+  onSessionStarted: (session: SessionSummary, projectId: string) => void
+  onRefreshSessions: () => Promise<void>
   onNotify: (message: string, tone: 'success' | 'error' | 'info') => void
 }
 
@@ -81,7 +99,7 @@ const PLANNING: StageKey = 'planning'
 
 /**
  * Stage-centric project workspace: project header, stage rail, the stage
- * workspace (Planning & Feasibility is executable) and a context panel.
+ * workspace for executable stages and a context panel.
  */
 export function StageWorkspace({
   api,
@@ -90,18 +108,21 @@ export function StageWorkspace({
   routeStage,
   routeRunId,
   health,
-  theme,
-  onToggleTheme,
   onOpenSettings,
   onEditProject,
   onProjectChanged,
+  sessions,
+  onSessionStarted,
+  onRefreshSessions,
   onNotify,
 }: StageWorkspaceProps) {
   const projectId = project.id
   const [stages, setStages] = useState<SdlcStage[]>([...FALLBACK_STAGES])
   const [detail, setDetail] = useState<Loadable<ProjectDetail>>({ status: 'loading' })
   const [runs, setRuns] = useState<Loadable<StageRun[]>>({ status: 'loading' })
-  const [tab, setTab] = useState<'workspace' | 'chat'>('workspace')
+
+  const runtimeStage = routeStage === 'planning' || routeStage === 'requirements' ? routeStage : null
+  const executable = runtimeStage !== null && isExecutableStage(stages, runtimeStage)
 
   // --- Loading -------------------------------------------------------------
 
@@ -109,7 +130,7 @@ export function StageWorkspace({
     const controller = new AbortController()
     api.listSdlcStages(controller.signal)
       .then((list) => {
-        if (list.length > 0) setStages(sortStages(list))
+        if (!controller.signal.aborted && list.length > 0) setStages(sortStages(list))
       })
       .catch(() => {
         // Fallback names stay in place.
@@ -135,17 +156,18 @@ export function StageWorkspace({
 
   const runsController = useRef<AbortController | null>(null)
   const loadRuns = useCallback(async (): Promise<void> => {
+    if (!executable || runtimeStage === null) return
     runsController.current?.abort()
     const controller = new AbortController()
     runsController.current = controller
     try {
-      const value = await api.listStageRuns(projectId, PLANNING, controller.signal)
+      const value = await api.listStageRuns(projectId, runtimeStage, controller.signal)
       if (!controller.signal.aborted) setRuns({ status: 'ready', value })
     } catch (error) {
       if (controller.signal.aborted || isAbortError(error)) return
       setRuns((current) => (current.status === 'ready' ? current : { status: 'error', error }))
     }
-  }, [api, projectId])
+  }, [api, projectId, runtimeStage, executable])
 
   useEffect(() => {
     void loadDetail()
@@ -161,9 +183,9 @@ export function StageWorkspace({
     void loadRuns()
   }, [loadDetail, loadRuns])
 
-  const runIdForStage = routeStage === PLANNING ? routeRunId : null
+  const runIdForStage = executable ? routeRunId : null
   const poller = useStageRun(api, runIdForStage, refreshAll)
-  const run = poller.run !== null && poller.run.id === runIdForStage ? poller.run : null
+  const run = poller.run !== null && poller.run.id === runIdForStage && poller.run.projectId === projectId && poller.run.stage === routeStage ? poller.run : null
   const pollingRef = useRef(poller.polling)
   pollingRef.current = poller.polling
 
@@ -176,7 +198,7 @@ export function StageWorkspace({
     refreshAll()
     if (!pollingRef.current) poller.resume()
   }, [refreshAll, poller.resume])
-  const activityLog = useRunEvents(api, runIdForStage, runLive, onActivityEnd)
+  const activityLog = useRunEvents(api, run?.id ?? null, runLive, onActivityEnd)
   const [activityOpen, setActivityOpen] = useState(false)
   const [activityFilters, setActivityFilters] = useState<ActivityFilters>(DEFAULT_FILTERS)
   useEffect(() => {
@@ -199,11 +221,38 @@ export function StageWorkspace({
     || (run !== null && isExecuting(run.status))
   const knownStage = isStageKey(stages, routeStage)
   const stageLabel = stageName(stages, routeStage)
+  const [stageSettingsOpen, setStageSettingsOpen] = useState(false)
   const stageState = sdlc?.stages.find((entry) => entry.stage === routeStage)
   const completedStages = sdlc?.stages.filter((entry) => entry.status === 'completed').length ?? 0
   const allRequired = checklist === null ? null : requiredProgress(checklist)
   const viewedProgress = viewedChecklist === null ? null : requiredProgress(viewedChecklist)
   const next = nextStageKey(stages, routeStage)
+  const barItems = useMemo(
+    () => (sdlc === undefined ? [] : buildStageBar(stages, sdlc.stages, currentStage, routeStage)),
+    [sdlc, stages, currentStage, routeStage],
+  )
+  // A finished stage is viewable but never editable from here (editing earlier
+  // stages, with invalidation of later work, is a later feature).
+  const historical = isHistoricalStage(barItems, routeStage)
+  const statusData = useStatusBarData(api, projectId, run?.status ?? 0)
+
+  // Stage chat context, read at send time so it reflects the latest run and documents.
+  const contextInputs = {
+    stageLabel,
+    stageStatus: stageState?.status ?? null,
+    run: run === null ? null : { attempt: run.attempt, status: run.status, id: run.id },
+    checklist: viewedChecklist ?? [],
+    documents: run !== null ? run.documents : stageDocuments ?? [],
+    history: stages.map((stage) => ({ key: stage.key, label: stage.name, state: sdlc?.stages.find((entry) => entry.stage === stage.key) })),
+  }
+  const contextRef = useRef(contextInputs)
+  contextRef.current = contextInputs
+  const getStageContext = useCallback((): string | null => buildStageContext({
+    projectName: project.name,
+    stageKey: routeStage,
+    readOnly: historical,
+    ...contextRef.current,
+  }), [historical, project.name, routeStage])
 
   useEffect(() => {
     document.title = `${stageLabel} · ${project.name} — AI Factory Chat`
@@ -211,13 +260,13 @@ export function StageWorkspace({
 
   // --- Brief draft (survives navigation) ------------------------------------
 
-  const [brief, setBriefState] = useState<string>(() => loadBrief(storage, projectId) ?? '')
-  const briefSeeded = useRef(loadBrief(storage, projectId) !== null)
+  const [brief, setBriefState] = useState<string>(() => loadBrief(storage, projectId, routeStage) ?? '')
+  const briefSeeded = useRef(loadBrief(storage, projectId, routeStage) !== null)
   const setBrief = useCallback((value: string) => {
     briefSeeded.current = true
     setBriefState(value)
-    saveBrief(storage, projectId, value)
-  }, [storage, projectId])
+    saveBrief(storage, projectId, value, routeStage)
+  }, [storage, projectId, routeStage])
   // No saved draft: prefill a retry with the last run's brief.
   useEffect(() => {
     if (briefSeeded.current || latestRun?.inputText == null) return
@@ -239,7 +288,7 @@ export function StageWorkspace({
       const started = await api.executeStageRun(runId)
       poller.replace(started)
     } catch (error) {
-      const view = describeStageError(error)
+      const view = describeStageError(error, routeStage)
       setExecuteNotice({ runId, view })
     } finally {
       // One poller per run: restart it only if it has stopped (a still-running
@@ -247,45 +296,71 @@ export function StageWorkspace({
       if (!pollingRef.current) poller.resume()
       void loadRuns()
     }
-  }, [api, poller.replace, poller.resume, loadRuns])
+  }, [api, poller.replace, poller.resume, loadRuns, routeStage])
+
+  const attachments = useStageAttachments(api, projectId, runtimeStage ?? PLANNING, executable)
 
   const startRun = async (): Promise<void> => {
-    if (starting) return
+    if (!executable || runtimeStage === null || routeStage !== currentStage || starting || attachments.uploading) return
     setStarting(true)
     setStartError(null)
     try {
-      const created = await api.createStageRun(projectId, PLANNING, { brief: brief.trim() })
+      const created = await api.createStageRun(projectId, runtimeStage, {
+        brief: brief.trim(),
+        ...(attachments.items.length > 0 ? { attachmentIds: attachments.items.map((entry) => entry.id) } : {}),
+      })
       setRuns((current) => (current.status === 'ready'
         ? { status: 'ready', value: [created, ...current.value.filter((entry) => entry.id !== created.id)] }
         : current))
-      navigate({ name: 'stage', projectId, stage: PLANNING, runId: created.id })
+      navigate({ name: 'stage', projectId, stage: routeStage, runId: created.id })
       await execute(created.id)
     } catch (error) {
-      setStartError(describeStageError(error))
+      // A stale id (404 ATTACHMENT_NOT_FOUND) is recoverable: refresh the list and let the user retry.
+      if (error instanceof ApiError && error.code === 'ATTACHMENT_NOT_FOUND') void attachments.refresh()
+      setStartError(describeStageError(error, routeStage))
     } finally {
       setStarting(false)
     }
   }
 
+  // Gate answers (decision, refine, apply/accept). Each call takes as long as a
+  // role run; the UI re-reads `pendingGate` from the result instead of assuming.
   const [deciding, setDeciding] = useState(false)
   const [decisionError, setDecisionError] = useState<string | null>(null)
-  const decide = async (decision: HumanDecision, note: string): Promise<void> => {
+  const settleGateCall = async (call: () => Promise<StageRunDetail>, success?: (run: StageRunDetail) => string | null): Promise<void> => {
     if (run === null) return
     setDeciding(true)
     setDecisionError(null)
     try {
-      const updated = await api.decideStageRun(run.id, { decision, ...(note.trim() === '' ? {} : { note: note.trim() }) })
+      const updated = await call()
       poller.replace(updated)
-      onNotify(`${DECISION_LABEL[decision]} recorded`, 'success')
+      const message = success?.(updated) ?? null
+      if (message !== null) onNotify(message, 'success')
+      if (isPollable(updated.status) && !pollingRef.current) poller.resume()
       refreshAll()
     } catch (error) {
-      const view = describeStageError(error)
-      setDecisionError(`${view.title}. ${view.message}`)
-      if (view.kind === 'awaiting-human') poller.resume()
+      if (error instanceof ApiError && STALE_GATE_CODES.has(error.code)) {
+        // The panel was out of date: show the latest run, no error toast.
+        try { poller.replace(await api.getStageRun(run.id)) } catch { poller.resume() }
+        refreshAll()
+      } else {
+        const view = describeStageError(error, routeStage)
+        setDecisionError(`${view.title}. ${view.message}`)
+        if (view.kind === 'awaiting-human') poller.resume()
+      }
     } finally {
       setDeciding(false)
     }
   }
+  const decide = (decision: HumanDecision, note: string): Promise<void> =>
+    settleGateCall(
+      () => api.decideStageRun(run!.id, { decision, ...(note.trim() === '' ? {} : { note: note.trim() }) }),
+      () => `${DECISION_LABEL[decision]} recorded`,
+    )
+  const refine = (): Promise<void> =>
+    settleGateCall(() => api.decideStageRun(run!.id, { refine: true }), (updated) => (updated.status === 'awaiting_human' ? 'Refinement done. Your answer is needed again.' : null))
+  const decideRequirements = (input: RequirementsDecisionInput): Promise<void> =>
+    settleGateCall(() => api.decideStageRun(run!.id, input), () => input.decision === 'approved' ? 'Requirements approved.' : 'Rejection recorded. Nothing was published.')
 
   const [advancing, setAdvancing] = useState(false)
   const [advanceError, setAdvanceError] = useState<{ view: StageErrorView; labels: string[] } | null>(null)
@@ -300,7 +375,7 @@ export function StageWorkspace({
       onProjectChanged()
       navigate({ name: 'stage', projectId, stage: next, runId: null })
     } catch (error) {
-      const view = describeStageError(error)
+      const view = describeStageError(error, routeStage)
       const labels = view.kind === 'checklist-incomplete' && error instanceof ApiError ? checklistLabelsFromError(error.message) : []
       setAdvanceError({ view, labels })
       void loadDetail()
@@ -334,7 +409,6 @@ export function StageWorkspace({
   const offline = health.state.status === 'offline'
   const unauthorized = health.state.status === 'unauthorized' || detailErrorView?.kind === 'unauthorized'
   const noRuntime = projectDetail !== null && projectDetail.sdlc === undefined
-  const rootPath = apiProject?.rootPath ?? project.workspace
 
   const gate = advanceBlock({
     currentStage,
@@ -345,7 +419,7 @@ export function StageWorkspace({
   })
   const gateRun = run ?? latestRun
 
-  const advanceCard = routeStage === PLANNING && gateRun !== null && gateRun.status === 'completed' && currentStage === PLANNING && next !== null && recordedDecision(gateRun) !== 'no_go' ? (
+  const advanceCard = executable && gateRun !== null && gateRun.status === 'completed' && currentStage === routeStage && next !== null && recordedDecision(gateRun) !== 'no_go' ? (
     <section className="stage-card advance-card" aria-labelledby="advance-title">
       <header className="stage-card-head stage-card-head-compact">
         <div>
@@ -355,10 +429,10 @@ export function StageWorkspace({
       </header>
       <p className="field-hint">
         {gate === null
-          ? 'All required Planning items are done. Advancing completes Planning and starts the next stage.'
+          ? `All required ${stageLabel} items are done. Advancing starts the next stage.`
           : gate === 'checklist-open'
             ? 'Some required checklist items are still open.'
-            : 'Advancing needs a completed run with a go or conditional-go decision.'}
+            : routeStage === PLANNING ? 'Advancing needs a completed run with a go or conditional-go decision.' : 'Advancing needs an approved requirements run.'}
       </p>
       {advanceError !== null && (
         <StageNotice error={advanceError.view}>
@@ -383,17 +457,13 @@ export function StageWorkspace({
     <div className="stage-page">
       <ProjectStageHeader
         project={project}
-        rootPath={rootPath}
         status={apiProject?.status ?? project.status}
         currentStageName={projectDetail === null ? null : stageName(stages, currentStage)}
         completedStages={projectDetail === null ? null : completedStages}
         totalStages={stages.length}
         required={allRequired}
         health={health}
-        theme={theme}
-        onToggleTheme={onToggleTheme}
         onOpenSettings={onOpenSettings}
-        onEditProject={onEditProject}
       />
 
       {(offline || unauthorized) && (
@@ -412,48 +482,42 @@ export function StageWorkspace({
       )}
 
       <div className="stage-layout">
-        {sdlc === undefined ? (
-          <div className="stage-rail stage-rail-loading">{detail.status === 'loading' ? <Skeleton lines={8} /> : null}</div>
-        ) : (
-          <StageRail
-            projectId={projectId}
-            stages={stages}
-            states={sdlc.stages}
-            checklist={sdlc.checklist}
-            currentStage={currentStage}
-            selectedStage={routeStage}
-          />
-        )}
+        <ProjectPanel project={project} apiProject={apiProject} onOpenSettings={onEditProject} {...(executable && apiProject !== null ? { onOpenStageSettings: () => setStageSettingsOpen(true) } : {})} />
+        {executable && runtimeStage !== null && <StageSettingsDialog open={stageSettingsOpen} api={api} projectId={project.id} stageName={stageLabel} stage={runtimeStage} onClose={() => setStageSettingsOpen(false)} />}
+
+        <div className="stage-center">
+          {sdlc === undefined ? (
+            <div className="stage-bar stage-bar-loading">{detail.status === 'loading' ? <Skeleton lines={1} /> : null}</div>
+          ) : (
+            <StageBar projectId={projectId} items={barItems} summary={stageBarSummary(barItems, routeStage)} />
+          )}
 
         <main className="stage-main" aria-labelledby="stage-title">
           <header className="stage-head">
             <div className="stage-head-row">
-              <div className="stage-head-copy">
-                <span className="eyebrow">Stage {Math.max(1, stages.findIndex((stage) => stage.key === routeStage) + 1)} of {stages.length}</span>
-                <h1 id="stage-title">{stageLabel}</h1>
-              </div>
+              <span className="eyebrow">Stage {Math.max(1, stages.findIndex((stage) => stage.key === routeStage) + 1)}/{stages.length}</span>
+              <h1 id="stage-title">{stageLabel}</h1>
+              {routeStage === PLANNING && (
+                <span
+                  className="stage-head-info"
+                  tabIndex={0}
+                  role="img"
+                  aria-label="Validate the business idea and assess Technical, Economic, Legal, Operational and Schedule feasibility."
+                  title="Validate the business idea and assess Technical, Economic, Legal, Operational and Schedule feasibility."
+                >
+                  <InfoIcon size={14} />
+                </span>
+              )}
               <div className="stage-head-meta">
                 {stageState !== undefined && <StageStatusChip status={stageState.status} />}
                 {viewedProgress !== null && viewedProgress.total > 0 && <ProgressMeter done={viewedProgress.done} total={viewedProgress.total} label="Required items done" />}
-                {run !== null && <RunStatusChip status={run.status} />}
+                {run !== null && <RunStatusChip status={run.status} stage={run.stage} />}
               </div>
-            </div>
-            {routeStage === PLANNING && (
-              <p className="stage-head-lede">Validate the business idea and assess Technical, Economic, Legal, Operational and Schedule feasibility.</p>
-            )}
-            <div className="stage-tabs" role="tablist" aria-label="Stage views">
-              <button type="button" role="tab" className="stage-tab" aria-selected={tab === 'workspace'} onClick={() => setTab('workspace')}>Workspace</button>
-              <button type="button" role="tab" className="stage-tab" aria-selected={tab === 'chat'} onClick={() => setTab('chat')}>Chat</button>
             </div>
           </header>
 
-          <div className="stage-body" role="tabpanel">
-            {tab === 'chat' ? (
-              <div className="stage-card stage-placeholder">
-                <MessageIcon size={20} />
-                <p>Stage chat is coming next. For now, use the brief and the run review to discuss this stage.</p>
-              </div>
-            ) : detail.status === 'loading' ? (
+          <div className="stage-body">
+            {detail.status === 'loading' ? (
               <>
                 <Skeleton lines={3} className="stage-card" />
                 <Skeleton lines={5} className="stage-card" />
@@ -463,20 +527,20 @@ export function StageWorkspace({
             ) : noRuntime ? (
               <StageNotice
                 tone="info"
-                error={{ title: 'Stage runtime not available', message: 'This Chat API doesn’t expose SDLC stages. Update apps/chat-cli, or use the project chat.' }}
-              >
-                <a className="text-button" href={routeHref({ name: 'project', projectId, sessionId: null })}>Open project chat</a>
-              </StageNotice>
+                error={{ title: 'Stage runtime not available', message: 'This Chat API doesn’t expose SDLC stages. Update apps/chat-cli to use stage runs.' }}
+              />
             ) : !knownStage ? (
               <StageNotice error={{ title: 'Stage not found', message: `“${routeStage}” isn’t an SDLC stage.` }}>
                 <a className="text-button" href={routeHref({ name: 'stage', projectId, stage: currentStage, runId: null })}>Go to the current stage</a>
               </StageNotice>
-            ) : !EXECUTABLE_STAGES.has(routeStage) ? (
+            ) : !executable || (!historical && routeStage !== currentStage) ? (
               <ReadOnlyStage stageName={stageLabel} isCurrent={routeStage === currentStage} />
             ) : (
-              <PlanningWorkspace
+              <ExecutableWorkspace
                 api={api}
                 projectId={projectId}
+                stage={routeStage}
+                stageLabel={stageLabel}
                 run={run}
                 runId={runIdForStage}
                 poller={poller}
@@ -500,29 +564,59 @@ export function StageWorkspace({
                 deciding={deciding}
                 decisionError={decisionError}
                 onDecide={(decision, note) => void decide(decision, note)}
-                advanceCard={advanceCard}
+                attachments={attachments}
+                onRefine={() => void refine()}
+                onDecideRequirements={(input) => void decideRequirements(input)}
+                advanceCard={historical ? null : advanceCard}
+                readOnly={historical}
                 onRetryRuns={() => void loadRuns()}
                 onNotify={onNotify}
               />
             )}
+            {knownStage && projectDetail !== null && !noRuntime && (
+              <ArtifactsCard api={api} stage={routeStage} documents={run !== null ? run.documents : stageDocuments} onNotify={onNotify} />
+            )}
           </div>
+
+          {knownStage && (
+            <StageChatDock
+              key={routeStage}
+              api={api}
+              storage={storage}
+              project={project}
+              stageKey={routeStage}
+              stageLabel={stageLabel}
+              sessions={sessions}
+              health={health.state}
+              getContext={getStageContext}
+              onSessionStarted={onSessionStarted}
+              onRefreshSessions={onRefreshSessions}
+              onRefreshHealth={health.refresh}
+              onOpenSettings={onOpenSettings}
+              onNotify={onNotify}
+            />
+          )}
         </main>
+        </div>
 
         {projectDetail === null ? (
           <aside className="context-panel">{detail.status === 'loading' ? <Skeleton lines={8} /> : null}</aside>
         ) : (
           <ContextPanel
             api={api}
-            project={projectDetail.project}
             checklist={viewedChecklist}
             documents={run !== null ? run.documents : stageDocuments}
-            run={run ?? (routeStage === PLANNING ? latestRun : null)}
-            latestRun={routeStage === PLANNING ? latestRun : null}
-            stage={routeStage}
             onNotify={onNotify}
           />
         )}
       </div>
+
+      <StatusBar
+        data={statusData}
+        telemetry={run !== null ? activityLog.telemetry : null}
+        stale={activityLog.connection === 'error' || activityLog.connection === 'reconnecting'}
+        runText={run === null ? null : `Attempt ${run.attempt} · ${runStatusLabel(run.status, routeStage)}`}
+      />
     </div>
   )
 }
@@ -531,30 +625,22 @@ export function StageWorkspace({
 
 function ProjectStageHeader({
   project,
-  rootPath,
   status,
   currentStageName,
   completedStages,
   totalStages,
   required,
   health,
-  theme,
-  onToggleTheme,
   onOpenSettings,
-  onEditProject,
 }: {
   project: Project
-  rootPath: string
   status: string | undefined
   currentStageName: string | null
   completedStages: number | null
   totalStages: number
   required: { done: number; total: number } | null
   health: ApiHealthController
-  theme: 'light' | 'dark'
-  onToggleTheme: () => void
   onOpenSettings: () => void
-  onEditProject: () => void
 }) {
   return (
     <header className="stage-project-header">
@@ -567,7 +653,6 @@ function ProjectStageHeader({
           {status !== undefined && <span className="chip project-status-chip" data-status={status}><span className="chip-glyph" aria-hidden="true" />{status}</span>}
           {currentStageName !== null && <span className="chip stage-badge">Stage: {currentStageName}</span>}
         </div>
-        {rootPath !== '' && <CopyField value={rootPath} label="root path" />}
       </div>
       <div className="stage-project-progress">
         {completedStages === null ? <Skeleton lines={1} /> : (
@@ -578,15 +663,6 @@ function ProjectStageHeader({
         )}
       </div>
       <div className="stage-project-actions">
-        <a className="button button-ghost button-sm" href={routeHref({ name: 'project', projectId: project.id, sessionId: null })}>
-          <MessageIcon size={14} /> Project chat
-        </a>
-        <a className="button button-ghost button-sm" href={routeHref({ name: 'logs', projectId: project.id, search: '' })}>
-          <ListIcon size={14} /> Logs
-        </a>
-        <button type="button" className="icon-button" aria-label="Edit project" title="Edit project" onClick={onEditProject}>
-          <PencilIcon size={16} />
-        </button>
         <button type="button" className="health-pill" data-status={health.state.status} onClick={onOpenSettings} title={health.state.error ?? 'Connection settings'}>
           <span className="status-dot" aria-hidden="true" />
           {healthLabel(health.state)}
@@ -594,11 +670,20 @@ function ProjectStageHeader({
         <button type="button" className="icon-button" aria-label="Settings" title="Settings" onClick={onOpenSettings}>
           <SettingsIcon size={16} />
         </button>
-        <button type="button" className="icon-button" onClick={onToggleTheme} aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>
-          {theme === 'dark' ? <SunIcon size={16} /> : <MoonIcon size={16} />}
-        </button>
       </div>
     </header>
+  )
+}
+
+function ReadOnlyNotice() {
+  return (
+    <div className="stage-notice" data-tone="info" role="note">
+      <InfoIcon size={16} />
+      <div className="stage-notice-body">
+        <strong>Completed stage — read-only</strong>
+        <p>You can review the run, reviews and artifacts. Changing a finished stage isn’t available yet.</p>
+      </div>
+    </div>
   )
 }
 
@@ -609,8 +694,8 @@ function ReadOnlyStage({ stageName: name, isCurrent }: { stageName: string; isCu
       <h3>Runtime not implemented yet</h3>
       <p>
         {name} can’t be executed from the UI yet. {isCurrent
-          ? 'This is the project’s current stage; its checklist and documents are on the right.'
-          : 'Its checklist and documents are shown on the right.'} Only Planning &amp; Feasibility runs today.
+          ? 'This is the project’s current stage; its checklist is on the right.'
+          : 'Its checklist is shown on the right.'}
       </p>
     </div>
   )
@@ -618,9 +703,11 @@ function ReadOnlyStage({ stageName: name, isCurrent }: { stageName: string; isCu
 
 // ---------------------------------------------------------------------------
 
-interface PlanningWorkspaceProps {
+interface ExecutableWorkspaceProps {
   api: ChatApi
   projectId: string
+  stage: string
+  stageLabel: string
   run: StageRunDetail | null
   runId: string | null
   poller: ReturnType<typeof useStageRun>
@@ -643,14 +730,19 @@ interface PlanningWorkspaceProps {
   onExecute: (runId: string) => void
   deciding: boolean
   decisionError: string | null
+  attachments: StageAttachments
   onDecide: (decision: HumanDecision, note: string) => void
+  onRefine: () => void
+  onDecideRequirements: (input: RequirementsDecisionInput) => void
   advanceCard: ReactNode
+  /** Finished stage: show progress and artifacts, change nothing. */
+  readOnly: boolean
   onRetryRuns: () => void
   onNotify: (message: string, tone: 'success' | 'error' | 'info') => void
 }
 
-function PlanningWorkspace(props: PlanningWorkspaceProps) {
-  const { run, runId, poller, runs, activity } = props
+function ExecutableWorkspace(props: ExecutableWorkspaceProps) {
+  const { run, runId, poller, runs, activity, stage, stageLabel } = props
   const runList = runs.status === 'ready' ? runs.value : null
   const runActive = run !== null && (isPollable(run.status) || run.status === 'awaiting_human')
   // Memoized per event batch; also feeds the pipeline step badges.
@@ -660,32 +752,32 @@ function PlanningWorkspace(props: PlanningWorkspaceProps) {
     return (
       <>
         {props.advanceCard}
-        <BriefCard {...props} title={runList !== null && runList.length > 0 ? 'Start a new attempt' : 'Business brief'} />
-        <RunHistory projectId={props.projectId} runs={runs} activeRunId={null} onRetry={props.onRetryRuns} />
+        {props.readOnly ? <ReadOnlyNotice /> : <BriefCard {...props} title={runList !== null && runList.length > 0 ? 'Start a new attempt' : stage === 'requirements' ? 'Requirements brief' : 'Business brief'} />}
+        <RunHistory stage={stage} projectId={props.projectId} runs={runs} activeRunId={null} onRetry={props.onRetryRuns} />
       </>
     )
   }
 
-  const loadError = poller.error === null ? null : describeStageError(poller.error)
+  const loadError = poller.error === null ? null : describeStageError(poller.error, stage)
   if (run === null) {
-    return poller.loading || loadError === null ? (
+    return poller.loading || (loadError === null && poller.run === null) ? (
       <>
         <Skeleton lines={2} className="stage-card" />
         <Skeleton lines={4} className="stage-card" />
       </>
     ) : (
-      <StageNotice error={loadError} {...(loadError.kind === 'not-found' || loadError.kind === 'unauthorized' ? {} : { onRetry: poller.resume })}>
-        <a className="text-button" href={routeHref({ name: 'stage', projectId: props.projectId, stage: PLANNING, runId: null })}>Back to Planning</a>
+      <StageNotice error={loadError ?? { title: 'Run not found here', message: 'This run does not belong to the selected project and stage.' }} {...(loadError === null || loadError.kind === 'not-found' || loadError.kind === 'unauthorized' ? {} : { onRetry: poller.resume })}>
+        <a className="text-button" href={routeHref({ name: 'stage', projectId: props.projectId, stage, runId: null })}>Back to {stageLabel}</a>
       </StageNotice>
     )
   }
 
   const failure = failureMessage(run)
   const cycleLimit = isCycleLimit(run)
-  const role = failedRole(run)
+  const role = failedRole(run, stage)
   const stopped = run.status === 'failed' || run.status === 'cancelled'
   const decision = recordedDecision(run)
-  const telos = telosDocument(run.documents)
+  const artifact = stageArtifact(run.documents, stage)
   function openActivity(role: PipelineStepKey | null): void {
     // A step opens the drawer filtered to that role; the button/line shows everything.
     activity.setFilters(role === null ? { ...activity.filters, role: 'all' } : { ...DEFAULT_FILTERS, role })
@@ -721,7 +813,7 @@ function PlanningWorkspace(props: PlanningWorkspaceProps) {
               <span className="activity-conn-dot" data-state={activity.log.connection} aria-hidden="true" />
               Activity
             </button>
-            <RunStatusChip status={run.status} />
+            <RunStatusChip status={run.status} stage={run.stage} />
           </div>
         </header>
         <p className="run-times">
@@ -730,10 +822,10 @@ function PlanningWorkspace(props: PlanningWorkspaceProps) {
           {run.completedAt !== null && <> · <TimeAgo iso={run.completedAt} prefix="finished" /></>}
           {poller.polling && <span className="run-polling"> · updating…</span>}
         </p>
-        <p className="sr-only" aria-live="polite">Run status: {runStatusLabel(run.status)}</p>
+        <p className="sr-only" aria-live="polite">Run status: {runStatusLabel(run.status, stage)}</p>
         <CurrentActivityLine events={activity.log.events} connection={activity.log.connection} expanded={activity.open} onOpen={() => openActivity(null)} />
 
-        {run.status === 'pending' && !props.executeRequested && (
+        {run.status === 'pending' && !props.executeRequested && !props.readOnly && (
           <div className="stage-card-foot">
             <span className="field-hint">This run is queued but hasn’t been started.</span>
             <button type="button" className="button button-primary" onClick={() => props.onExecute(run.id)}>Start execution</button>
@@ -768,32 +860,47 @@ function PlanningWorkspace(props: PlanningWorkspaceProps) {
       </section>
 
       <PipelineCard
+        stage={stage}
         run={run}
         lastSeenStep={poller.lastSeenStep}
         activity={{ summaries: roleTotals, onOpen: (role) => openActivity(role), openRole: activity.open ? (activity.filters.role === 'all' || activity.filters.role === 'run' ? null : activity.filters.role) : null }}
       />
 
-      {run.status === 'awaiting_human' && (
-        <DecisionPanel busy={props.deciding} error={props.decisionError} onDecide={props.onDecide} />
-      )}
+      {props.readOnly && <ReadOnlyNotice />}
+
+      {run.status === 'awaiting_human' && !props.readOnly && (() => {
+        const gate = gateOf(run)
+        if (stage === 'requirements') {
+          return gate?.kind === 'final'
+            ? <RequirementsFinalGatePanel key={`${run.id}:${gate.waitingSince}`} gate={gate} draftMarkdown={run.draftMarkdown} busy={props.deciding} error={props.decisionError} onDecide={props.onDecideRequirements} onRefine={props.onRefine} rejectionRecorded={requirementsRejectionRecorded(run)} />
+            : <StageNotice error={{ title: 'Approval details unavailable', message: 'Refresh the run to load the requirements gate before deciding.' }} onRetry={poller.resume} />
+        }
+        if (gate?.kind === 'final') {
+          return <FinalGatePanel gate={gate} draftMarkdown={run.draftMarkdown} busy={props.deciding} error={props.decisionError} onComplete={props.onDecide} onRefine={props.onRefine} />
+        }
+        // Older API without `pendingGate`: the plain decision form.
+        return <DecisionPanel stage={stage} busy={props.deciding} error={props.decisionError} onDecide={props.onDecide} />
+      })()}
 
       {props.advanceCard}
 
-      <ReviewsCard reviews={run.reviews} cycleLimit={cycleLimit} />
+      <ReviewsCard stage={stage} reviews={run.reviews} cycleLimit={cycleLimit} />
 
-      {stopped && <PartialOutputCard run={run} />}
+      {stopped && <PartialOutputCard stage={stage} run={run} />}
 
-      {telos !== undefined ? (
-        <TelosDocument api={props.api} document={telos} onNotify={props.onNotify} />
+      {artifact !== undefined ? (
+        <StageDocument stage={stage} api={props.api} document={artifact} runId={run.id} exportFailed={exportFailure(activity.log.events)} onNotify={props.onNotify} />
       ) : (
         <section className="stage-card">
-          <header className="stage-card-head stage-card-head-compact"><h3>TELOS feasibility report</h3></header>
+          <header className="stage-card-head stage-card-head-compact"><h3>{stageArtifactTitle(stage)}</h3></header>
           <p className="section-empty-inline">
-            {isPollable(run.status)
-              ? 'The report appears here after the reviewer approves it.'
+            {run.status === 'awaiting_human'
+              ? 'Nothing is produced before you approve. The document and PDF appear after you complete the stage; the draft is previewed in the gate above.'
+              : isPollable(run.status)
+              ? 'The document appears here after human approval.'
               : stopped && (run.analysisMarkdown || run.draftMarkdown)
-                ? 'No approved report was stored for this run. See Partial output above for the saved draft.'
-                : 'No report was stored for this run.'}
+                ? 'No approved document was stored for this run. See Partial output above for the saved draft.'
+                : 'No document was stored for this run.'}
           </p>
         </section>
       )}
@@ -805,12 +912,14 @@ function PlanningWorkspace(props: PlanningWorkspaceProps) {
         </details>
       )}
 
-      <details className="stage-card brief-disclosure" open={offerRetry || undefined}>
-        <summary>Start a new attempt</summary>
-        <BriefCard {...props} title={null} />
-      </details>
+      {!props.readOnly && (
+        <details className="stage-card brief-disclosure" open={offerRetry || undefined}>
+          <summary>Start a new attempt</summary>
+          <BriefCard {...props} title={null} />
+        </details>
+      )}
 
-      <RunHistory projectId={props.projectId} runs={runs} activeRunId={run.id} onRetry={props.onRetryRuns} />
+      <RunHistory stage={stage} projectId={props.projectId} runs={runs} activeRunId={run.id} onRetry={props.onRetryRuns} />
 
       <ActivityDrawer
         open={activity.open}
@@ -835,10 +944,13 @@ function BriefCard({
   startError,
   startDisabled,
   onStart,
+  attachments,
+  stage,
   title,
-}: PlanningWorkspaceProps & { title: string | null }) {
+}: ExecutableWorkspaceProps & { title: string | null }) {
   const id = useId()
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const requirements = stage === 'requirements'
   const over = brief.length > MAX_BRIEF_CHARS
   const disabled = starting || startDisabled
 
@@ -860,10 +972,9 @@ function BriefCard({
       }}
     >
       <div className="field">
-        <label className="field-label" htmlFor={id}>Business idea and stakeholder goals</label>
+        <label className="field-label" htmlFor={id}>{requirements ? 'Requirements brief' : 'Business idea and stakeholder goals'}</label>
         <p className="field-hint" id={`${id}-help`}>
-          Describe the problem, target users, business idea, stakeholder goals, success measures and known constraints.
-          The analyzer will turn this into a TELOS feasibility report.
+          {requirements ? 'Describe the actors, workflows, scope, and constraints that the specification should cover.' : 'Describe the problem, target users, business idea, stakeholder goals, success measures and known constraints. The analyzer will turn this into a TELOS feasibility report.'}
         </p>
         <textarea
           ref={textareaRef}
@@ -880,16 +991,17 @@ function BriefCard({
           {over
             ? <span className="field-error">Keep the brief under {MAX_BRIEF_CHARS.toLocaleString()} characters.</span>
             : brief.trim() === ''
-              ? <span className="field-warning">Empty brief: the report will be based only on project metadata.</span>
+              ? <span className="field-warning">An empty brief can be used when other inputs satisfy stage prerequisites.</span>
               : <span className="field-hint">Saved in this browser until you start a run.</span>}
           <span className="field-hint" data-over={over || undefined}>{brief.length.toLocaleString()} / {MAX_BRIEF_CHARS.toLocaleString()}</span>
         </div>
       </div>
+      <AttachmentsField attachments={attachments} disabled={disabled} runQueued={startDisabled} />
       {startError !== null && <StageNotice error={startError} />}
       <div className="stage-card-foot">
         {startDisabled && <span className="field-hint">A run is executing. Wait for it to finish.</span>}
-        <button type="submit" className="button button-primary" disabled={disabled || over}>
-          {starting ? 'Starting…' : 'Start planning run'}
+        <button type="submit" className="button button-primary" disabled={disabled || over || attachments.uploading}>
+          {starting ? 'Starting…' : requirements ? 'Start requirements run' : 'Start planning run'}
         </button>
       </div>
     </form>
@@ -904,25 +1016,25 @@ function BriefCard({
   )
 }
 
-function RunHistory({ projectId, runs, activeRunId, onRetry }: { projectId: string; runs: Loadable<StageRun[]>; activeRunId: string | null; onRetry: () => void }) {
+function RunHistory({ stage, projectId, runs, activeRunId, onRetry }: { stage: string; projectId: string; runs: Loadable<StageRun[]>; activeRunId: string | null; onRetry: () => void }) {
   return (
     <section className="stage-card run-history" aria-labelledby="run-history-title">
       <header className="stage-card-head stage-card-head-compact"><h3 id="run-history-title">Run history</h3></header>
       {runs.status === 'loading' ? <Skeleton lines={2} /> : runs.status === 'error' ? (
-        <StageNotice error={describeStageError(runs.error)} onRetry={onRetry} />
+        <StageNotice error={describeStageError(runs.error, stage)} onRetry={onRetry} />
       ) : runs.value.length === 0 ? (
-        <p className="section-empty-inline">No planning runs yet.</p>
+        <p className="section-empty-inline">No runs yet.</p>
       ) : (
         <ol className="run-history-list">
           {runs.value.map((entry) => (
             <li key={entry.id}>
               <a
                 className="run-history-row"
-                href={routeHref({ name: 'stage', projectId, stage: PLANNING, runId: entry.id })}
+                href={routeHref({ name: 'stage', projectId, stage, runId: entry.id })}
                 aria-current={entry.id === activeRunId ? 'page' : undefined}
               >
                 <span className="run-history-attempt">Attempt {entry.attempt}</span>
-                <RunStatusChip status={entry.status} />
+                <RunStatusChip status={entry.status} stage={stage} />
                 <span className="run-history-time"><TimeAgo iso={entry.updatedAt} prefix="updated" /></span>
               </a>
             </li>

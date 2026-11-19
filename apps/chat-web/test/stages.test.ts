@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, ChatApi } from '../src/api/client.ts'
-import type { ChecklistItem, StageReview, StageRunDetail } from '../src/api/types.ts'
+import type { ChecklistItem, ProjectDocument, StageReview, StageRunDetail } from '../src/api/types.ts'
 import { loadBrief, saveBrief } from '../src/data/briefs.ts'
 import { describeStageError } from '../src/data/stageErrors.ts'
 import {
@@ -12,6 +12,7 @@ import {
   partialOutputs,
   FALLBACK_STAGES,
   isCycleLimit,
+  isExecutableStage,
   isPollable,
   nextStageKey,
   pipelineSteps,
@@ -20,10 +21,13 @@ import {
   recordedDecision,
   requiredProgress,
   revisionCount,
+  runStatusLabel,
   severityCounts,
+  sortDocuments,
   sortStages,
+  stageArtifact,
+  stageArtifactTitle,
   stageName,
-  telosDocument,
 } from '../src/data/stages.ts'
 import { createMemoryStorage } from '../src/lib/storage.ts'
 
@@ -53,6 +57,26 @@ describe('stage names', () => {
     expect(nextStageKey(FALLBACK_STAGES, 'planning')).toBe('requirements')
     expect(nextStageKey(FALLBACK_STAGES, 'maintenance')).toBeNull()
   })
+
+  it('uses capability flags when present and falls back to Planning for older APIs', () => {
+    expect(isExecutableStage([], 'planning')).toBe(true)
+    expect(isExecutableStage(FALLBACK_STAGES, 'planning')).toBe(true)
+    expect(isExecutableStage(FALLBACK_STAGES, 'requirements')).toBe(false)
+    const stages = FALLBACK_STAGES.map((stage) => ({ ...stage, executable: stage.key === 'planning' || stage.key === 'requirements' }))
+    expect(isExecutableStage(stages, 'planning')).toBe(true)
+    expect(isExecutableStage(stages, 'requirements')).toBe(true)
+    expect(isExecutableStage(stages, 'design')).toBe(false)
+    expect(isExecutableStage(stages, 'unknown')).toBe(false)
+    expect(isExecutableStage([{ ...FALLBACK_STAGES[0]!, executable: false }], 'planning')).toBe(false)
+    expect(isExecutableStage([FALLBACK_STAGES[0]!, { ...FALLBACK_STAGES[1]!, executable: true }], 'planning')).toBe(false)
+  })
+
+  it('labels drafting for the requested stage', () => {
+    expect(runStatusLabel('drafting')).toBe('Drafting TELOS')
+    expect(runStatusLabel('drafting', 'requirements')).toBe('Drafting requirements')
+    expect(runStatusLabel('drafting', 'design')).toBe('Drafting document')
+    expect(runStatusLabel('reviewing', 'requirements')).toBe('Under review')
+  })
 })
 
 describe('pipeline', () => {
@@ -75,6 +99,14 @@ describe('pipeline', () => {
     expect(states({ status: 'failed' })).toEqual(['waiting', 'waiting', 'waiting'])
   })
 
+  it('only changes the author label for Requirements', () => {
+    const drafting = run({ status: 'drafting', stage: 'requirements' })
+    const planning = pipelineSteps(drafting)
+    expect(pipelineSteps(drafting, null, 'requirements')).toEqual([
+      planning[0], { key: 'author', label: 'Requirements author', state: 'active' }, planning[2],
+    ])
+  })
+
   it('only polls queued or executing runs', () => {
     expect(['pending', 'analyzing', 'revising'].every(isPollable)).toBe(true)
     expect(['awaiting_human', 'completed', 'failed', 'cancelled'].some(isPollable)).toBe(false)
@@ -86,7 +118,9 @@ describe('failed-run partial output', () => {
     run({ status: 'failed', summaryMarkdown: `# Planning & Feasibility run failed\n\n${message}\n`, ...extra })
 
   it('reads the failed role from STAGE_ROLE_FAILED text', () => {
-    expect(failedRole(failedWith('author failed: harness exited 1'))).toEqual({ role: 'author', label: 'TELOS author', message: 'harness exited 1' })
+    const failed = failedWith('author failed: harness exited 1')
+    expect(failedRole(failed)).toEqual({ role: 'author', label: 'TELOS author', message: 'harness exited 1' })
+    expect(failedRole(failed, 'requirements')).toEqual({ role: 'author', label: 'Requirements author', message: 'harness exited 1' })
     expect(failedRole(failedWith('Reviewer failed: timed out'))?.role).toBe('reviewer')
     expect(failedRole(failedWith('review did not approve after 3 revision cycles'))).toBeNull()
     expect(failedRole(run({ status: 'completed', summaryMarkdown: 'analyzer failed: x' }))).toBeNull()
@@ -105,6 +139,9 @@ describe('failed-run partial output', () => {
   it('lists saved analysis and draft, skipping blanks and older APIs', () => {
     expect(partialOutputs({ analysisMarkdown: '# a', draftMarkdown: '  ' }).map((o) => o.key)).toEqual(['analysis'])
     expect(partialOutputs({ analysisMarkdown: '# a', draftMarkdown: '# d' }).map((o) => o.title)).toEqual(['Analysis', 'Latest TELOS draft'])
+    expect(partialOutputs({ draftMarkdown: '# requirements' }, 'requirements')).toEqual([
+      { key: 'draft', title: 'Latest requirements draft', markdown: '# requirements' },
+    ])
     expect(partialOutputs({})).toEqual([])
   })
 
@@ -136,13 +173,33 @@ describe('reviews and outcome', () => {
     expect(recordedDecision(run({ status: 'completed', summaryMarkdown: 'Decision: approved' }))).toBeNull()
   })
 
-  it('finds the TELOS document', () => {
-    const doc = (id: string, kind: string, status = 'approved') => ({
-      id, projectId: 'p', stage: 'planning' as const, kind, title: id, storagePath: `x/${id}.md`, mimeType: 'text/markdown',
-      status: status as 'approved', version: 1, createdAt: '', updatedAt: '',
-    })
-    expect(telosDocument([doc('a', 'upload'), doc('b', 'telos_report', 'superseded'), doc('c', 'telos_report')])?.id).toBe('c')
-    expect(telosDocument([doc('a', 'upload')])).toBeUndefined()
+  const doc = (id: string, stage: ProjectDocument['stage'], kind: string, patch: Partial<ProjectDocument> = {}): ProjectDocument => ({
+    id, projectId: 'p', stage, kind, title: id, storagePath: `x/${id}.md`, mimeType: 'text/markdown',
+    status: 'approved', version: 1, createdAt: '2026-11-01', updatedAt: '2026-11-01', ...patch,
+  })
+
+  it('finds the artifact by stage and kind, preferring non-superseded output', () => {
+    const upload = doc('upload', 'requirements', 'upload')
+    const telos = doc('telos', 'planning', 'telos_report')
+    const superseded = doc('old-spec', 'requirements', 'requirements_spec', { status: 'superseded' })
+    const spec = doc('spec', 'requirements', 'requirements_spec')
+    const wrongStage = doc('wrong-stage', 'planning', 'requirements_spec')
+    const docs = [upload, telos, superseded, wrongStage, spec]
+    expect(stageArtifact(docs, 'planning')).toBe(telos)
+    expect(stageArtifact(docs, 'requirements')).toBe(spec)
+    expect(stageArtifact([superseded], 'requirements')).toBe(superseded)
+    expect(stageArtifact([upload, telos, wrongStage], 'requirements')).toBeUndefined()
+    expect(stageArtifact(docs, 'design')).toBeUndefined()
+    expect(stageArtifactTitle('planning')).toBe('TELOS feasibility report')
+    expect(stageArtifactTitle('requirements')).toBe('Requirements specification')
+  })
+
+  it('sorts the stage artifact kind ahead of newer attachments', () => {
+    const spec = doc('spec', 'requirements', 'requirements_spec')
+    const older = doc('older', 'requirements', 'upload', { createdAt: '2026-11-02' })
+    const newer = doc('newer', 'requirements', 'upload', { createdAt: '2026-11-03' })
+    expect(sortDocuments([older, newer, spec], 'requirements')).toEqual([spec, newer, older])
+    expect(sortDocuments([older, newer, spec], 'design')).toEqual([newer, older, spec])
   })
 })
 

@@ -1,6 +1,6 @@
 /**
- * Unsent planning briefs, per project, so the text survives navigation and
- * reloads. Removed once a run is created with it.
+ * Unsent briefs, per project and stage, so the text survives navigation and
+ * reloads. The planning key stays compatible with existing drafts.
  */
 
 import { readJson, writeJson, type StorageLike } from '../lib/storage.ts'
@@ -15,13 +15,18 @@ function readMap(storage: StorageLike): Record<string, string> {
   )
 }
 
-export function loadBrief(storage: StorageLike, projectId: string): string | null {
-  return readMap(storage)[projectId] ?? null
+function briefKey(projectId: string, stage: string): string {
+  return stage === 'planning' ? projectId : `${projectId}:${stage}`
 }
 
-export function saveBrief(storage: StorageLike, projectId: string, brief: string | null): void {
+export function loadBrief(storage: StorageLike, projectId: string, stage = 'planning'): string | null {
+  return readMap(storage)[briefKey(projectId, stage)] ?? null
+}
+
+export function saveBrief(storage: StorageLike, projectId: string, brief: string | null, stage = 'planning'): void {
   const map = readMap(storage)
-  if (brief === null || brief === '') delete map[projectId]
-  else map[projectId] = brief
+  const key = briefKey(projectId, stage)
+  if (brief === null || brief === '') delete map[key]
+  else map[key] = brief
   writeJson(storage, BRIEFS_KEY, map)
 }

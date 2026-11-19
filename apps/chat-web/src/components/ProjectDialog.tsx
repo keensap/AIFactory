@@ -15,6 +15,8 @@ export interface ProjectDialogProps {
   project?: Project
   onClose: () => void
   onSave: (draft: ProjectDraft) => Promise<string | undefined>
+  /** Edit mode only: starts the confirmed removal of the project from AI Factory. */
+  onRemove?: () => void
 }
 
 const STATUSES: { value: ProjectStatus; label: string }[] = [
@@ -23,7 +25,7 @@ const STATUSES: { value: ProjectStatus; label: string }[] = [
   { value: 'archived', label: 'Archived' },
 ]
 
-export function ProjectDialog({ open, mode, project, onClose, onSave }: ProjectDialogProps) {
+export function ProjectDialog({ open, mode, project, onClose, onSave, onRemove }: ProjectDialogProps) {
   const editing = project !== undefined
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -282,6 +284,25 @@ export function ProjectDialog({ open, mode, project, onClose, onSave }: ProjectD
           <p className="form-error" role="alert">{formError}</p>
         )}
       </form>
+
+      {editing && onRemove !== undefined && (
+        <section className="danger-zone" aria-labelledby="danger-zone-title">
+          <h3 id="danger-zone-title">Danger zone</h3>
+          <div className="danger-zone-row">
+            <div>
+              <strong>Remove from AI Factory</strong>
+              <p className="field-hint">
+                {mode === 'api'
+                  ? 'Removes the project from the registry. Its folder and files stay exactly where they are.'
+                  : 'Removes the project from this browser. Its chats are not deleted.'}
+              </p>
+            </div>
+            <button type="button" className="button button-danger" disabled={busy} onClick={onRemove}>
+              Remove from AI Factory
+            </button>
+          </div>
+        </section>
+      )}
     </Modal>
   )
 }

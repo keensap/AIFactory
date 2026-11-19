@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { normalizeBaseUrl, type AppSettings, type ThemePreference } from '../data/settings.ts'
 import type { ApiHealthState } from '../hooks/useApiHealth.ts'
 import type { ProjectsMode } from '../hooks/useProjects.ts'
 import { CheckIcon, MonitorIcon, MoonIcon, RefreshIcon, SunIcon } from './Icons.tsx'
 import { Modal } from './Modal.tsx'
+import type { ChatApi } from '../api/client.ts'
+import { ReviewSettings } from './stage/ReviewSettings.tsx'
 
 export interface TestResult {
   ok: boolean
@@ -22,6 +24,8 @@ export interface SettingsDialogProps {
   onSave: (settings: AppSettings, theme: ThemePreference) => void
   onTest: (settings: AppSettings) => Promise<TestResult>
   onRefreshProjects: () => Promise<void>
+  /** Enables the Factory-default stage review settings section. */
+  api?: ChatApi
 }
 
 const THEMES: { id: ThemePreference; label: string; icon: typeof SunIcon }[] = [
@@ -42,6 +46,7 @@ export function SettingsDialog({
   onSave,
   onTest,
   onRefreshProjects,
+  api,
 }: SettingsDialogProps) {
   const [baseUrl, setBaseUrl] = useState(settings.apiBaseUrl)
   const [token, setToken] = useState(settings.apiToken)
@@ -50,6 +55,9 @@ export function SettingsDialog({
   const [error, setError] = useState<string | undefined>()
   const [testState, setTestState] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle')
   const [testMessage, setTestMessage] = useState('')
+  // Older APIs have no Factory stage defaults: drop the whole section.
+  const [stageDefaultsHidden, setStageDefaultsHidden] = useState(false)
+  const hideStageDefaults = useCallback(() => setStageDefaultsHidden(true), [])
 
   useEffect(() => {
     if (!open) return
@@ -209,6 +217,14 @@ export function SettingsDialog({
             </button>
           </div>
         </section>
+
+        {api !== undefined && projectsMode === 'api' && !stageDefaultsHidden && (
+          <section className="settings-section">
+            <h3>Planning review defaults</h3>
+            <p className="field-hint">Factory default for every project that has no override of its own.</p>
+            {open && <ReviewSettings api={api} scope={{ kind: 'factory' }} onHidden={hideStageDefaults} />}
+          </section>
+        )}
 
         <section className="settings-section">
           <h3>Appearance</h3>

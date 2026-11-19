@@ -16,11 +16,11 @@ export function StageStatusChip({ status }: { status: StageStatus }) {
   )
 }
 
-export function RunStatusChip({ status }: { status: string }) {
+export function RunStatusChip({ status, stage }: { status: string; stage?: string }) {
   return (
     <span className="chip run-chip" data-status={status}>
       <span className="chip-glyph" aria-hidden="true" />
-      {runStatusLabel(status)}
+      {runStatusLabel(status, stage)}
     </span>
   )
 }

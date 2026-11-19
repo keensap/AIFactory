@@ -33,10 +33,34 @@ export const FALLBACK_STAGES: readonly SdlcStage[] = [
   { key: 'maintenance', name: 'Maintenance', position: 7 },
 ]
 
-/** The only stage the API can execute today. */
-export const EXECUTABLE_STAGES: ReadonlySet<string> = new Set(['planning'])
 export const TELOS_KIND = 'telos_report'
 export const MAX_BRIEF_CHARS = 20_000
+
+type StageCapability = SdlcStage & { executable?: boolean }
+
+/** Older APIs don't advertise capabilities; only Planning can be assumed. */
+export function isExecutableStage(stages: readonly StageCapability[], key: string): boolean {
+  if (!stages.some((stage) => typeof stage.executable === 'boolean')) return key === 'planning'
+  return stages.find((stage) => stage.key === key)?.executable === true
+}
+
+const ARTIFACTS = {
+  planning: { kind: TELOS_KIND, title: 'TELOS feasibility report', shortName: 'TELOS' },
+  requirements: { kind: 'requirements_spec', title: 'Requirements specification', shortName: 'requirements' },
+} as const
+
+function artifactForStage(stage: string) {
+  if (stage === 'planning' || stage === 'requirements') return ARTIFACTS[stage]
+  return undefined
+}
+
+export function stageArtifactKind(stage: string): string | undefined {
+  return artifactForStage(stage)?.kind
+}
+
+export function stageArtifactTitle(stage: string): string {
+  return artifactForStage(stage)?.title ?? 'Output document'
+}
 
 export function sortStages(stages: readonly SdlcStage[]): SdlcStage[] {
   const list = stages.length > 0 ? [...stages] : [...FALLBACK_STAGES]
@@ -80,7 +104,10 @@ export const RUN_STATUS_LABEL: Record<RunStatus, string> = {
   cancelled: 'Cancelled',
 }
 
-export function runStatusLabel(status: string): string {
+export function runStatusLabel(status: string, stage = 'planning'): string {
+  if (status === 'drafting' && stage !== 'planning') {
+    return `Drafting ${artifactForStage(stage)?.shortName ?? 'document'}`
+  }
   return RUN_STATUS_LABEL[status as RunStatus] ?? status
 }
 
@@ -114,10 +141,12 @@ export interface PipelineStep {
   state: PipelineStepState
 }
 
-const STEP_LABELS: Record<PipelineStepKey, string> = {
-  analyzer: 'Analyzer',
-  author: 'TELOS author',
-  reviewer: 'Reviewer',
+function stepLabel(key: PipelineStepKey, stage: string): string {
+  if (key === 'analyzer') return 'Analyzer'
+  if (key === 'reviewer') return 'Reviewer'
+  if (stage === 'planning') return 'TELOS author'
+  if (stage === 'requirements') return 'Requirements author'
+  return 'Author'
 }
 const STEP_ORDER: PipelineStepKey[] = ['analyzer', 'author', 'reviewer']
 
@@ -163,9 +192,10 @@ export function failedStep(
 export function pipelineSteps(
   run: Pick<StageRunDetail, 'status' | 'summaryMarkdown' | 'reviews' | 'analysisMarkdown' | 'draftMarkdown'>,
   lastSeenStep: PipelineStepKey | null = null,
+  stage = 'planning',
 ): PipelineStep[] {
   const build = (stateFor: (key: PipelineStepKey, index: number) => PipelineStepState): PipelineStep[] =>
-    STEP_ORDER.map((key, index) => ({ key, label: STEP_LABELS[key], state: stateFor(key, index) }))
+    STEP_ORDER.map((key, index) => ({ key, label: stepLabel(key, stage), state: stateFor(key, index) }))
 
   if (run.status === 'awaiting_human' || run.status === 'completed') return build(() => 'done')
 
@@ -249,12 +279,12 @@ const ROLE_FAILED = /^(analyzer|author|reviewer) failed:\s*([\s\S]*)$/i
  * Role named by a `STAGE_ROLE_FAILED` error ("author failed: <message>"), with
  * the message minus the prefix. Null for other failures.
  */
-export function failedRole(run: Pick<StageRun, 'status' | 'summaryMarkdown'>): { role: PipelineStepKey; label: string; message: string } | null {
+export function failedRole(run: Pick<StageRun, 'status' | 'summaryMarkdown'>, stage = 'planning'): { role: PipelineStepKey; label: string; message: string } | null {
   const message = failureMessage(run)
   const match = message === null ? null : ROLE_FAILED.exec(message)
   if (match === null) return null
   const role = match[1]!.toLowerCase() as PipelineStepKey
-  return { role, label: STEP_LABELS[role], message: match[2]!.trim() || 'No details were given.' }
+  return { role, label: stepLabel(role, stage), message: match[2]!.trim() || 'No details were given.' }
 }
 
 function hasText(value: string | null | undefined): value is string {
@@ -262,10 +292,11 @@ function hasText(value: string | null | undefined): value is string {
 }
 
 /** Work saved before a run stopped, for read-only display. Empty when none. */
-export function partialOutputs(run: Pick<StageRun, 'analysisMarkdown' | 'draftMarkdown'>): { key: 'analysis' | 'draft'; title: string; markdown: string }[] {
+export function partialOutputs(run: Pick<StageRun, 'analysisMarkdown' | 'draftMarkdown'>, stage = 'planning'): { key: 'analysis' | 'draft'; title: string; markdown: string }[] {
   const out: { key: 'analysis' | 'draft'; title: string; markdown: string }[] = []
   if (hasText(run.analysisMarkdown)) out.push({ key: 'analysis', title: 'Analysis', markdown: run.analysisMarkdown })
-  if (hasText(run.draftMarkdown)) out.push({ key: 'draft', title: 'Latest TELOS draft', markdown: run.draftMarkdown })
+  const shortName = artifactForStage(stage)?.shortName
+  if (hasText(run.draftMarkdown)) out.push({ key: 'draft', title: shortName === undefined ? 'Latest draft' : `Latest ${shortName} draft`, markdown: run.draftMarkdown })
   return out
 }
 
@@ -287,16 +318,22 @@ export function recordedDecision(run: Pick<StageRun, 'status' | 'summaryMarkdown
   return value === 'go' || value === 'conditional_go' || value === 'no_go' ? value : null
 }
 
-export function telosDocument(documents: readonly ProjectDocument[]): ProjectDocument | undefined {
-  return documents.find((document) => document.kind === TELOS_KIND && document.status !== 'superseded')
-    ?? documents.find((document) => document.kind === TELOS_KIND)
+/** Prefer the current output of the requested stage over a superseded version. */
+export function stageArtifact(documents: readonly ProjectDocument[], stage: string): ProjectDocument | undefined {
+  const kind = stageArtifactKind(stage)
+  if (kind === undefined) return undefined
+  const matches = (document: ProjectDocument): boolean => document.stage === stage && document.kind === kind
+  return documents.find((document) => matches(document) && document.status !== 'superseded')
+    ?? documents.find(matches)
 }
 
-/** TELOS first, then newest first. */
-export function sortDocuments(documents: readonly ProjectDocument[]): ProjectDocument[] {
+/** The stage artifact kind first, then newest first. */
+export function sortDocuments(documents: readonly ProjectDocument[], stage = 'planning'): ProjectDocument[] {
+  const kind = stageArtifactKind(stage)
+  const isPrimary = (document: ProjectDocument): boolean => document.stage === stage && document.kind === kind
   return [...documents].sort((a, b) => {
-    const telos = Number(b.kind === TELOS_KIND) - Number(a.kind === TELOS_KIND)
-    return telos !== 0 ? telos : b.createdAt.localeCompare(a.createdAt)
+    const primary = Number(isPrimary(b)) - Number(isPrimary(a))
+    return primary !== 0 ? primary : b.createdAt.localeCompare(a.createdAt)
   })
 }
 

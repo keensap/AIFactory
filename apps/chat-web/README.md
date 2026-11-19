@@ -30,17 +30,15 @@ Three screens:
   (`GET /api/fs/directories`). Browsers can't expose real paths, so the API
   host lists its own folders.
 - **Stage workspace** (registry projects): opening a project shows its SDLC
-  stages (rail), the current stage and a context panel (checklist, documents,
-  project context). **Planning & Feasibility** runs end to end: business brief →
+  stages (a stage bar above the stage: completed stages are viewable read-only, the current one is highlighted, later ones are disabled), a project panel (info, links, settings), the checklist and a bottom status bar (model, tokens, cost, context). **Planning & Feasibility** runs end to end: business brief →
   stage run → analyzer / TELOS author / reviewer pipeline (polled) → review
   findings → TELOS feasibility report (rendered, downloadable with auth) →
-  go / conditional-go / no-go decision → *Advance to Requirements*. Other
-  stages are read-only until the API can run them.
+  a final go / conditional-go / no-go decision → *Advance to Requirements*. **Requirements** supports brief and PDF inputs, automatic review and revision, then a final gate with coverage findings and Approve, Reject, and Refine actions. Coverage blockers require an explicit waiver reason to approve; rejection publishes nothing. Approval publishes the requirements specification and PDF. The stage catalogue controls runtime availability; unsupported stages remain read-only.
 - **Project log viewer** (`#/projects/:id/logs`, registry projects): newest-first logs of one project with level / stage / run /
   role / type / text filters, shareable filter URLs, live tail, "load older", row detail (payload, ids, link to the run), secret
   masking and JSONL/CSV export. Logs are isolated per project. A collapsible **Traces** card shows the project's
   Phoenix summary (spans, errors, tokens, latency, per-role breakdown) when Phoenix is enabled on the API.
-- **Project chat** (`#/projects/:id/chats`): a project-settings sidebar (details, status, edit,
+- **Project chat** (`#/projects/:id/chats`, local projects only; registry projects chat inside their stages via the docked stage chat): a project-settings sidebar (details, status, edit,
   delete) and a *Chats* history menu with deep links.
 - **Real streaming** from `POST /api/chat/stream` using `fetch` + a small SSE
   parser (no `EventSource`; POST bodies and auth headers work).

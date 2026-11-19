@@ -16,13 +16,20 @@ import type {
   DirectoryListing,
   PdfReviewResult,
   HealthResponse,
-  HumanDecision,
+  StageDecisionInput,
   ProjectDetail,
   ProjectDocument,
   ProjectLog,
   ProjectLogPage,
   ProjectLogQuery,
   ObservabilitySummary,
+  ModelCatalogEntry,
+  ModelTarget,
+  ProjectUsage,
+  RunTelemetry,
+  PlanningStageSettings,
+  ResolvedStageSettings,
+  StageAttachment,
   LogLevel,
   SdlcStage,
   SessionDetail,
@@ -34,6 +41,9 @@ import type {
   StageRunEventPage,
   SessionSummary,
 } from './types.ts'
+import { normalizeAttachment } from '../data/attachments.ts'
+import { normalizeStageSettings } from '../data/gates.ts'
+import { normalizeTelemetry } from '../data/telemetry.ts'
 import { SseParser, type SseFrame } from './sse.ts'
 
 export class ApiError extends Error {
@@ -238,7 +248,7 @@ export class ChatApi {
   async createStageRun(
     projectId: string,
     stage: StageKey,
-    input: { brief: string },
+    input: { brief: string; attachmentIds?: string[] },
     signal?: AbortSignal,
   ): Promise<StageRunDetail> {
     const body = await this.request<{ run: StageRunDetail }>(
@@ -246,6 +256,66 @@ export class ChatApi {
       json('POST', input, signal),
     )
     return body.run
+  }
+
+  /** Stage input PDFs of a project, newest first. */
+  async listAttachments(projectId: string, stage: StageKey, signal?: AbortSignal): Promise<StageAttachment[]> {
+    const body = await this.request<{ attachments?: unknown }>(
+      `/api/projects/${encodeURIComponent(projectId)}/attachments?stage=${encodeURIComponent(stage)}`,
+      { method: 'GET', signal },
+    )
+    return (Array.isArray(body.attachments) ? body.attachments : [])
+      .map(normalizeAttachment)
+      .filter((entry): entry is StageAttachment => entry !== null)
+  }
+
+  /** Upload every file in ONE multipart request (field `files`); the API rejects the whole request if any file breaks a limit. */
+  async uploadAttachments(projectId: string, files: readonly File[], stage: StageKey, signal?: AbortSignal): Promise<StageAttachment[]> {
+    const form = new FormData()
+    for (const file of files) form.append('files', file, file.name)
+    form.append('stage', stage)
+    const body = await this.request<{ attachments?: unknown }>(
+      `/api/projects/${encodeURIComponent(projectId)}/attachments`,
+      { method: 'POST', body: form, ...(signal === undefined ? {} : { signal }) },
+    )
+    return (Array.isArray(body.attachments) ? body.attachments : [])
+      .map(normalizeAttachment)
+      .filter((entry): entry is StageAttachment => entry !== null)
+  }
+
+  async deleteAttachment(projectId: string, attachmentId: string, signal?: AbortSignal): Promise<void> {
+    await this.request<unknown>(
+      `/api/projects/${encodeURIComponent(projectId)}/attachments/${encodeURIComponent(attachmentId)}`,
+      { method: 'DELETE', signal },
+    )
+  }
+
+  /** The original uploaded PDF (bearer auth, so not a plain link). */
+  async getAttachmentContent(projectId: string, attachmentId: string, signal?: AbortSignal): Promise<Blob> {
+    const response = await this.fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/attachments/${encodeURIComponent(attachmentId)}/content`,
+      { method: 'GET', headers: { Accept: 'application/pdf', ...this.authHeaders() }, ...(signal === undefined ? {} : { signal }) },
+    )
+    if (!response.ok) throw await this.errorFromResponse(response)
+    return response.blob()
+  }
+
+  /**
+   * The deliverable PDF of a document: `GET /api/projects/:id/documents/:documentId/export`.
+   * Serves the PDF in `documents/<stage>/` and writes it first when it is missing.
+   */
+  async getExportedPdf(projectId: string, documentId: string, signal?: AbortSignal): Promise<{ blob: Blob; filename: string | null }> {
+    const response = await this.fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}/export`,
+      { method: 'GET', headers: { Accept: 'application/pdf', ...this.authHeaders() }, ...(signal === undefined ? {} : { signal }) },
+    )
+    if (!response.ok) throw await this.errorFromResponse(response)
+    const disposition = response.headers.get('Content-Disposition') ?? ''
+    const star = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
+    const plain = /filename="?([^";]+)"?/i.exec(disposition)
+    let filename: string | null = null
+    try { filename = star?.[1] !== undefined ? decodeURIComponent(star[1]) : (plain?.[1] ?? null) } catch { filename = plain?.[1] ?? null }
+    return { blob: await response.blob(), filename }
   }
 
   async getStageRun(runId: string, signal?: AbortSignal): Promise<StageRunDetail> {
@@ -273,9 +343,59 @@ export class ChatApi {
     return body.run
   }
 
+  /** Re-render the stage PDF (`POST /export`). Resolves to the path relative to the project root and its size. */
+  async exportStageRun(runId: string, signal?: AbortSignal): Promise<{ path: string; bytes: number | null }> {
+    const body = await this.request<{ export?: { path?: unknown; bytes?: unknown } }>(
+      `/api/stage-runs/${encodeURIComponent(runId)}/export`,
+      { method: 'POST', signal },
+    )
+    return {
+      path: typeof body.export?.path === 'string' ? body.export.path : '',
+      bytes: typeof body.export?.bytes === 'number' ? body.export.bytes : null,
+    }
+  }
+
+  async getStageDefaults(signal?: AbortSignal): Promise<ResolvedStageSettings> {
+    const body = await this.request<{ stageDefaults?: unknown }>('/api/settings/stage-defaults', { method: 'GET', signal })
+    return { ...normalizeStageSettings(body.stageDefaults), source: null }
+  }
+
+  async updateStageDefaults(settings: PlanningStageSettings, signal?: AbortSignal): Promise<ResolvedStageSettings> {
+    const body = await this.request<{ stageDefaults?: unknown }>('/api/settings/stage-defaults', json('PATCH', settings, signal))
+    return { ...normalizeStageSettings(body.stageDefaults), source: null }
+  }
+
+  async getProjectStageSettings(projectId: string, stage: StageKey, signal?: AbortSignal): Promise<ResolvedStageSettings> {
+    const body = await this.request<{ settings?: unknown; source?: unknown }>(`/api/projects/${encodeURIComponent(projectId)}/stages/${stage}/settings`, { method: 'GET', signal })
+    return normalizeProjectStageSettings(body)
+  }
+
+  async updateProjectStageSettings(projectId: string, stage: StageKey, settings: PlanningStageSettings, signal?: AbortSignal): Promise<ResolvedStageSettings> {
+    const body = await this.request<{ settings?: unknown; source?: unknown }>(`/api/projects/${encodeURIComponent(projectId)}/stages/${stage}/settings`, json('PATCH', settings, signal))
+    return normalizeProjectStageSettings(body)
+  }
+
+  /** Clear the project override (falls back to the Factory or built-in default). */
+  async resetProjectStageSettings(projectId: string, stage: StageKey, signal?: AbortSignal): Promise<ResolvedStageSettings> {
+    const body = await this.request<{ settings?: unknown; source?: unknown }>(`/api/projects/${encodeURIComponent(projectId)}/stages/${stage}/settings`, { method: 'DELETE', signal })
+    return normalizeProjectStageSettings(body)
+  }
+
+  getPlanningSettings(projectId: string, signal?: AbortSignal): Promise<ResolvedStageSettings> {
+    return this.getProjectStageSettings(projectId, 'planning', signal)
+  }
+
+  updatePlanningSettings(projectId: string, settings: PlanningStageSettings, signal?: AbortSignal): Promise<ResolvedStageSettings> {
+    return this.updateProjectStageSettings(projectId, 'planning', settings, signal)
+  }
+
+  resetPlanningSettings(projectId: string, signal?: AbortSignal): Promise<ResolvedStageSettings> {
+    return this.resetProjectStageSettings(projectId, 'planning', signal)
+  }
+
   async decideStageRun(
     runId: string,
-    input: { decision: HumanDecision; note?: string },
+    input: StageDecisionInput,
     signal?: AbortSignal,
   ): Promise<StageRunDetail> {
     const body = await this.request<{ run: StageRunDetail }>(
@@ -302,6 +422,48 @@ export class ChatApi {
       .map(normalizeStageRunEvent)
       .filter((event): event is StageRunEvent => event !== null)
     return { events, nextAfter: typeof body.nextAfter === 'string' ? body.nextAfter : events.at(-1)?.id ?? options.after ?? '0' }
+  }
+
+  /** Current telemetry folded from the run's stored events; null when the payload is unusable. */
+  async getStageRunTelemetry(runId: string, signal?: AbortSignal): Promise<RunTelemetry | null> {
+    const body = await this.request<{ telemetry?: unknown }>(
+      `/api/stage-runs/${encodeURIComponent(runId)}/telemetry`,
+      { method: 'GET', signal },
+    )
+    return normalizeTelemetry(body.telemetry)
+  }
+
+  /** The model new runs use (`target` is null when unconfigured). */
+  async getModelTarget(signal?: AbortSignal): Promise<ModelTarget | null> {
+    const body = await this.request<{ target?: unknown }>('/api/settings/models', { method: 'GET', signal })
+    const target = typeof body.target === 'object' && body.target !== null ? body.target as Record<string, unknown> : null
+    return target !== null && typeof target.provider === 'string' && typeof target.model === 'string'
+      ? { provider: target.provider, model: target.model }
+      : null
+  }
+
+  async listModels(signal?: AbortSignal): Promise<ModelCatalogEntry[]> {
+    const body = await this.request<{ models?: unknown }>('/api/models', { method: 'GET', signal })
+    return (Array.isArray(body.models) ? body.models : []).flatMap((entry): ModelCatalogEntry[] => {
+      if (typeof entry !== 'object' || entry === null) return []
+      const item = entry as Record<string, unknown>
+      if (typeof item.provider !== 'string' || typeof item.model !== 'string') return []
+      return [{
+        provider: item.provider,
+        model: item.model,
+        displayName: typeof item.displayName === 'string' ? item.displayName : null,
+        contextWindow: typeof item.contextWindow === 'number' && item.contextWindow > 0 ? item.contextWindow : null,
+      }]
+    })
+  }
+
+  /** Token usage and cost of one project over the last `days`. */
+  async getProjectUsage(projectId: string, days: number, signal?: AbortSignal): Promise<ProjectUsage> {
+    const body = await this.request<{ stats?: unknown }>(
+      `/api/projects/${encodeURIComponent(projectId)}/stats?days=${encodeURIComponent(String(days))}`,
+      { method: 'GET', signal },
+    )
+    return normalizeProjectUsage(body.stats)
   }
 
   /** Phoenix trace summary for one project over the last `hours` (1–168). */
@@ -349,6 +511,8 @@ export class ChatApi {
       onEvent: (event: StageRunEvent) => void
       onOpen?: () => void
       onMalformed?: () => void
+      /** `event: telemetry`: the payload replaces (never adds to) the last snapshot. */
+      onTelemetry?: (telemetry: RunTelemetry) => void
     },
   ): Promise<'end' | 'closed'> {
     const query = new URLSearchParams({ after: options.after ?? '0' })
@@ -376,6 +540,15 @@ export class ChatApi {
             // keep the default message
           }
           throw new ApiError(502, 'STREAM_ERROR', message)
+        }
+        if (frame.event === 'telemetry') {
+          try {
+            const telemetry = normalizeTelemetry(JSON.parse(frame.data))
+            if (telemetry !== null) options.onTelemetry?.(telemetry)
+          } catch {
+            // a bad snapshot is skipped; the next one replaces it anyway
+          }
+          continue
         }
         if (frame.event !== 'stage') continue
         const event = parseStageRunEvent(frame.data)
@@ -583,6 +756,10 @@ function parseEvent(event: string, raw: string): ChatStreamEvent | null {
             },
           }
         : null
+    case 'telemetry': {
+      const telemetry = normalizeTelemetry(record)
+      return telemetry === null ? null : { event: 'telemetry', data: telemetry }
+    }
     case 'text':
       return typeof record.text === 'string'
         ? { event: 'text', data: { text: record.text } }
@@ -652,6 +829,14 @@ export function isAbortError(error: unknown): boolean {
   return error instanceof DOMException
     ? error.name === 'AbortError'
     : error instanceof Error && error.name === 'AbortError'
+}
+
+function normalizeProjectStageSettings(body: { settings?: unknown; source?: unknown }): ResolvedStageSettings {
+  const settings = normalizeStageSettings(body.settings)
+  if (body.source === 'project' || body.source === 'factory' || body.source === 'defaults') {
+    return { ...settings, source: body.source }
+  }
+  return settings
 }
 
 function json(method: string, body: unknown, signal?: AbortSignal): RequestInit {
@@ -763,5 +948,17 @@ export function normalizeObservability(value: unknown, hours: number): Observabi
     roles,
     lastSpanAt: typeof record.lastSpanAt === 'string' ? record.lastSpanAt : null,
     truncated: record.truncated === true,
+  }
+}
+
+export function normalizeProjectUsage(value: unknown): ProjectUsage {
+  const record = typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
+  const tokens = typeof record.tokens === 'object' && record.tokens !== null ? record.tokens as Record<string, unknown> : {}
+  const n = (key: string): number => (typeof tokens[key] === 'number' && Number.isFinite(tokens[key] as number) && (tokens[key] as number) >= 0 ? tokens[key] as number : 0)
+  const cost = typeof record.cost === 'object' && record.cost !== null ? record.cost as Record<string, unknown> : {}
+  return {
+    tokens: { input: n('input'), output: n('output'), total: n('total'), cacheRead: n('cacheRead'), cacheWrite: n('cacheWrite') },
+    costUsd: typeof cost.usd === 'number' && Number.isFinite(cost.usd) ? cost.usd : null,
+    costPartial: typeof cost.unpricedTokens === 'number' && cost.unpricedTokens > 0,
   }
 }

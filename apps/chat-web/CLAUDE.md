@@ -12,7 +12,7 @@ npm run dev        # Vite on :5173 (strictPort)
 npm run build      # tsc --noEmit + vite build → dist/
 npm run preview    # serve dist on :4173
 npm run typecheck
-npm test           # vitest, no network (104 tests as of 2026-11-12)
+npm test           # vitest, no network (110 tests as of 2026-11-13)
 npm run mock       # deterministic mock Chat API on :8788 (in-memory; restart to reset)
                    # MOCK_STAGE_STEP_MS=500 speeds up simulated stage runs
 ```
@@ -55,7 +55,7 @@ limit 64 KiB.
 | `#/` | `pages/LandingPage.tsx` | `AppHeader` only (no sidebar). Create-project banner, then **active** projects as big cards, then inactive/archived as a list. |
 | `#/projects/new` | `pages/CreateProjectPage.tsx` | Name + directory (required, **Browse…** opens `DirectoryPicker`), organization, owner email, status (optional). |
 | `#/projects/:id` | redirect | Registry mode → `stages/<currentStage>`; local mode → `chats`. |
-| `#/projects/:id/stages/:stage[/runs/:runId]` | `pages/StageWorkspace.tsx` | **Stage workspace** (registry projects only): project header, `StageRail`, stage main (Workspace / Chat tabs), `ContextPanel`. |
+| `#/projects/:id/stages/:stage[/runs/:runId]` | `pages/StageWorkspace.tsx` | **Stage workspace** (registry projects only): project header, left `ProjectPanel` (info, links, settings), middle column = `StageBar` + compact one-line stage header + stage content + docked `StageChatDock`, right `ContextPanel` (checklist only), bottom `StatusBar`. |
 | `#/projects/:id/logs[?level=&role=&stage=&run=&type=&q=]` | `pages/LogsPage.tsx` | **Project log viewer** (registry projects only; local projects are redirected to chat). Full-height page: stage-style header, `LogToolbar` filters, status bar (live state, export), scrollable `LogRow` list. |
 | `#/projects/:id/chats[/:sessionId]` | `pages/ProjectWorkspace.tsx` | Left `ProjectSidebar` (project **settings only**: details, status, edit, delete, placeholder for future settings) + `ChatHeader` (chat history menu, new chat) + `SdlcBar` + `ChatView`. |
 
@@ -89,8 +89,11 @@ limit 64 KiB.
     limit is a UI rule.
 ### Stage workspace (spec: `../../docs/ui/STAGE-UI-PROMPT.md`, design: `../../docs/design/STAGE-RUNTIME.md`)
 
-The stage run, not the chat, is the primary object. Only `planning` executes;
-other stages show a read-only "Runtime not implemented yet" card plus their
+The stage run, not the chat, is the primary object. A stage executes when
+`GET /api/sdlc/stages` reports `executable: true` (today `planning` and `requirements`;
+without flags the UI falls back to planning only). Requirements has its own final gate
+(`RequirementsFinalGatePanel`: approve / reject / refine, coverage report, audited
+waiver). Other stages show a read-only "Runtime not implemented yet" card plus their
 checklist/documents.
 
 - API (`client.ts`): `listSdlcStages`, `getProjectDetail` (`{project, sdlc{currentStage,stages,checklist}, documents}`),
@@ -116,7 +119,7 @@ checklist/documents.
 - Brief drafts persist per project in `aifactory.chat-web.briefs.v1`; a retry is prefilled
   from the last run's `inputText` when there's no draft.
 - Reviewer findings render as plain text; TELOS/summary Markdown goes through
-  react-markdown without raw HTML (sanitized). The Chat tab is a placeholder; the stage
+  react-markdown without raw HTML (sanitized). Stage chat lives in the docked chat; the stage
   UI never calls `/api/chat`.
 - **Log viewer** (`GET /api/projects/:id/logs`, newest first, project-scoped; contract in `../chat-cli/API.md` "Project log viewer"):
   - Isolation: the project id is in every request path; `ChatApi.listProjectLogs` also drops entries whose `projectId` differs;
@@ -158,8 +161,22 @@ checklist/documents.
     the sticky header, resizable, width in `aifactory.chat-web.activity.v1`; full-screen sheet ≤820px;
     Esc closes from anywhere and restores focus). **Pipeline steps are buttons** that open the drawer
     filtered to that role. Payload text renders as plain text only; raw JSON behind "Raw events".
-- Components: `components/logs/{LogToolbar,LogRow}.tsx`, `components/stage/{StageBits,StageRail,RunPanels,TelosDocument,ContextPanel,Activity}.tsx`;
-  styles in `styles/stage.css` (three columns ≥1181px, context below main ≤1180px,
+- **Stage workspace layout** (mock: `docs/mocks/layout-mock.html`):
+  - `StageBar` (`components/stage/StageBar.tsx`, pure state in `data/stageBar.ts`): 8 rectangular boxes (56px) at the top of the **middle column**
+    only. `done` = green + ✓, a link, viewable **read-only**; `current` = solid accent; `todo` = gray, `aria-disabled`, not a link, not focusable.
+    Anything before the project's current stage counts as `done`. Arrow keys move across enabled boxes. A future stage opened by URL still shows the read-only card.
+  - **Past stages are read-only** (`isHistoricalStage` → `readOnly` on `PlanningWorkspace`): no brief form, no "start a new attempt", no execute button,
+    no decision panel, no advance card; a "Completed stage — read-only" notice instead. Run, reviews, pipeline, activity and the new `ArtifactsCard` stay visible.
+    Later feature: editing a past stage with a warning that all later progress is invalidated.
+  - `ProjectPanel` (left): project info, links — Logs is real (there is no project-level chat; chat is per stage); Documents, Images, Directories, Repository are disabled "soon" items
+    (no API yet) — and "Project settings" (opens the existing edit dialog for now). The `ContextPanel` (right) shows the checklist only; documents moved to
+    `ArtifactsCard` in the main column. Careful: `app.css` still has a legacy `.project-panel`; the new class is `.proj-panel`.
+  - `StatusBar` (`components/StatusBar.tsx`, `hooks/useStatusBarData.ts`, pure `data/statusbar.ts`) at the bottom of the stage workspace and the log viewer.
+    API data: model (`GET /api/settings/models`), context window (`GET /api/models`), tokens + cost for 30 days (`GET /api/projects/:id/stats`, refreshed every 60 s).
+    **Derived (approximate, marked "≈")** from the run's `status` events: context % (latest usage ÷ window) and tokens/sec (output ÷ step time). Items without data are
+    omitted; each request fails independently. Not on the chat page yet.
+- Components: `components/logs/{LogToolbar,LogRow}.tsx`, `components/stage/{StageBits,StageBar,ProjectPanel,ArtifactsCard,RunPanels,TelosDocument,ContextPanel,Activity}.tsx`;
+  styles in `styles/stage.css` (three columns ≥1181px, project panel + main ≤1180px with context below main,
   horizontal stepper ≤820px).
 
 - `DirectoryPicker` needs `GET /api/fs/directories` (it lists directories on the API host,
@@ -174,7 +191,8 @@ Dependency direction is one-way: `pages → components → hooks/data → api/li
 
 - `src/App.tsx` — router + shared state: API client, health, projects,
   sessions, session→project grouping, settings/edit/delete dialogs, toasts.
-- `src/pages/ProjectWorkspace.tsx` — chat state (messages, streaming turn,
+- `src/hooks/useProjectChat.ts` — the one chat engine (messages, streaming turn, requirements intake). The owner supplies the open session id: `ProjectWorkspace` from the URL, `components/chat/StageChatDock.tsx` (docked stage chat; tabs are local state, panes stay mounted so a running reply survives collapsing/switching tabs; `EmbeddedChat.tsx` = `ChatPane`, one conversation). Stage chats: the first message of a session carries a hidden `<stage-context>` block (`data/stageChat.ts`: stage, run, checklist, document links, one-line history; stripped again in `toUiMessages`), and the sessions of a stage are remembered in localStorage `aifactory.chat-web.stage-chats.v1` until the API tags sessions with a stage. Registry projects' `#/projects/:id/chats` redirects to the current stage; the page still serves local (non-API) projects.
+- `src/pages/ProjectWorkspace.tsx` (legacy full-page chat, kept as "Open full page") — chat state (messages, streaming turn,
   stop, load) for one project; keyed by project id.
 - `src/api/client.ts` — typed fetch client (`ChatApi`), bearer auth, error
   mapping (`ApiError`), SSE orchestration. A stream ending without `done` →
@@ -227,7 +245,7 @@ test suite). They load Playwright from `.npm-cache/_npx/...` and need
 flow, activity drawer incl. reviewer step expand/filters/redaction/reconnect, failure, cycle limit,
 no-go, reload, keyboard, mobile, dark, token/poll/one-stream rules). A live run keeps the SSE stream
 open, so don't use `waitUntil: 'networkidle'` on a run page that's still running or awaiting a decision.
-Main one: `.pw-pages.cjs`
+Gates, settings, telemetry bar, header and collapsed chat icons: `.pw-gates.cjs` (fresh mock with `MOCK_STAGE_STEP_MS=100` on :8788 + `npm run dev` on :5173; a brief containing `GATE` makes the mock pause at review gates; 11 checks, screenshots to `.screens/gates-*.png`). PDF input/output (attachments, export retry, open/download): `.pw-pdf.cjs` (fresh mock; briefs containing `RENDERBUG` make the PDF render fail once). Stage chat dock: `.pw-chat.cjs` (fresh mock + preview). `.pw-pages.cjs` is stale (predates the stage bar and the stage chat). Layout (stage bar, read-only past stages, panels, status bar): `.pw-layout.cjs` (fresh mock, `MOCK_STAGE_STEP_MS=100`; seeds itself). Main one: `.pw-pages.cjs`
 (landing → create project via directory picker → requirements intake → chat →
 history → deep link → mobile → dark) and `.pw-intake.cjs` (text + PDF intake,
 file validation, skip, mobile). Older `.pw-*` scripts target the removed sidebar layout.
@@ -253,9 +271,9 @@ the plain text in the same command.
    (`POST /api/projects/:id/pdf-review`) would cut it to one.
    `pdf-review` answers 500 for a zero-byte file (multipart edge case in
    chat-cli; the UI never sends one).
-6. Stage runtime: only Planning executes; no stage chat yet (placeholder tab); the
-   API exposes no per-role progress, so the pipeline is derived from run status only.
-   Advancing past a stage other than Planning isn't offered in the UI yet (no runtime).
+6. Stage runtime: Planning and Requirements execute; the pipeline is derived from run
+   status plus role events. Advancing past Requirements has nowhere to go yet (Design
+   has no runtime).
    The `PATCH /projects/:id/checklist/...` and document upload endpoints aren't used.
    Activity: no "Load older" past the 2,000-event cap (a trimmed notice is shown). Event payloads were
    verified against the mock and the chat-cli source; runs on the real API created before the event

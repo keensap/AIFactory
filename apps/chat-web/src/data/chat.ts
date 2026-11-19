@@ -1,6 +1,7 @@
 /** View-model types shared by the transcript and composer. */
 
 import type { ChatRecord } from '../api/types.ts'
+import { stripStageContext } from './stageChat.ts'
 
 export interface UiMessage {
   id: string
@@ -35,7 +36,7 @@ export function toUiMessages(records: readonly ChatRecord[]): UiMessage[] {
   return records.map((record, index) => ({
     id: `${record.role}-${record.at}-${index}`,
     role: record.role,
-    content: record.content,
+    content: record.role === 'user' ? stripStageContext(record.content) : record.content,
     at: record.at,
   }))
 }

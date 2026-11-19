@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { isAbortError, type ApiError, type ChatApi } from '../api/client.ts'
 import { followStageRunEvents, type ActivityConnection } from '../api/stageEvents.ts'
-import type { StageRunEvent } from '../api/types.ts'
+import type { RunTelemetry, StageRunEvent } from '../api/types.ts'
 import { announcement, mergeEvents } from '../data/activity.ts'
 
 export interface RunEventsState {
@@ -13,9 +13,11 @@ export interface RunEventsState {
   malformed: number
   /** Latest screen-reader announcement (role completion, errors, reviews). */
   announcement: string
+  /** Latest API snapshot for the run (null until the first one arrives). */
+  telemetry: RunTelemetry | null
 }
 
-const INITIAL: RunEventsState = { events: [], connection: 'connecting', error: null, trimmed: false, malformed: 0, announcement: '' }
+const INITIAL: RunEventsState = { events: [], connection: 'connecting', error: null, trimmed: false, malformed: 0, announcement: '', telemetry: null }
 
 /** Flush buffered events at most this often (avoid a render per event). */
 const BATCH_MS = 100
@@ -81,6 +83,15 @@ export function useRunEvents(
       if (timer === null) timer = setTimeout(flush, BATCH_MS)
     }
 
+    // Historical figures first, so a finished run shows its bar before (or
+    // without) a stream. A stream snapshot that already arrived wins.
+    let streamed = false
+    api.getStageRunTelemetry(runId, controller.signal).then((telemetry) => {
+      if (telemetry !== null && !streamed && !controller.signal.aborted) setState((current) => ({ ...current, telemetry }))
+    }).catch(() => {
+      // the stream (or nothing) fills the bar; a failed fetch never blanks it
+    })
+
     followStageRunEvents(api, {
       runId,
       signal: controller.signal,
@@ -92,6 +103,10 @@ export function useRunEvents(
           buffer.push(event)
         }
         schedule()
+      },
+      onTelemetry: (telemetry) => {
+        streamed = true
+        setState((current) => ({ ...current, telemetry }))
       },
       onMalformed: () => {
         malformed += 1

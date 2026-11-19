@@ -1370,3 +1370,9 @@ a.project-card:focus-visible .project-card-open {
     align-items: stretch;
   }
 }
+
+/* Project settings: danger zone */
+.danger-zone { margin-top: 20px; padding: 12px 14px; border: 1px solid var(--danger, #cf222e); border-radius: 8px; }
+.danger-zone h3 { margin: 0 0 8px; font-size: 13px; color: var(--danger, #cf222e); text-transform: uppercase; letter-spacing: .04em; }
+.danger-zone-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.danger-zone-row p { margin: 2px 0 0; }

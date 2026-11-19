@@ -149,6 +149,11 @@ export function App() {
       navigate({ name: 'project', projectId: routeProject.id, sessionId: null }, { replace: true })
       return
     }
+    if (route.name === 'project' && projectsMode === 'api') {
+      // Registry projects chat inside their stages: the old project chat page is retired.
+      navigate({ name: 'stage', projectId: routeProject.id, stage: routeProject.currentStage ?? 'planning', runId: null }, { replace: true })
+      return
+    }
     if (route.name !== 'project-home') return
     if (projectsMode === 'api') {
       navigate({ name: 'stage', projectId: routeProject.id, stage: routeProject.currentStage ?? 'planning', runId: null }, { replace: true })
@@ -204,7 +209,7 @@ export function App() {
       await removeProject(pendingDeleteProject.id)
       setPendingDeleteProject(null)
       navigate({ name: 'home' }, { replace: true })
-      toasts.push(`Deleted “${pendingDeleteProject.name}”. Its directory was not touched.`, 'success')
+      toasts.push(`Removed “${pendingDeleteProject.name}” from AI Factory. Its folder was not touched.`, 'success')
     } catch (error) {
       toasts.push(errorMessage(error), 'error')
     } finally {
@@ -295,7 +300,7 @@ export function App() {
   } else if (route.name === 'stage' && routeProject !== undefined && projectsMode === 'api') {
     page = (
       <StageWorkspace
-        key={routeProject.id}
+        key={`${routeProject.id}:${route.stage}`}
         api={api}
         storage={storage}
         project={routeProject}
@@ -307,6 +312,9 @@ export function App() {
         onOpenSettings={openSettings}
         onEditProject={() => setEditingProject(routeProject)}
         onProjectChanged={() => void refreshProjects()}
+        sessions={sessionsByProject.get(routeProject.id) ?? []}
+        onSessionStarted={onSessionStarted}
+        onRefreshSessions={silentRefresh}
         onNotify={toasts.push}
       />
     )
@@ -369,6 +377,11 @@ export function App() {
         {...(editingProject === null ? {} : { project: editingProject })}
         onClose={() => setEditingProject(null)}
         onSave={saveEditedProject}
+        onRemove={() => {
+          if (editingProject === null) return
+          setPendingDeleteProject(editingProject)
+          setEditingProject(null)
+        }}
       />
       <SettingsDialog
         open={settingsOpen}
@@ -382,6 +395,7 @@ export function App() {
         onSave={saveConnectionSettings}
         onTest={testConnection}
         onRefreshProjects={refreshProjects}
+        api={api}
       />
       <ConfirmDialog
         open={pendingDeleteSession !== null}
@@ -401,16 +415,16 @@ export function App() {
       />
       <ConfirmDialog
         open={pendingDeleteProject !== null}
-        title="Delete project?"
+        title="Remove project from AI Factory?"
         description={pendingDeleteProject === null ? '' : (
           <>
             <strong>“{truncate(pendingDeleteProject.name, 70)}”</strong>{' '}
             {pendingDeleteProject.source === 'api'
-              ? 'will be removed from the project registry. Its directory and chat transcripts are not deleted.'
+              ? 'will be removed from AI Factory. Its folder and files are not touched.'
               : 'will be removed from this browser. Its chats are not deleted.'}
           </>
         )}
-        confirmLabel="Delete project"
+        confirmLabel="Remove from AI Factory"
         busy={deletingProject}
         onConfirm={() => void confirmDeleteProject()}
         onClose={() => {

@@ -7,7 +7,7 @@
  */
 
 import { ApiError, isAbortError, type ChatApi } from './client.ts'
-import type { StageRunEvent } from './types.ts'
+import type { RunTelemetry, StageRunEvent } from './types.ts'
 
 export type ActivityConnection = 'connecting' | 'live' | 'reconnecting' | 'ended' | 'error'
 
@@ -50,6 +50,8 @@ export interface FollowOptions {
   /** `event: end` received: the run is terminal and no events remain. */
   onEnd?: () => void
   onMalformed?: () => void
+  /** `event: telemetry` snapshot (replaces the previous one). */
+  onTelemetry?: (telemetry: RunTelemetry) => void
   /** Injectable for tests. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>
 }
@@ -121,6 +123,7 @@ export async function followStageRunEvents(api: ChatApi, options: FollowOptions)
         },
         onEvent: (event) => deliver([event]),
         ...(options.onMalformed === undefined ? {} : { onMalformed: options.onMalformed }),
+        ...(options.onTelemetry === undefined ? {} : { onTelemetry: options.onTelemetry }),
       })
       if (result === 'end') {
         options.onState('ended')

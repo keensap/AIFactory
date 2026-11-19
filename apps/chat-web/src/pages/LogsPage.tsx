@@ -6,10 +6,12 @@ import { LogToolbar } from '../components/logs/LogToolbar.tsx'
 import { ObservabilityCard } from '../components/logs/ObservabilityCard.tsx'
 import { healthLabel } from '../components/AppHeader.tsx'
 import {
-  ArrowDownIcon, ArrowLeftIcon, MessageIcon, MoonIcon, RefreshIcon, SettingsIcon, SunIcon,
+  ArrowDownIcon, ArrowLeftIcon, MoonIcon, RefreshIcon, SettingsIcon, SunIcon,
 } from '../components/Icons.tsx'
 import { Skeleton, StageNotice } from '../components/stage/StageBits.tsx'
 import type { ApiHealthController } from '../hooks/useApiHealth.ts'
+import { StatusBar } from '../components/StatusBar.tsx'
+import { useStatusBarData } from '../hooks/useStatusBarData.ts'
 import { useObservability } from '../hooks/useObservability.ts'
 import { useProjectLogs } from '../hooks/useProjectLogs.ts'
 import {
@@ -66,6 +68,7 @@ export function LogsPage({ api, storage, project, initialSearch, health, theme, 
       return next
     })
   }, [storage])
+  const statusData = useStatusBarData(api, project.id)
   const observability = useObservability(api, project.id, prefs.obsHours, true)
 
   // A real navigation (pasted link, back/forward) to different filters: adopt them.
@@ -165,9 +168,6 @@ export function LogsPage({ api, storage, project, initialSearch, health, theme, 
           </div>
         </div>
         <div className="stage-project-actions">
-          <a className="button button-ghost button-sm" href={routeHref({ name: 'project', projectId: project.id, sessionId: null })}>
-            <MessageIcon size={14} /> Project chat
-          </a>
           <button type="button" className="health-pill" data-status={health.state.status} onClick={onOpenSettings} title={health.state.error ?? 'Connection settings'}>
             <span className="status-dot" aria-hidden="true" />
             {healthLabel(health.state)}
@@ -282,6 +282,7 @@ export function LogsPage({ api, storage, project, initialSearch, health, theme, 
           )}
         </div>
       </main>
+      <StatusBar data={statusData} />
     </div>
   )
 }
