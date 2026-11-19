@@ -6,12 +6,14 @@
  * single-active constraint. `root_path` is unique so two projects cannot
  * claim the same directory.
  *
- * Removing a project deletes the database row only. It never deletes the
+ * Creating a project creates its root directory when it does not exist yet, so
+ * a new project can be started from the UI without leaving it first.
+ * Removing a project deletes the database row only; it never deletes the
  * user's root directory.
  */
 
 import { randomUUID } from 'node:crypto'
-import { realpath, stat } from 'node:fs/promises'
+import { mkdir, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
 import { Pool } from 'pg'
 import { sharedPool } from './db.ts'
@@ -100,7 +102,7 @@ export class ProjectService {
       : undefined
     return this.store.create({
       name: readRequiredString(record.name, 'name', MAX_NAME),
-      rootPath: await readRootPath(record.rootPath),
+      rootPath: await readRootPath(record.rootPath, { create: true }),
       organization: readOptionalString(record.organization, 'organization', MAX_ORGANIZATION),
       ownerEmail: readOwnerEmail(record.ownerEmail),
       status,
@@ -129,7 +131,7 @@ export class ProjectService {
     const patch: UpdateProjectInput = {}
 
     if (record.name !== undefined) patch.name = readRequiredString(record.name, 'name', MAX_NAME)
-    if (record.rootPath !== undefined) patch.rootPath = await readRootPath(record.rootPath)
+    if (record.rootPath !== undefined) patch.rootPath = await readRootPath(record.rootPath, { create: true })
     if (record.organization !== undefined) {
       patch.organization = readOptionalString(record.organization, 'organization', MAX_ORGANIZATION)
     }
@@ -446,7 +448,15 @@ function readStatus(value: unknown, fallback?: ProjectStatus): ProjectStatus {
   return value as ProjectStatus
 }
 
-async function readRootPath(value: unknown): Promise<string> {
+/**
+ * Validate a project's root directory.
+ *
+ * With `create`, a missing directory is created recursively, so creating a
+ * project does not require preparing the folder first. An existing file, an
+ * unusable parent (a file where a directory should be) or a permissions error
+ * is still refused with a message that names the cause.
+ */
+async function readRootPath(value: unknown, options: { create?: boolean } = {}): Promise<string> {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new ProjectError(400, 'INVALID_ROOT_PATH', 'rootPath is required')
   }
@@ -459,8 +469,34 @@ async function readRootPath(value: unknown): Promise<string> {
   let details
   try {
     details = await stat(resolved)
-  } catch {
-    throw new ProjectError(400, 'INVALID_ROOT_PATH', `rootPath does not exist: ${resolved}`)
+  } catch (error) {
+    const reason = (error as NodeJS.ErrnoException).code
+    // Only "not there" is recoverable by creating it; a broken parent, a symlink
+    // loop or a permissions problem must be reported, not guessed at.
+    if (options.create !== true || reason !== 'ENOENT') {
+      throw new ProjectError(
+        400,
+        'INVALID_ROOT_PATH',
+        reason === 'ENOENT'
+          ? `rootPath does not exist: ${resolved}`
+          : `rootPath cannot be used: ${resolved} (${reason ?? 'unknown filesystem error'})`,
+      )
+    }
+    try {
+      await mkdir(resolved, { recursive: true })
+    } catch (mkdirError) {
+      const mkdirReason = (mkdirError as NodeJS.ErrnoException).code ?? 'unknown filesystem error'
+      throw new ProjectError(
+        400,
+        'INVALID_ROOT_PATH',
+        `could not create rootPath ${resolved}: ${mkdirReason}`,
+      )
+    }
+    try {
+      details = await stat(resolved)
+    } catch {
+      throw new ProjectError(400, 'INVALID_ROOT_PATH', `rootPath could not be created: ${resolved}`)
+    }
   }
   if (!details.isDirectory()) {
     throw new ProjectError(400, 'INVALID_ROOT_PATH', `rootPath is not a directory: ${resolved}`)

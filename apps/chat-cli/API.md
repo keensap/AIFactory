@@ -156,7 +156,9 @@ Lowering the limit below the current active count returns `409 ACTIVE_LIMIT_BELO
 
 ### Projects
 
-A project is a name plus an existing, absolute root directory. Multiple projects may be active at the same time. `rootPath` is unique across the registry.
+A project is a name plus an absolute root directory. Multiple projects may be active at the same time. `rootPath` is unique across the registry.
+
+**The directory is created if it does not exist** — on create, and when an update moves a project to a new path — including missing parents. An existing file at that path, a parent that is a file, or a permissions error is refused with `400 INVALID_ROOT_PATH` and the filesystem reason. Removing a project never deletes the directory.
 
 | Method | Path | Purpose |
 |---|---|---|

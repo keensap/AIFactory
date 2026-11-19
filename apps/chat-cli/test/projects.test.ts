@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -160,8 +160,15 @@ test('validates project input and root paths', async () => {
       () => service.create({ name: 'Relative', rootPath: 'relative/path' }),
       (error: unknown) => error instanceof ProjectError && error.code === 'INVALID_ROOT_PATH',
     )
+    const file = join(root, 'not-a-directory')
+    writeFileSync(file, 'x')
     await assert.rejects(
-      () => service.create({ name: 'Missing', rootPath: join(root, 'missing') }),
+      () => service.create({ name: 'File', rootPath: file }),
+      (error: unknown) => error instanceof ProjectError && error.code === 'INVALID_ROOT_PATH',
+    )
+    // A missing parent that is a file cannot become a directory.
+    await assert.rejects(
+      () => service.create({ name: 'Under', rootPath: join(file, 'child') }),
       (error: unknown) => error instanceof ProjectError && error.code === 'INVALID_ROOT_PATH',
     )
     await assert.rejects(
@@ -175,4 +182,42 @@ test('validates project input and root paths', async () => {
   } finally {
     cleanup()
   }
+})
+
+test('a missing project directory is created, including its parents', async () => {
+  const { root, cleanup } = tempDirs()
+  try {
+    const service = new ProjectService(new MemoryProjectStore(), new SettingsService(new MemorySettingsStore()))
+    const target = join(root, 'clients', 'acme', 'portal')
+    const project = await service.create({ name: 'Acme portal', rootPath: target, status: 'active' })
+    assert.equal(project.rootPath, target, 'the stored path is the real path of the new directory')
+    assert.ok(statSync(target).isDirectory(), 'the directory now exists')
+
+    // Creating the same path again reuses it; only the unique root path rule refuses.
+    await assert.rejects(
+      () => service.create({ name: 'Duplicate', rootPath: target, status: 'inactive' }),
+      (error: unknown) => error instanceof ProjectError && error.code === 'ROOT_PATH_CONFLICT',
+    )
+
+    // Updating a project to a different, missing directory creates it too.
+    const moved = join(root, 'clients', 'acme', 'portal-v2')
+    const updated = await service.update(project.id, { rootPath: moved })
+    assert.equal(updated.rootPath, moved)
+    assert.ok(statSync(moved).isDirectory())
+
+    // An existing directory is accepted unchanged.
+    const existing = await service.create({ name: 'Existing', rootPath: root, status: 'inactive' })
+    assert.equal(existing.rootPath, root)
+  } finally { cleanup() }
+})
+
+test('creating a project leaves neighbouring files alone', async () => {
+  const { root, cleanup } = tempDirs()
+  try {
+    const service = new ProjectService(new MemoryProjectStore(), new SettingsService(new MemorySettingsStore()))
+    writeFileSync(join(root, 'marker.txt'), 'keep me')
+    const created = await service.create({ name: 'New', rootPath: join(root, 'existing-project'), status: 'inactive' })
+    assert.equal(created.rootPath, join(root, 'existing-project'))
+    assert.equal(statSync(join(root, 'marker.txt')).isFile(), true)
+  } finally { cleanup() }
 })

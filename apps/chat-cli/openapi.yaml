@@ -4130,7 +4130,7 @@ components:
           maxLength: 200
         rootPath:
           type: string
-          description: Absolute path to an existing directory; canonicalised with realpath.
+          description: Absolute directory path. It is created (with parents) when missing, then canonicalised with realpath; an existing file or an unusable parent is refused with 400 INVALID_ROOT_PATH.
         organization:
           type: [string, 'null']
         ownerEmail:
@@ -4148,6 +4148,7 @@ components:
           maxLength: 200
         rootPath:
           type: string
+          description: Absolute directory path; created (with parents) when missing.
         organization:
           type: [string, 'null']
         ownerEmail:

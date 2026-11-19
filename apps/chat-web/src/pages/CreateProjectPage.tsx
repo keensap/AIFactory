@@ -167,8 +167,8 @@ export function CreateProjectPage({
                 </button>
               </div>
               <span id="project-root-hint" className="field-hint">
-                An existing absolute directory. Each directory can belong to only one project, and
-                removing the project never deletes the directory.
+                An absolute directory; it is created if it doesn’t exist yet. Each directory can
+                belong to only one project, and removing the project never deletes it.
               </span>
               {touched && pathError !== undefined && <span className="field-error">{pathError}</span>}
             </div>
