@@ -491,7 +491,7 @@ The data moves in the same migration, and rows whose project no longer exists ar
 1. **A route table with named parameters and declared policy.** One entry per endpoint:
 
    ```ts
-   route('POST', '/api/stage-runs/:runId/gate', { auth: 'operator' }, answerGate)
+   route('POST', '/api/stage-runs/:runId/decision', { auth: 'operator' }, decide)
    route('POST', '/api/agents/:agentId/test', { auth: 'admin' }, testAgent)
    ```
 

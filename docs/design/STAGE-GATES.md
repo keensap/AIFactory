@@ -8,14 +8,7 @@
 
 ## 1. What this changes
 
-Before, a planning run executed analyzer → author → reviewer in one pass, revised automatically at most three times, and then waited for a go / conditional-go / no-go decision. The document and its PDF were produced *before* that decision.
-
-Now a run **pauses at gates** and resumes when a human answers:
-
-- **Gating on** — after **every** review that is not approved, the operator is asked whether to apply its changes.
-- **Gating off** — review changes are applied automatically for a configured number of cycles.
-- In both modes the run ends at a **final gate** asking whether to refine further.
-- Only an approval at that gate completes the stage; **only then** are the Markdown document and the PDF produced.
+A run reviews and revises automatically until the review meets the acceptance criteria or the configured cycle budget is exhausted. It then pauses at the **final human gate**, even when the review did not meet the criteria. A human decision, not automated acceptance, completes the stage; only then are the Markdown document and PDF produced.
 
 ---
 
@@ -25,8 +18,7 @@ Settings are stored **per project and per stage** as JSONB, because each stage n
 
 | Field | Default | Meaning |
 |---|---|---|
-| `gateAfterEachReview` | `false` | Pause after every non-approved review and ask before applying changes |
-| `maxReviewCycles` | `3` | Autonomous write/review cycles when gating is off, counted **after** the first review (1–10) |
+| `maxReviewCycles` | `3` | Automatic revision/review cycles, counted **after** the first review (1–10) |
 | `minRating` | `0` | Minimum overall document rating (0–100) for the run to stop revising early |
 | `maxBlockers` | `0` | Blockers tolerated |
 | `maxMajor` | `0` | Major findings tolerated |
@@ -45,7 +37,7 @@ A run **snapshots** the resolved values into its context packet at start, so cha
 accepted = blockers <= maxBlockers AND major <= maxMajor AND rating >= minRating
 ```
 
-When accepted, the run **stops revising immediately** and asks for approval at the final gate, even with cycles left in the budget. When not accepted, it revises (or gates) until `maxReviewCycles` is spent, then asks for approval anyway. A review without a rating falls back to the reviewer's `decision`, keeping older reviewers working.
+When accepted, the run **stops revising immediately** and asks for approval at the final gate, even with cycles left in the budget. When not accepted, it revises automatically until `maxReviewCycles` is spent, then asks for approval anyway. A review without a rating falls back to the reviewer's `decision`, keeping older reviewers working.
 
 Defaults (`0`/`0`/`0`) mean: any blocker or major finding keeps the run revising, and the reviewer's `approved` decision governs — the behaviour before this feature.
 
@@ -54,27 +46,17 @@ Defaults (`0`/`0`/`0`) mean: any blocker or major finding keeps the run revising
 ## 3. State machine
 
 ```
-                 ┌──────────────── gating on ───────────────┐
-                 │                                           ▼
-execute ─► analyze ─► draft ─► review ─► [needs changes?] ─► review gate (apply / accept)
-                 ▲                        │ no (approved)          │ apply
-                 │                        ▼                       ▼
-                 │                    final gate ◄────────── revise ─► review
-                 │                        │
-                 │          refine ───────┤
-                 └────────────────────────┤
-                                          │ approve (decision)
-                                          ▼
-                                   complete + document + PDF
+execute → analyze → draft → review ── accepted or budget exhausted ──→ final gate
+                              │                                             │
+                              └── revise → review (while budget remains)    │
+                                     complete + document + PDF ← decision ──┘
 ```
 
-Gating off replaces the review gate with an automatic revision while `cycle < maxReviewCycles`; when the budget is spent the run stops at the **final gate** instead of failing with `REVIEW_CYCLE_LIMIT`. A review that meets the acceptance criteria leaves the loop earlier and goes straight to the final gate.
+A review that meets the acceptance criteria leaves the loop early. When the budget is spent the run stops at the **final gate** instead of failing with `REVIEW_CYCLE_LIMIT`.
 
-**Pausing.** A paused run has status `awaiting_human` and a persisted `pendingGate` (`review_changes` or `final`) with the cycle count, review decision and findings. It releases its worker lease, so it can wait hours or days and resume on any API instance.
+**Pausing.** A paused run has status `awaiting_human` and a persisted `pendingGate` of kind `final`, with the cycle count, review decision and findings. It releases its worker lease, so it can wait hours or days and resume on any API instance.
 
-**Resuming.** `POST /api/stage-runs/:id/gate` answers a review gate (`apply` or `accept`); `POST /api/stage-runs/:id/decision` answers the final gate (`decision`, or `refine: true`).
-
-`accept` overrides the reviewer: the draft is kept, the override is recorded in the run event and the gate payload, and the run moves to the final gate.
+**Resuming.** `POST /api/stage-runs/:id/decision` answers the final gate (`decision`, or `refine: true`).
 
 **Refining.** `refine: true` runs one more review and, if it requests changes, one revision; then the final gate returns. Refining does not complete anything.
 
@@ -97,7 +79,7 @@ Before this point `run.documents` is empty and `documents/` does not exist; the 
 
 | Failure | Behaviour |
 |---|---|
-| Reviewer repeatedly requests changes | Stops at the final gate; no error, no unbounded loop (hard stop at the budget, or the operator's answer when gating) |
+| Reviewer repeatedly requests changes | Stops at the final gate; no error, no unbounded loop (hard stop at the budget) |
 | PDF render/write fails | Stage still completes; `document_export_failed` event and warning log; `POST …/export` retries |
 | Settings unavailable or corrupt | Falls back to defaults; the run proceeds |
 | Wrong endpoint for the gate | `409` with a specific code; the run is untouched |
@@ -107,13 +89,13 @@ Before this point `run.documents` is empty and `documents/` does not exist; the 
 
 ## 6. Tests
 
-`test/stage-gates.test.ts` covers: automatic cycles then final gate, budget exhausted without failure, gating on pausing after each review, `apply` and `accept`, approved reviews skipping the review gate, refine behaviour, completion producing the document and PDF, settings validation and snapshot semantics, and the HTTP gate/decision lifecycle. `test/stage-settings.test.ts` covers persistence, precedence, clearing, validation, corrupt values and the settings endpoints.
+`test/stage-gates.test.ts` covers: automatic cycles then final gate, budget exhausted without failure, accepted reviews stopping early, refine behaviour, completion producing the document and PDF, settings validation and snapshot semantics, and the HTTP gate/decision lifecycle. `test/stage-settings.test.ts` covers persistence, precedence, clearing, validation, corrupt values and the settings endpoints.
 
 ---
 
 ## 7. Not done
 
-- Gates for other stages (only planning is executable).
+- Gates for stages beyond planning and requirements (no other stage is executable yet). Requirements adds deterministic coverage blockers and an audited waiver to the same final gate ([REQUIREMENTS-CONTRACT.md](REQUIREMENTS-CONTRACT.md)).
 - A timeout or auto-accept policy for runs left paused indefinitely.
 - Per-run overrides of the settings (only per project and per Factory).
 - Notification when a run reaches a gate.

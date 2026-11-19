@@ -183,12 +183,8 @@ stateDiagram-v2
   drafting --> reviewing: draft stored
   reviewing --> revising: not accepted, budget left
   revising --> reviewing: revised draft
-  reviewing --> reviewGate: gating on, not accepted
   reviewing --> finalGate: accepted or budget spent
-  state "awaiting_human: review_changes" as reviewGate
   state "awaiting_human: final" as finalGate
-  reviewGate --> reviewing: apply
-  reviewGate --> finalGate: accept as-is
   finalGate --> reviewing: refine
   finalGate --> completed: go / conditional_go / no_go
   reviewing --> failed: role error, invalid review
@@ -263,7 +259,7 @@ The reviewer returns `decision`, `rating` (0–100) and findings. The runtime de
 flowchart TD
   review["Review result"] --> counts["count findings by severity<br/>blocker/critical, major, minor"]
   counts --> limits{"blockers <= maxBlockers<br/>AND major <= maxMajor"}
-  limits -- "no" --> revise["revise and review again<br/>(or pause at review gate)"]
+  limits -- "no" --> revise["revise and review again if budget remains"]
   limits -- "yes" --> rated{"reviewer supplied<br/>a rating?"}
   rated -- "no" --> decision{"decision == approved?"}
   decision -- "no" --> revise
@@ -288,13 +284,10 @@ Defaults (`minRating 0`, `maxBlockers 0`, `maxMajor 0`) reproduce the behaviour 
 flowchart LR
   review["review finished"] --> accepted{"accepted?"}
   accepted -- "yes" --> final["final gate<br/>kind = final"]
-  accepted -- "no" --> gating{"gateAfterEachReview?"}
-  gating -- "yes" --> rg["review gate<br/>kind = review_changes"]
-  gating -- "no" --> more{"cycles left?"}
+  accepted -- "no" --> more{"cycles left?"}
   more -- "yes" --> revise["revise, review again"]
+  revise --> review
   more -- "no" --> final
-  rg -->|"POST /gate {apply}"| revise
-  rg -->|"POST /gate {accept}"| final
   final -->|"POST /decision {refine:true}"| review
   final -->|"POST /decision {go|conditional_go|no_go}"| done["completed<br/>document + PDF"]
 ```

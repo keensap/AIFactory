@@ -240,7 +240,7 @@ than one that is not built.
 | ID | Stage | Accountable role | Primary artifacts | Gate | As built |
 |---|---|---|---|---|---|
 | S01 | Intake and project creation | Product Owner | charter, workspace, budget | HR-01 | **Built** (project registry) |
-| S02 | Requirements elicitation | Business Analyst | BRD, use cases, NFR catalogue | HR-02a | **Built** (`requirements` stage) |
+| S02 | Requirements elicitation | Business Analyst | BRD, use cases, NFR catalogue | HR-02a | **Built** (`requirements` stage: specification, NFR catalogue, acceptance criteria; use cases and several FRs partial — §5.2) |
 | S03 | Wireframing | UX Lead | flow maps, wireframes | HR-03a | Planned |
 | S04 | Interactive prototype | UX Lead | clickable prototype, tokens | HR-03b | Planned |
 | S05 | Functional specification | Business Analyst | SRS, acceptance criteria, RTM | HR-02b | Planned |
@@ -357,7 +357,7 @@ everything that **connects to the outside world** does not.
 | Project registry and workspace | **Built** | create, read, update, delete; unique root path; cascade cleanup |
 | Stage execution | **Built** for 2 of 26 stages | planning, requirements; the rest `501` |
 | Review loop and acceptance | **Built** | thresholds, cycles, findings, acceptance rule |
-| Human gates | **Built** | review + final, decisions, waivers, stale reporting |
+| Human gates | **Built** | final decisions, waivers, stale reporting |
 | Model layer | **Built** (registry, routing, fallback, attribution); **Partial** (budgets, caching) | §9 |
 | Agents | **Built** | definitions, assignments, composition, offline probe, tool verification |
 | Prerequisites | **Built** | evidence, waivers, readiness snapshot, editable catalogue |
@@ -406,25 +406,30 @@ charter generation, blueprint recommendation and integration verification do not
 
 ### 5.2 S02 — Requirements elicitation and analysis
 
-**State: built as a stage.** The stage runs end to end; the detail of *how* it satisfies each
-requirement is in the prompts and the reviewer's rubric.
+**State: built as a stage** (R1–R9, 2026-11-19). The stage runs end to end — planning
+handoff or direct entry, automatic review and revision, one human approval — and has
+been run once against a live model. A status of **Built** below means an enforcing
+deterministic check *and* a test exist; **prompt** means the model is asked to do it
+and the reviewer judges it, but nothing blocks a document that does not. The contract,
+checks and their finding codes are in [REQUIREMENTS-CONTRACT.md](design/REQUIREMENTS-CONTRACT.md);
+operation and recovery in [REQUIREMENTS-STAGE-OPERATIONS.md](operations/REQUIREMENTS-STAGE-OPERATIONS.md).
 
-| ID | Requirement | Status |
-|---|---|---|
-| FR-201 | (M) Ingest source material (brief, transcripts, documentation, tickets, e-mails, regulatory extracts) and record each source with provenance, date and classification. | Partial — brief and attachments; no classification |
-| FR-202 | (S) Conduct structured elicitation (questionnaires, interviews, asynchronous review) and produce a transcript and decision log per session. | Planned |
-| FR-203 | (M) Express every functional requirement as a uniquely identified, atomic, testable statement with actor, trigger, behaviour, inputs, outputs, error cases and priority. | Built (prompt contract) |
-| FR-204 | (M) Maintain an NFR catalogue covering performance, scalability, availability, security, privacy, accessibility, localisation, observability, maintainability, portability and compliance, each with a measurable target and verification method. | Built (prompt contract) |
-| FR-205 | (S) Model personas, goals, journeys and pain points, linking each journey step to the requirements that support it. | Partial — actors and goals, not journeys |
-| FR-206 | (M) Capture business rules, decision tables, formulas and state transitions separately from narrative text so they can be tested directly. | Partial |
-| FR-207 | (M) Maintain a domain glossary and conceptual model, and flag terms used inconsistently across sources. | Planned |
-| FR-208 | (M) Maintain a register of assumptions, constraints, dependencies and open questions, each with an owner, impact if wrong and resolution date. | Partial — open questions are required by the prompt |
-| FR-209 | (M) Detect ambiguity, contradiction, duplication, missing acceptance criteria and untestable wording, and score requirement quality against a defined rubric. | Built — the reviewer enforces testability |
-| FR-210 | (S) Support MoSCoW and WSJF prioritisation and make the trade-offs visible. | Planned |
-| FR-211 | (M) Define explicit scope boundaries (in, out, deferred) and reject a requirement outside them without a change request. | Partial |
-| FR-212 | (M) Link every requirement upward to a goal and downward to at least one acceptance criterion, and report coverage. | Built (prompt contract) |
-| FR-213 | (S) Run a completeness pass against the blueprint's requirement checklist and list gaps with severity. | Planned |
-| FR-214 | (M) Baseline approved requirements as version 1.0 and route later changes through change control. | Partial — approval exists; change control is S26 |
+| ID | Requirement | Status | Enforced by |
+|---|---|---|---|
+| FR-201 | (M) Ingest source material (brief, transcripts, documentation, tickets, e-mails, regulatory extracts) and record each source with provenance, date and classification. | Partial — every input (brief, uploaded documents, planning baseline) is recorded at run start in a source register with `SRC-###` id, origin, received date and SHA-256, shown to every role; traceability cites `SRC-###` ids, and unknown or never-cited ids are flagged (advisory). **Deferred:** source classification (needs a taxonomy decision and an upload-time field; every source is `unclassified`) and further source types (transcripts, tickets, e-mail: FR-2001, FR-2101) | `stage-evidence.ts` (`buildSourceRegister`), `requirements-checks.ts`; `test/stage-evidence.test.ts` |
+| FR-202 | (S) Conduct structured elicitation (questionnaires, interviews, asynchronous review) and produce a transcript and decision log per session. | Deferred — needs a session model (questionnaire, interview, asynchronous review), storage, a UI and a human-in-the-loop flow: a new subsystem, not a contract change; asynchronous review also depends on the communications integration (FR-2101). Revisit after a product decision on elicitation channels ([R9 #10](http://localhost:8282/issues/10)) | — |
+| FR-203 | (M) Express every functional requirement as a uniquely identified, atomic, testable statement with actor, trigger, behaviour, inputs, outputs, error cases and priority. | Built — unique ids and every field present and non-placeholder block approval; atomicity and testability are prompt + reviewer judgement (not blocking) | `requirements-validation.ts`, `requirements-coverage.ts`; `test/requirements-validation.test.ts`, `test/stage-requirements-paths.test.ts` |
+| FR-204 | (M) Maintain an NFR catalogue covering performance, scalability, availability, security, privacy, accessibility, localisation, observability, maintainability, portability and compliance, each with a measurable target and verification method. | Built — every domain present (or `not applicable — <reason>`), a target and a verification method block approval; measurability is reviewer judgement | `requirements-validation.ts` (`CONTRACT_MISSING_NFR_DOMAIN`), `requirements-coverage.ts` (`MISSING_NFR_VERIFICATION`); same tests |
+| FR-205 | (S) Model personas, goals, journeys and pain points, linking each journey step to the requirements that support it. | Partial — an actors table (actor, goal, permissions) is required. **Deferred:** journeys and pain points — a journey/step schema and review UX would add a large section to specifications that already reach ~70,000 characters, and journeys are consumed by S03 wireframing; revisit with that stage ([R9 #10](http://localhost:8282/issues/10)) | `requirements-validation.ts` |
+| FR-206 | (M) Capture business rules, decision tables, formulas and state transitions separately from narrative text so they can be tested directly. | Built — an optional `### Business rules` table (`BR-###`, type decision table / formula / state transition / validation / policy, the FRs it applies to, its acceptance criteria); when present each rule must apply to declared FRs and be proved by an acceptance criterion (blocking). Whether every rule in the evidence was captured is reviewer judgement | `requirements-validation.ts`, `requirements-coverage.ts`; `test/requirements-validation.test.ts`, `test/requirements-coverage.test.ts`, `test/stage-requirements-paths.test.ts` |
+| FR-207 | (M) Maintain a domain glossary and conceptual model, and flag terms used inconsistently across sources. | Partial — an optional `### Glossary` table (term, definition, source); a term defined twice with different definitions is blocking (`CONTRACT_INCONSISTENT_GLOSSARY_TERM`). **Deferred:** a conceptual model, and detecting inconsistent *usage* across sources, which needs semantic analysis rather than a table check (left to the reviewer) ([R9 #10](http://localhost:8282/issues/10)) | `requirements-validation.ts`; `test/requirements-validation.test.ts` |
+| FR-208 | (M) Maintain a register of assumptions, constraints, dependencies and open questions, each with an owner, impact if wrong and resolution date. | Built — every register entry states type (assumption / constraint / dependency / question), owner, impact if wrong, status (open / confirmed / closed) and a resolve-by date (YYYY-MM-DD, required while open); all blocking | `requirements-validation.ts`; `test/requirements-validation.test.ts`, `test/stage-requirements-paths.test.ts` |
+| FR-209 | (M) Detect ambiguity, contradiction, duplication, missing acceptance criteria and untestable wording, and score requirement quality against a defined rubric. | Partial — missing acceptance criteria and duplicate ids are deterministic and blocking; ambiguity, contradiction, duplicate behaviour and untestable wording are a reviewer rubric with severity and a 0–100 rating that drive automatic revision but **do not block approval**; the live run's reviewer did not converge | `requirements-coverage.ts`; reviewer prompt in `stages/requirements.ts`; `test/stage-requirements.test.ts` (rubric, revision) |
+| FR-210 | (S) Support MoSCoW and WSJF prioritisation and make the trade-offs visible. | Partial — every FR priority must be MoSCoW (must / should / could / won't, blocking) and the gate shows the tally. **Deferred:** WSJF — it needs business value, time criticality, risk reduction and job size per item, which the evidence rarely contains and the stage must not invent; revisit when delivery planning supplies estimates ([R9 #10](http://localhost:8282/issues/10)) | `requirements-validation.ts` (`CONTRACT_INVALID_PRIORITY`), `requirements-coverage.ts` (`counts.priorities`); `test/requirements-validation.test.ts` |
+| FR-211 | (M) Define explicit scope boundaries (in, out, deferred) and reject a requirement outside them without a change request. | Partial — In scope, Out of scope and Deferred are required (blocking). **Deferred:** rejecting out-of-scope requirements — deciding that a requirement falls outside the boundaries is a semantic judgement with no deterministic check, and "without a change request" needs change control (S26, FR-2301), which does not exist yet ([R9 #10](http://localhost:8282/issues/10)) | `requirements-validation.ts` (`CONTRACT_MISSING_SCOPE_BOUNDARY`) |
+| FR-212 | (M) Link every requirement upward to a goal and downward to at least one acceptance criterion, and report coverage. | Built — every FR and NFR must be named by an acceptance criterion (blocking); a coverage report (requirements with AC, source, goal) is shown at the gate and in events; a missing source or **goal is advisory**, not blocking | `requirements-coverage.ts`; `test/requirements-coverage.test.ts`, `test/stage-requirements-paths.test.ts` |
+| FR-213 | (S) Run a completeness pass against the blueprint's requirement checklist and list gaps with severity. | Partial — every draft gets a deterministic completeness pass against the stage contract with blocking/advisory severity. **Deferred:** a pass against "the blueprint's requirement checklist" — no such checklist is defined in the product; writing it is a content task that should precede any check ([R9 #10](http://localhost:8282/issues/10)) | `requirements-checks.ts` |
+| FR-214 | (M) Baseline approved requirements as version 1.0 and route later changes through change control. | Partial — approval is an explicit human decision and the only way a specification is published (rejection publishes nothing). **Deferred:** baseline numbering (every approved specification is stored as its own document, version 1, with no supersession) and change routing — both belong to change management (S26) ([R9 #10](http://localhost:8282/issues/10)) | `stage-runtime.ts` decision path; `test/stage-requirements.test.ts` |
 
 ### 5.3 S03 — Wireframing · S04 — Prototype
 
@@ -525,7 +530,7 @@ something. Its implementation is the review loop, the acceptance rule and the st
 | FR-904 | (M) Compute a weighted score and apply the pass rule: weighted score ≥ 4.0, no dimension below 3.0, zero open blockers. | Partial — thresholds on blockers, major and rating |
 | FR-905 | (M) Merge duplicate findings, preserve dissenting opinions, and classify each by severity, location, evidence and remediation. | Built — severity, section, finding, required change |
 | FR-906 | (M) Present the artifact rendered, the prior diff, rubric scores, findings, evidence, agent self-assessment and decision controls. | Partial — findings and draft; no diff view in the API |
-| FR-907 | (M) Capture decisions as approve, approve_with_comments, request_changes, reject, delegate, waive or escalate, each with reason codes and mandatory comments when negative. | Partial — apply / accept / refine |
+| FR-907 | (M) Capture decisions as approve, approve_with_comments, request_changes, reject, delegate, waive or escalate, each with reason codes and mandatory comments when negative. | Partial — final decision / refine |
 | FR-908 | (M) Run a bounded revision loop re-reviewing only changed sections, stopping at approval, rejection, escalation or the configured maximum (default three cycles). | Partial — loop is bounded; re-review is whole-document |
 | FR-909 | (M) Detect non-convergence (low semantic diff, repeated findings, decreasing score) and escalate instead of spending further budget. | Planned |
 | FR-910 | (M) Record every rating with judge identity, model version, prompt version, rubric version and timestamp, retaining rejected versions for audit. | Built — reviewer model recorded per review |
@@ -808,8 +813,9 @@ than resolved: an approval that nobody made is worse than a delay.
 | HR-16 | budget, autonomy or policy change | platform owner + finance | Planned |
 | HR-17 | security exception or risk acceptance | security officer + accountable owner | Planned |
 
-The two gates built today are the ones the two built stages need: `review_changes` (the
-reviewer's findings need an answer) and `final` (the stage's artifact needs approval).
+The built stages automatically revise and re-review until acceptance or the cycle budget is
+exhausted, then pause at the `final` human gate. Acceptance by the automated reviewer is not
+human approval; a final decision remains necessary even when the budget is exhausted.
 
 ### 6.3 Requirements
 
@@ -1677,8 +1683,7 @@ The settings that change behaviour, and where they live. This is the operator's 
 
 | Setting | Scope | Default | Effect |
 |---|---|---|---|
-| `gateAfterEachReview` | stage | `false` | stop for a human after every review cycle |
-| `maxReviewCycles` | stage | `3` | revision cycles before a human must decide |
+| `maxReviewCycles` | stage | `3` | automatic revision cycles after the first review before the final human gate |
 | `minRating` | stage | `0` | rating the reviewer must reach |
 | `maxBlockers` | stage | `0` | blocker findings tolerated |
 | `maxMajor` | stage | `0` | major findings tolerated |
@@ -1714,7 +1719,6 @@ one of these rather than a bare 500.
 | `STAGE_RUN_LEASED` | 409 | someone else is executing it right now. |
 | `STAGE_RUN_AWAITING_HUMAN` | 409 | answer the gate before executing again. |
 | `STAGE_RUN_CANCELLED` | 409 | the run was cancelled while executing. |
-| `STAGE_RUN_NOT_AT_REVIEW_GATE` | 409 | there is no review gate to answer. |
 | `STAGE_RUN_NOT_AWAITING_DECISION` | 409 | there is no final gate to decide. |
 | `STAGE_ROLE_FAILED` | 502 | a role's harness call failed; the message carries the reason. Retry, fix the model, or rebind. |
 | `MODEL_BINDING_UNAVAILABLE` | 409 | the provider or model this run is bound to is gone. `POST /rebind`, then resume. |

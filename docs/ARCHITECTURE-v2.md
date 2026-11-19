@@ -301,7 +301,6 @@ whatever the settings say today.
 
 | Gate | Field | Answer by | Result |
 |---|---|---|---|
-| `review_changes` | `pendingGate.kind` | `POST /api/stage-runs/:id/gate {action}` | `apply` revises, `accept` jumps to the final gate |
 | `final` | `pendingGate.kind` | `POST /api/stage-runs/:id/decision {decision}` or `{refine: true}` | records the decision and completes, or refines once more |
 
 A gate carries the reviewer's findings and `waitingSince`. It has **no expiry**: after
