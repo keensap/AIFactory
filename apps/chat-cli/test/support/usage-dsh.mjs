@@ -35,7 +35,7 @@ const reviewRating = process.env.REVIEW_RATING === undefined ? null : Number(pro
 const text = role === 'reviewer'
   ? JSON.stringify({
       decision: reviewDecision,
-      ...(reviewRating === null ? {} : { rating: reviewRating }),
+      rating: reviewRating ?? 100,
       findings: reviewDecision === 'approved' ? [] : [
         { id: 'F-001', severity: 'major', section: 'Economic', finding: 'Budget not evidenced', required_change: 'Add the budget' },
       ],

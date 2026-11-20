@@ -33,7 +33,7 @@ async function withApi(run: (context: { base: string; projectId: string; root: s
     runPrompt: async (role) => {
       if (role === 'analyzer') return '# Analysis'
       if (role === 'author') return '# TELOS Feasibility Report\n\n## 10. Recommendation\n\nDecision: **Go**\n'
-      return '{"decision":"approved","findings":[]}'
+      return '{"decision":"approved","rating":100,"findings":[]}'
     },
   })
   const server = createChatServer({

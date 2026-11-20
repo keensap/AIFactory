@@ -49,7 +49,7 @@ function harness(options: {
       prompts.push({ role, prompt })
       if (role === 'analyzer') return '# Analysis'
       if (role === 'author') return '# TELOS Feasibility Report\n\nbody\n'
-      return '{"decision":"needs_revision","rating":50,"findings":[{"severity":"major","id":"F-1"}]}'
+      return '{"decision":"needs_revision","rating":50,"findings":[{"severity":"major","id":"F-1","section":"Economic","finding":"Budget missing","required_change":"Add budget"}]}'
     },
     stageSettings: { planning: async () => SETTINGS },
     currentTarget: () => target,

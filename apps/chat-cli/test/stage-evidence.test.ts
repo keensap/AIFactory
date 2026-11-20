@@ -83,6 +83,11 @@ test('approved planning handoff is frozen and reaches requirements analysis, aut
     const requirements = new StageEngine({ definition: stageDefinition('requirements')!, projects, workspace, stageSettings: { requirements: async () => settings }, harnessFactory: () => { throw new Error('unused') }, runPrompt: async (role, prompt) => {
       prompts.push(prompt)
       if (role === 'reviewer') return ++reviews === 1 ? '{"decision":"needs_revision","findings":[{"severity":"major","finding":"fix"}]}' : '{"decision":"approved","rating":100,"findings":[]}'
+      if (prompt.includes('## Reviewer findings to fix')) {
+        const feedback = prompt.split('## Reviewer findings to fix')[1]!.split('## Current document')[0]!
+        const plan = Array.from(feedback.matchAll(/^- (R-\d+) \[/gm), ([, id]) => ({ id, status: 'unaddressed', note: 'Needs clarification' }))
+        return `<revision-plan>${JSON.stringify(plan)}</revision-plan>\n${COVERED_REQUIREMENTS}`
+      }
       return COVERED_REQUIREMENTS
     } })
     const run = await requirements.start({ projectId: project.id, stage: 'requirements', brief: 'BRIEF-MARKER' })

@@ -196,7 +196,9 @@ for (const [name, markdown] of Object.entries(FAILURE_MODES)) {
       assert.equal(gated.pendingGate?.rating, 100)
       assert.equal(gated.pendingGate?.reviewDecision, 'approved')
       assert.equal(gated.reviewCycles, MAX_CYCLES, 'the automatic budget was exhausted')
-      assert.equal(h.count('author'), 1 + MAX_CYCLES, 'one draft plus one revision per cycle')
+      assert.equal(h.count('author'), 1 + 2 * MAX_CYCLES, 'one draft, revision and at most one plan repair per cycle')
+      assert.equal(h.events('revision_report').length, MAX_CYCLES)
+      assert.match(gated.summaryMarkdown ?? '', /Revision feedback \(author-reported\)/)
       assert.equal(h.count('reviewer'), 1 + MAX_CYCLES)
       assert.ok(gated.pendingGate?.coverage?.findings.some((finding) => finding.severity === 'blocking' && finding.code === EXPECTED_BLOCKER[name]))
       const decisions = h.events('review_decision').map((event) => (event.payload as { accepted: boolean }).accepted)
@@ -600,4 +602,14 @@ test('over HTTP, a waiver on a clean requirements draft completes it without rec
     rmSync(dataDir, { recursive: true, force: true })
     rmSync(h.root, { recursive: true, force: true })
   }
+})
+
+
+test('over-limit review fails rather than hiding a blocker', async () => {
+  const findings = Array.from({ length: 13 }, (_, i) => ({ id: `F-${i}`, severity: i === 12 ? 'blocker' : 'minor' }))
+  await using({ reviews: [JSON.stringify({ decision: 'approved', rating: 100, findings })] }, async (h) => {
+    const { run } = await h.start()
+    await assert.rejects(() => h.runtime.execute(run.id), /exceeded 12 findings/)
+    assert.equal(h.events('review_decision').length, 0)
+  })
 })

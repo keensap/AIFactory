@@ -14,6 +14,7 @@ import { MemorySettingsStore } from './support/memory-settings-store.ts'
 const APPROVED = '{"decision":"approved","rating":100,"findings":[]}'
 const CHANGES = JSON.stringify({
   decision: 'needs_revision',
+  rating: 50,
   findings: [{ id: 'F-1', severity: 'major', section: 'Economic', finding: 'Budget missing', required_change: 'Add it' }],
 })
 

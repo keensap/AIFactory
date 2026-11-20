@@ -1,3 +1,4 @@
+import { mergeProcessParams, parseProcessParams, ProcessParamsError, type ProcessParams } from './processes/params.ts'
 /**
  * Planning-stage review settings.
  *
@@ -22,6 +23,7 @@ export const MAX_BLOCKERS_LIMIT = 20
 export const MAX_MAJOR_LIMIT = 50
 
 export interface PlanningStageSettings {
+  processParams?: ProcessParams
   maxReviewCycles: number
   /** Minimum overall document rating (0–100) for the run to stop revising. */
   minRating: number
@@ -160,9 +162,14 @@ export interface StageSettingsDefinition {
 const PLANNING_DEFINITION: StageSettingsDefinition = {
   stage: 'planning',
   label: STAGE_LABELS.planning,
-  defaults: { ...DEFAULT_PLANNING_STAGE_SETTINGS },
+  defaults: { ...DEFAULT_PLANNING_STAGE_SETTINGS, processParams: {} },
   validate(input: unknown): Record<string, unknown> {
-    return { ...parseStageSettings(input, { partial: true }) }
+    try {
+      return { ...parseStageSettings(input, { partial: true }), ...(isRecord(input) && Object.hasOwn(input, 'processParams') ? { processParams: parseProcessParams(input.processParams) } : {}) }
+    } catch (error) {
+      if (error instanceof ProcessParamsError) throw new StageSettingsError(400, error.code, error.message)
+      throw error
+    }
   },
   fromContext(constraints: unknown): Record<string, unknown> {
     return { ...settingsFromContext({ constraints }) }
@@ -177,9 +184,14 @@ const PLANNING_DEFINITION: StageSettingsDefinition = {
 const REQUIREMENTS_DEFINITION: StageSettingsDefinition = {
   stage: 'requirements',
   label: STAGE_LABELS.requirements,
-  defaults: { ...DEFAULT_PLANNING_STAGE_SETTINGS },
+  defaults: { ...DEFAULT_PLANNING_STAGE_SETTINGS, processParams: {} },
   validate(input: unknown): Record<string, unknown> {
-    return { ...parseStageSettings(input, { partial: true }) }
+    try {
+      return { ...parseStageSettings(input, { partial: true }), ...(isRecord(input) && Object.hasOwn(input, 'processParams') ? { processParams: parseProcessParams(input.processParams) } : {}) }
+    } catch (error) {
+      if (error instanceof ProcessParamsError) throw new StageSettingsError(400, error.code, error.message)
+      throw error
+    }
   },
   fromContext(constraints: unknown): Record<string, unknown> {
     return { ...settingsFromContext({ constraints }) }
@@ -208,9 +220,10 @@ export function mergeStageSettings(
     if (layer === undefined) continue
     for (const [key, value] of Object.entries(layer)) {
       // Ignore retired or unknown persisted fields rather than exposing them again.
-      if (value !== undefined && Object.hasOwn(merged, key)) merged[key] = value
+      if (value !== undefined && Object.hasOwn(merged, key)) merged[key] = key === 'processParams' ? mergeProcessParams(merged[key], value) : value
     }
   }
+  if (isRecord(merged.processParams) && Object.keys(merged.processParams).length === 0) delete merged.processParams
   return merged
 }
 
@@ -350,10 +363,10 @@ export class StageSettingsService {
   async resolve(projectId: string, stage: string): Promise<ResolvedStageSettings> {
     stageSettingsDefinition(stage)
     const project = await this.store.getProject(projectId, stage as ProjectStage)
-    if (project !== undefined) {
-      return { stage: stage as ProjectStage, settings: mergeStageSettings(stage, project), source: 'project' }
-    }
     const factory = (await this.store.loadFactory())[stage]
+    if (project !== undefined) {
+      return { stage: stage as ProjectStage, settings: mergeStageSettings(stage, factory, project), source: 'project' }
+    }
     if (factory !== undefined) {
       return { stage: stage as ProjectStage, settings: mergeStageSettings(stage, factory), source: 'factory' }
     }
@@ -371,7 +384,8 @@ export class StageSettingsService {
       throw new StageSettingsError(400, 'NO_FIELDS', 'no recognised settings were provided')
     }
     const current = await this.resolve(projectId, stage)
-    await this.store.setProject(projectId, stage as ProjectStage, { ...current.settings, ...patch })
+    const storedParams = (await this.store.getProject(projectId, stage as ProjectStage))?.processParams
+    await this.store.setProject(projectId, stage as ProjectStage, { ...current.settings, ...patch, ...(patch.processParams === undefined ? { processParams: storedParams ?? {} } : { processParams: mergeProcessParams(storedParams, patch.processParams) }) })
     return this.resolve(projectId, stage)
   }
 
@@ -390,7 +404,8 @@ export class StageSettingsService {
   async effective(projectId: string, stage: ProjectStage = 'planning'): Promise<PlanningStageSettings> {
     const resolved = await this.resolve(projectId, stage)
     const defaults = STAGE_SETTINGS_DEFINITIONS[stage]?.defaults ?? DEFAULT_PLANNING_STAGE_SETTINGS
-    return { ...DEFAULT_PLANNING_STAGE_SETTINGS, ...defaults, ...(resolved.settings as Partial<PlanningStageSettings>) }
+    const { processParams, ...settings } = { ...DEFAULT_PLANNING_STAGE_SETTINGS, ...defaults, ...(resolved.settings as Partial<PlanningStageSettings>) }
+    return { ...settings, ...(processParams && Object.keys(processParams).length ? { processParams } : {}) } as PlanningStageSettings
   }
 
   async close(): Promise<void> {

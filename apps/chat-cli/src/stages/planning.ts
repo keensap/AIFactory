@@ -1,3 +1,5 @@
+import { preparePrompt } from '../processes/spec.ts'
+import { planningAnalyzer, planningAuthor, planningReviewer, planningRevision } from '../processes/stages/planning.ts'
 /**
  * The planning stage's definition: the TELOS feasibility report.
  *
@@ -11,9 +13,15 @@ import {
   buildAuthorPrompt,
   buildRevisionPrompt,
   buildReviewerPrompt,
-  parseStageReview,
-} from '../stage-runtime.ts'
+} from '../processes/stages/planning.ts'
 import type { StageDefinition } from '../stage-definition.ts'
+
+const planningPrompts: import('../stage-definition.ts').PreparedStagePrompts = {
+    analyzer: (project, context) => preparePrompt(planningAnalyzer, { project, context }, context.processParams),
+    author: (project, context, analysis) => preparePrompt(planningAuthor, { project, context, analysis }, context.processParams),
+    reviewer: (project, context, draft, settings) => preparePrompt(planningReviewer, { project, context, draft, settings }, context.processParams),
+    revision: (project, context, analysis, draft, findings) => preparePrompt(planningRevision, { project, context, analysis, draft, findings }, context.processParams),
+}
 
 export const PLANNING_DEFINITION: StageDefinition = {
   stage: 'planning',
@@ -25,6 +33,8 @@ export const PLANNING_DEFINITION: StageDefinition = {
     revision: (project, context, analysis, draft, findings) =>
       buildRevisionPrompt(project, context, analysis, draft, findings),
   },
+  structuredReviewVersions: ['2.0.0'],
+  promptBundles: { current: '2.0.0', versions: { '1.0.0': planningPrompts, '2.0.0': planningPrompts } },
   artifact: {
     kind: TELOS_DOCUMENT_KIND,
     title: 'TELOS feasibility report',
@@ -32,6 +42,5 @@ export const PLANNING_DEFINITION: StageDefinition = {
     // The feasibility report is the evidence for the planning checklist.
     checklistKeys: ['business_idea', 'stakeholder_goals', 'feasibility_decision'],
   },
-  parseReview: (raw) => parseStageReview(raw),
   humanDecision: 'feasibility',
 }

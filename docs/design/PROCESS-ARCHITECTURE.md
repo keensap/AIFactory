@@ -1,6 +1,6 @@
 # Process architecture: isolated, testable, overridable roles
 
-**Status:** proposed 2026-11-19 — no code written yet
+**Status:** P1 and P2 implemented locally; P3 and P4 implemented locally; P5 backend implemented locally; P5 web controls and P6 remain open. New Planning runs pin bundle 2.0.0, which keeps the TELOS prompt bytes and validates the review object before acceptance. Invalid replies get one repair attempt on the same draft; a second invalid reply fails with `INVALID_REVIEW`. Legacy Planning runs retain their earlier parsing behavior. Live model convergence is not established by replay or regression tests. Requirements now uses a versioned prompt bundle and emits a `revision_report` event with author-reported dispositions, missing IDs and an advisory size check (over 25% growth). The report is not proof of a fix; the revised draft still goes through review. The gate summary shows the latest matching revision's missing and unaddressed feedback IDs and growth advisory. An invalid or incomplete revision plan gets one plan-only repair attempt; a still-invalid reply remains advisory and cannot replace the revised Markdown. Reviews with more than 12 findings fail explicitly rather than silently dropping findings. P1 preserves the existing prompt and runtime contracts. Reviewer repair (one retry), advisory growth checks, additive instructions, and reuse of stage settings for parameter storage are approved defaults for later phases.
 **Owners:** platform
 **Tracking:** Redmine [#11](http://localhost:8282/issues/11) — phases [#12](http://localhost:8282/issues/12) to [#17](http://localhost:8282/issues/17)
 **Related:** [STAGE-RUNTIME.md](STAGE-RUNTIME.md) · [STAGE-GATES.md](STAGE-GATES.md) · [REQUIREMENTS-CONTRACT.md](REQUIREMENTS-CONTRACT.md) · [AGENTS.md](AGENTS.md)
@@ -244,13 +244,10 @@ same digest, different output. It also makes the replay corpus self-describing.
 
 Replay needs the exact prompt. Two mechanisms, both cheap:
 
-1. **Always:** `promptSha256` + section sizes (above). Detects drift, costs nothing.
-2. **Opt-in:** `AIFACTORY_RECORD_PROMPTS=1` writes the rendered prompt to
-   `<project>/.aifactory/runs/<runId>/prompts/<role>-<n>.txt` (gitignored, size-capped,
-   redacted by the existing logging sanitiser). This is what `ReplayRunner` consumes.
+1. **Always:** `role_start` records the rendered prompt hash and length; reviewer and revision calls also record the input draft digest. Migrated Planning specs add version and section metadata. Legacy Requirements builders get whole-prompt metadata until P3.
+2. **Opt-in:** set `AIFACTORY_RECORD_PROMPTS=1` and `AIFACTORY_REPLAY_DIR` to a dedicated private directory outside project trees and source control. Successful role calls capture the exact prompt and reply. These files are **not redacted** (redaction would break exact replay); they may contain confidential data. Restrict access and delete or expire captures after use. Entries are capped at 1 MiB and runs at 1,024 entries; capture failures warn without failing the stage.
 
-Because specs are versioned and retained, a test can also **re-render** a prompt from the
-stored run context and assert the hash matches — proving that a spec change is intentional.
+Inject `new ReplayRunner(root, runId).runPrompt` to replay the recorded replies in order without a model. A prompt or role mismatch fails rather than falling back to a live call. Replay tests orchestration and parsing, not whether a changed prompt improves model output. Planning goldens detect prompt changes; a changed prompt needs a matching fixture. New Planning runs pin the installed prompt bundle version in their persisted context. Keep older bundles installed when adding a version; resume fails explicitly if the pinned bundle is unavailable. Legacy runs without a pin use the current bundle. The pin selects prompt code, not an entire historical runtime or model.
 
 ## 6. What stays stage-specific
 

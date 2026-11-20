@@ -1,3 +1,8 @@
+import { mergeProcessParams, ProcessParamsError, type ProcessParams } from './processes/params.ts'
+import { parsePlanningReview, PlanningReviewFormatError } from './processes/planning-review.ts'
+import { inspectRevision } from './processes/revision.ts'
+import type { PreparedPrompt } from './processes/spec.ts'
+import { recordReplay } from './processes/replay.ts'
 /**
  * Stage coordinator runtime.
  *
@@ -27,7 +32,7 @@ import type { Project, ProjectService } from './projects.ts'
 import type { StageRunBindings } from './workspace.ts'
 import type { ProjectStage } from './sdlc.ts'
 import { SDLC_STAGES, STAGE_LABELS } from './sdlc.ts'
-import { MAX_ATTACHMENTS_PER_RUN, PROMPT_CHARS_PER_ATTACHMENT, renderAttachmentPrompt, type ProjectAttachment } from './attachments.ts'
+import { MAX_ATTACHMENTS_PER_RUN, PROMPT_CHARS_PER_ATTACHMENT, type ProjectAttachment } from './attachments.ts'
 import { renderReportPdf } from './report/pdf.ts'
 import {
   DEFAULT_PLANNING_STAGE_SETTINGS,
@@ -35,7 +40,7 @@ import {
   type PlanningStageSettings,
 } from './stage-settings.ts'
 import { exportTarget, writeExport } from './report/export.ts'
-import { TELOS_DOCUMENT_KIND, TELOS_TEMPLATE } from './telos.ts'
+import { TELOS_DOCUMENT_KIND } from './telos.ts'
 import {
   PostgresProjectWorkspace,
   WorkspaceError,
@@ -133,6 +138,9 @@ export interface ContextAttachment {
 
 export interface StageContextPacket {
   schemaVersion: 1
+  /** Prompt bundle pinned at creation; absent on older runs. */
+  promptBundleVersion?: string
+  processParams?: ProcessParams
   project: {
     id: string
     name: string
@@ -319,6 +327,7 @@ export class StageEngine {
     brief?: string | null
     /** Requester-supplied PDFs to analyse alongside the brief. */
     attachmentIds?: string[]
+    processParams?: unknown
   }): Promise<StageRunDetail> {
     this.assertExecutable(input.stage)
     const project = await this.projects.get(input.projectId)
@@ -351,6 +360,14 @@ export class StageEngine {
         : { evaluatedAt: readiness.evaluatedAt, prerequisites: readiness.prerequisites },
       this.definition,
     )
+    try {
+      const params = mergeProcessParams(settings.processParams, input.processParams)
+      if (Object.keys(params).length) context.processParams = params
+    } catch (error) {
+      if (error instanceof ProcessParamsError) throw new StageRuntimeError(400, error.code, error.message)
+      throw error
+    }
+    if (this.definition.promptBundles !== undefined) context.promptBundleVersion = this.definition.promptBundles.current
     if (this.definition.baselineDocumentKinds !== undefined) {
       context.baselineEvidence = await loadBaselineEvidence(project.rootPath, project.id, snapshot.documents, this.definition.baselineDocumentKinds)
       context.sources = buildSourceRegister({
@@ -425,6 +442,7 @@ export class StageEngine {
       }
       const resolved = await resolve(projectId)
       return {
+        ...(resolved.processParams === undefined ? {} : { processParams: resolved.processParams }),
         maxReviewCycles: resolved.maxReviewCycles,
         minRating: resolved.minRating,
         maxBlockers: resolved.maxBlockers,
@@ -942,13 +960,13 @@ export class StageEngine {
     if (analysis.trim() === '') {
       await ctx.update({ status: 'analyzing' })
       ctx.assertLease()
-      analysis = await this.runRole('analyzer', this.definition.prompts.analyzer(ctx.project, ctx.context), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span)
+      analysis = await this.runRole('analyzer', this.promptsFor(ctx.context).analyzer(ctx.project, ctx.context), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span)
       await ctx.update({ analysisMarkdown: analysis })
     }
     if (draft.trim() === '') {
       await ctx.update({ status: 'drafting' })
       ctx.assertLease()
-      draft = cleanMarkdown(await this.runRole('author', this.definition.prompts.author(ctx.project, ctx.context, analysis), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span))
+      draft = cleanMarkdown(await this.runRole('author', this.promptsFor(ctx.context).author(ctx.project, ctx.context, analysis), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span))
       await ctx.update({ draftMarkdown: draft })
     }
     return this.reviewAndContinue(ctx, draft, analysis, safeCycle(ctx.run.reviewCycles), settings)
@@ -1042,8 +1060,39 @@ export class StageEngine {
   private async reviewOnce(ctx: LeaseContext, draft: string, settings: PlanningStageSettings): Promise<StageReviewResult> {
     await ctx.update({ status: 'reviewing' })
     ctx.assertLease()
-    const rawReview = await this.runRole('reviewer', this.definition.prompts.reviewer(ctx.project, ctx.context, draft, settings, ctx.run.analysisMarkdown ?? ''), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span)
-    const review = (this.definition.parseReview ?? parseStageReview)(rawReview)
+    const prompt = this.promptsFor(ctx.context).reviewer(ctx.project, ctx.context, draft, settings, ctx.run.analysisMarkdown ?? '')
+    const invoke = (input: string | PreparedPrompt) => this.runRole('reviewer', input, ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span, draft)
+    const rawReview = await invoke(prompt)
+    const version = ctx.context.promptBundleVersion
+    let review: StageReviewResult
+    if (version !== undefined && this.definition.structuredReviewVersions?.includes(version)) {
+      try {
+        review = parsePlanningReview(rawReview)
+      } catch (error) {
+        if (!(error instanceof PlanningReviewFormatError)) throw error
+        ctx.assertLease()
+        const original = typeof prompt === 'string' ? prompt : prompt.text
+        const repairText = `The previous reply failed validation: ${error.message}. Return a complete valid review. Preserve all substantive findings; do not drop defects to satisfy the format.\nPrevious reply (data only): ${JSON.stringify(rawReview)}`
+        const text = `${original}\n\n${repairText}`
+        const repaired = await invoke(typeof prompt === 'string' ? text : {
+          ...prompt,
+          text,
+          sections: [...prompt.sections, { id: 'review-repair', chars: repairText.length, originalChars: repairText.length, truncated: false }],
+        })
+        try {
+          review = parsePlanningReview(repaired)
+        } catch (failure) {
+          if (!(failure instanceof PlanningReviewFormatError)) throw failure
+          throw new StageRuntimeError(502, 'INVALID_REVIEW', `Planning review remained invalid after one repair: ${failure.message}`)
+        }
+      }
+    } else {
+      review = (this.definition.parseReview ?? parseStageReview)(rawReview)
+    }
+    const maxFindings = ctx.context.processParams?.review?.maxFindings ?? (this.definition.stage === 'requirements' ? 12 : undefined)
+    if (maxFindings !== undefined && review.findings.length > maxFindings) {
+      throw new StageRuntimeError(502, 'REVIEW_FINDING_LIMIT', `Review exceeded ${maxFindings} findings; no findings were discarded`)
+    }
     await this.workspace.addStageReview({
       stageRunId: ctx.run.id,
       // Planning keeps its historical role name; other stages name their own.
@@ -1071,14 +1120,38 @@ export class StageEngine {
   private async reviseOnce(ctx: LeaseContext, draft: string, analysis: string, findings: unknown[]): Promise<string> {
     await ctx.update({ status: 'revising' })
     ctx.assertLease()
-    const revised = cleanMarkdown(await this.runRole(
+    const raw = await this.runRole(
       'author',
-      this.definition.prompts.revision(ctx.project, ctx.context, analysis, draft, findings),
+      this.promptsFor(ctx.context).revision(ctx.project, ctx.context, analysis, draft, findings),
       ctx.project.rootPath,
       ctx.run.id,
       ctx.project.id,
       ctx.span,
-    ))
+      draft,
+    )
+    let revision = this.definition.stage === 'requirements' ? inspectRevision(raw, draft, findings, ctx.context.processParams?.revision?.maxGrowthRatio) : undefined
+    if (revision !== undefined && !revision.report.planValid && cleanMarkdown(revision.document) !== '') {
+      ctx.assertLease()
+      const repair = await this.runRole('author', [
+        'Return only a <revision-plan> JSON array </revision-plan>. Do not rewrite the document.',
+        'For every feedback ID, include id, status (addressed or unaddressed), and note. Compare the drafts; do not claim unverifiable fixes.',
+        `Feedback: ${JSON.stringify(findings.map((finding, i) => ({ id: `R-${i + 1}`, finding })))}`,
+        `Previous draft:\n${draft}`,
+        `Revised draft:\n${revision.document}`,
+      ].join('\n\n'), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span, revision.document)
+      const closing = repair.indexOf('</revision-plan>')
+      if (closing >= 0) {
+        const repaired = inspectRevision(repair.slice(0, closing + '</revision-plan>'.length) + '\n' + revision.document, draft, findings, ctx.context.processParams?.revision?.maxGrowthRatio)
+        if (repaired.report.planValid) revision = repaired
+      }
+    }
+    const revised = cleanMarkdown(revision?.document ?? raw)
+    if (revision !== undefined) {
+      ctx.revisionAudit = { digest: describeDraft(revised).sha256, report: revision.report }
+      await this.appendRunEvent(ctx.project.id, ctx.run.id, 'revision_report', {
+        ...revision.report, inputDraft: describeDraft(draft), revisedDraft: describeDraft(revised),
+      })
+    }
     await ctx.update({ draftMarkdown: revised })
     return revised
   }
@@ -1112,7 +1185,7 @@ export class StageEngine {
     await this.workspace.updateStageRun(ctx.run.id, {
       status: 'awaiting_human',
       pendingGate: gate,
-      summaryMarkdown: buildGateSummary(ctx.run.analysisMarkdown ?? '', review, cycle, settings.maxReviewCycles, 'final', acceptance, STAGE_LABELS[ctx.run.stage]) + renderCoverageSummary(coverage),
+      summaryMarkdown: buildGateSummary(ctx.run.analysisMarkdown ?? '', review, cycle, settings.maxReviewCycles, 'final', acceptance, STAGE_LABELS[ctx.run.stage]) + renderCoverageSummary(coverage) + (ctx.revisionAudit?.digest === gate.reviewedDraft?.sha256 && ctx.revisionAudit !== undefined ? renderRevisionAudit(ctx.revisionAudit.report) : ''),
     })
     await this.appendRunEvent(ctx.project.id, ctx.run.id, 'final_gate', {
       cycle,
@@ -1208,14 +1281,36 @@ export class StageEngine {
     return (await this.workspace.getStageRunDetail(ctx.run.id))!
   }
 
+  private promptsFor(context: StageContextPacket) {
+    const bundles = this.definition.promptBundles
+    const version = context.promptBundleVersion ?? bundles?.current
+    if (version === undefined) return this.definition.prompts
+    const selected = bundles?.versions
+    if (selected === undefined || !Object.hasOwn(selected, version)) {
+      throw new StageRuntimeError(409, 'PROMPT_BUNDLE_UNAVAILABLE', `Prompt bundle ${version} is not installed for ${this.definition.stage}`)
+    }
+    return selected[version]!
+  }
+
   private async runRole(
     role: StageRole,
-    prompt: string,
+    prepared: string | PreparedPrompt,
     cwd: string,
     runId: string,
     projectId: string,
     parentSpan?: TraceSpan,
+    draft?: string,
   ): Promise<string> {
+    const prompt = typeof prepared === 'string' ? prepared : prepared.text
+    const capture = async (reply: string) => {
+      const root = process.env.AIFACTORY_REPLAY_DIR
+      if (process.env.AIFACTORY_RECORD_PROMPTS !== '1' || !root) return
+      try {
+        await recordReplay(root, { runId, role, prompt, reply })
+      } catch {
+        this.log.warn({ event: 'stage.role.capture_failed', role }, 'Role replay capture failed')
+      }
+    }
     const started = Date.now()
     const roleSpan = this.traces.startRole({
       ...(parentSpan !== undefined ? { parent: parentSpan } : {}),
@@ -1248,6 +1343,15 @@ export class StageEngine {
       : (pin.attributionFor?.(composition?.model ?? undefined) ?? pin.attribution)
     await sink.append('role_start', {
       role,
+      promptSha256: createHash('sha256').update(prompt, 'utf8').digest('hex'),
+      promptChars: prompt.length,
+      ...(typeof prepared === 'string' ? {} : {
+        spec: prepared.spec,
+        specVersion: prepared.specVersion,
+        sections: prepared.sections,
+        truncated: prepared.sections.filter((section) => section.truncated).map((section) => section.id),
+      }),
+      ...(draft === undefined ? {} : { draft: describeDraft(draft) }),
       timeoutMs: this.roleTimeoutMs,
       model: roleModel(attribution),
       ...(composition === undefined ? {} : { agent: composition.name, agentId: composition.id }),
@@ -1269,6 +1373,7 @@ export class StageEngine {
         const text = await this.runPrompt(role, prompt, cwd)
         await sink.append('role_end', { role, durationMs: Date.now() - started })
         this.traces.completeRole(roleSpan, text)
+        await capture(text)
         return text
       }
 
@@ -1331,6 +1436,7 @@ export class StageEngine {
             fallback: !isPrimary,
           })
           this.traces.completeRole(roleSpan, result.text)
+          await capture(result.text)
           return result.text
         } catch (error) {
           lastError = error
@@ -1620,167 +1726,9 @@ export function hashContext(context: StageContextPacket): string {
   return createHash('sha256').update(JSON.stringify(context)).digest('hex')
 }
 
-/**
- * The context with attachment text removed, for prompts that carry the documents
- * in a readable section instead. Avoids sending the same text twice.
- */
-export function contextWithoutAttachmentText(context: StageContextPacket): Omit<StageContextPacket, 'attachments'> & {
-  attachments: Array<Omit<ContextAttachment, 'text'>>
-} {
-  return {
-    ...context,
-    attachments: context.attachments.map(({ text: _text, ...meta }) => meta),
-  }
-}
-
-/** The stage inputs, or an explicit note when there are none. */
-export function attachmentSection(context: StageContextPacket): string {
-  const rendered = renderAttachmentPrompt(context.attachments)
-  return rendered === '' ? 'INPUT DOCUMENTS\nThe requester attached no documents for this stage.' : rendered
-}
-
-export function buildAnalyzerPrompt(project: Project, context: StageContextPacket): string {
-  return `STAGE_ROLE: analyzer
-You are the Planning & Feasibility analyzer for an AI software delivery factory.
-
-Analyze the project facts and the requester's input for a single TELOS feasibility report. Do not write the report itself. Identify:
-1. the high-level business idea, problem and proposed product;
-2. stakeholder goals, success measures and constraints;
-3. available evidence for Technical, Economic, Legal, Operational and Schedule feasibility;
-4. gaps, ambiguities and questions that must be resolved before a go/no-go recommendation.
-
-Use only the facts below. Mark missing evidence as a gap; do not invent budgets, dates or approvals.
-Return concise Markdown with headings for the five TELOS dimensions.
-
-PROJECT: ${project.name}
-
-${attachmentSection(context)}
-
-CONTEXT:
-${JSON.stringify(contextWithoutAttachmentText(context), null, 2)}`
-}
-
-export function buildAuthorPrompt(
-  project: Project,
-  context: StageContextPacket,
-  analysis: string,
-): string {
-  return `STAGE_ROLE: author
-You are the Planning & Feasibility author for ${project.name}.
-
-Write the ONE TELOS feasibility report. Follow the template exactly. Use the analysis and facts below; do not invent evidence. Where evidence is missing, state the gap and the question that must be answered. End with a clear Go, Conditional go or No-go recommendation and conditions.
-
-Return only the Markdown report, without a code fence and without an SRS or functional specification.
-
-ANALYSIS:
-${analysis}
-
-TEMPLATE:
-${TELOS_TEMPLATE}
-
-${attachmentSection(context)}
-
-CONTEXT:
-${JSON.stringify(contextWithoutAttachmentText(context), null, 2)}`
-}
-
-export function buildReviewerPrompt(
-  project: Project,
-  context: StageContextPacket,
-  draft: string,
-  settings?: PlanningStageSettings,
-): string {
-  const criteria = settings ?? { ...DEFAULT_PLANNING_STAGE_SETTINGS, ...settingsFromContext(context) }
-  const ratingRule = `Rate the document 0-100 for whether it is ready to send to the sponsor. The run stops revising as soon as ALL of these hold:
-- overall rating >= ${criteria.minRating}
-- blocker findings <= ${criteria.maxBlockers}
-- major findings <= ${criteria.maxMajor}`
-  const reviewContext = {
-    project: {
-      name: project.name,
-      organization: project.organization,
-      ownerEmail: project.ownerEmail,
-    },
-    stage: {
-      key: context.stage.key,
-      checklist: context.stage.checklist,
-      input: context.input,
-      constraints: context.constraints,
-    },
-    priorStages: context.priorStages,
-    documents: context.documents.map((document) => ({
-      kind: document.kind,
-      title: document.title,
-      storagePath: document.storagePath,
-      status: document.status,
-    })),
-    attachments: context.attachments.map(({ text: _text, ...meta }) => meta),
-  }
-
-  return `STAGE_ROLE: reviewer
-You are the independent Planning & Feasibility reviewer for ${project.name}. You did not write this draft.
-
-Evaluate the single TELOS report against the template and evidence. Check that:
-- business idea, stakeholder goals and success measures are explicit;
-- each of Technical, Economic, Legal, Operational and Schedule feasibility is addressed;
-- assumptions, risks and missing evidence are not hidden;
-- the recommendation is justified by the evidence;
-- no SRS/functional specification has been substituted for the feasibility report.
-
-${ratingRule}
-
-Return ONLY JSON:
-{
-  "decision": "approved" | "needs_revision" | "rejected",
-  "rating": <integer 0-100>,
-  "findings": [
-    {
-      "id": "F-001",
-      "severity": "blocker" | "major" | "minor",
-      "section": "...",
-      "finding": "...",
-      "required_change": "..."
-    }
-  ]
-}
-
-Approve only if there are no blocker or major findings. If not approved, include actionable required changes.
-
-DRAFT:
-${draft}
-
-${attachmentSection(context)}
-
-REVIEW CONTEXT:
-${JSON.stringify(reviewContext, null, 2)}`
-}
-
-export function buildRevisionPrompt(
-  project: Project,
-  context: StageContextPacket,
-  analysis: string,
-  draft: string,
-  findings: unknown[],
-): string {
-  return `STAGE_ROLE: author
-Revise the one TELOS feasibility report for ${project.name} using the reviewer findings below.
-
-Address every blocker and major finding. Keep the template structure. Do not add evidence that does not exist. Return only the complete revised Markdown report, without a code fence.
-
-FINDINGS:
-${JSON.stringify(findings, null, 2)}
-
-CURRENT DRAFT:
-${draft}
-
-ANALYSIS:
-${analysis}
-
-${attachmentSection(context)}
-
-CONTEXT:
-${JSON.stringify(contextWithoutAttachmentText(context), null, 2)}`
-}
+// Compatibility exports for existing prompt callers.
+export { attachmentSection, contextWithoutAttachmentText } from './processes/context.ts'
+export { buildAnalyzerPrompt, buildAuthorPrompt, buildReviewerPrompt, buildRevisionPrompt } from './processes/stages/planning.ts'
 
 export function parseStageReview(raw: string): StageReviewResult {
   const text = raw.trim()
@@ -1825,7 +1773,15 @@ function safeCycle(value: number | undefined): number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0
 }
 
+function renderRevisionAudit(report: ReturnType<typeof inspectRevision>['report']): string {
+  const unresolved = report.dispositions.filter(({ status }) => status === 'unaddressed').map(({ id }) => id)
+  return ['','## Revision feedback (author-reported)',
+    `Plan complete: ${report.planValid ? 'yes' : 'no'}. Missing: ${report.missing.join(', ') || 'none'}. Unaddressed: ${unresolved.join(', ') || 'none'}.`,
+    `Draft size: ${report.previousChars} → ${report.revisedChars} characters${report.grewOverBudget ? ' (over configured growth limit)' : ''}.`, ''].join('\n')
+}
+
 export interface LeaseContext {
+  revisionAudit?: { digest: string; report: ReturnType<typeof inspectRevision>['report'] }
   run: StageRun
   project: Project
   context: StageContextPacket

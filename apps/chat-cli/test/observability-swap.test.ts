@@ -23,7 +23,7 @@ const skip = url === undefined || url === '' ? 'AIFACTORY_TEST_DATABASE_URL is n
 
 const ANALYZER = '# Planning analysis\n\n- Business idea: portal\n- TELOS evidence available\n'
 const TELOS = '# TELOS Feasibility Report\n\n## 10. Recommendation\n\nDecision: **Go**\n'
-const REVIEW = JSON.stringify({ decision: 'approved', findings: [] })
+const REVIEW = JSON.stringify({ decision: 'approved', rating: 100, findings: [] })
 
 test('the real stage runtime records through whatever provider configuration selects', { skip }, async () => {
   const store = new PostgresProjectStore(url!)

@@ -216,6 +216,7 @@ export const stageRunRoutes: RouteDef[] = [
       projectId: requiredParam(params, 'id'),
       stage: requiredParam(params, 'stage') as ProjectStage,
       ...(typeof record.brief === 'string' ? { brief: record.brief } : {}),
+      ...(Object.hasOwn(record, 'processParams') ? { processParams: record.processParams } : {}),
       ...(Array.isArray(attachmentIds) ? { attachmentIds: attachmentIds as string[] } : {}),
     })
     sendJson(response, 201, { run })

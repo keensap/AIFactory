@@ -3,11 +3,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { ProjectService } from '../src/projects.ts'
 import { SettingsService } from '../src/settings.ts'
 import { DshHarness } from '../src/harness.ts'
+import { PLANNING_DEFINITION } from '../src/stages/planning.ts'
 import type { ModelPin } from '../src/models/index.ts'
 import type { renderReportPdf } from '../src/report/pdf.ts'
 import { PlanningStageRuntime, StageRuntimeError, buildAnalyzerPrompt, buildContextPacket, cleanMarkdown, parseStageReview } from '../src/stage-runtime.ts'
@@ -55,15 +56,17 @@ test('runs analyzer, author and reviewer, then waits for a human decision', asyn
     const project = await projects.create({ name: 'Portal', rootPath: root, organization: null, ownerEmail: null, status: 'active' })
     const workspace = fakeWorkspace()
     const calls: string[] = []
+    const prompts: string[] = []
     const runtime = new PlanningStageRuntime({
       projects,
       workspace,
       harnessFactory: () => { throw new Error('not used') },
-      runPrompt: async (role) => {
+      runPrompt: async (role, prompt) => {
         calls.push(role)
+        prompts.push(prompt)
         if (role === 'analyzer') return 'Business idea: portal. Gaps: none.'
         if (role === 'author') return '# TELOS feasibility report\n\nGo.'
-        return '{"decision":"approved","findings":[]}'
+        return '{"decision":"approved","rating":100,"findings":[]}'
       },
     })
 
@@ -76,12 +79,44 @@ test('runs analyzer, author and reviewer, then waits for a human decision', asyn
     assert.deepEqual(calls, ['analyzer', 'author', 'reviewer'])
     assert.match(executed.summaryMarkdown ?? '', /awaiting human/i)
     const workspaceEvents = (workspace as unknown as { events: StageRunEvent[] }).events
-    assert.ok(workspaceEvents.some((event) => event.type === 'role_start' && event.role === 'analyzer'))
+    const starts = workspaceEvents.filter((event) => event.type === 'role_start')
+    assert.deepEqual(starts.map((event) => event.role), calls)
+    for (const [i, event] of starts.entries()) {
+      const payload = event.payload as Record<string, unknown>
+      assert.equal(payload.promptSha256, createHash('sha256').update(prompts[i]!).digest('hex'))
+      assert.equal(payload.promptChars, prompts[i]!.length)
+      assert.equal(payload.spec, `planning/${calls[i]}`)
+      assert.equal(payload.specVersion, '1.0.0')
+      assert.ok(Array.isArray(payload.sections))
+      assert.deepEqual(payload.truncated, [])
+    }
+    const reviewStart = starts[2]!.payload as Record<string, unknown>
+    assert.deepEqual(reviewStart.draft, executed.pendingGate?.reviewedDraft)
     assert.ok(workspaceEvents.some((event) => event.type === 'role_end' && event.role === 'reviewer'))
     assert.ok(workspaceEvents.some((event) => event.type === 'review_decision'))
     assert.ok(workspaceEvents.some((event) => event.type === 'final_gate'))
     assert.equal(workspaceEvents.some((event) => event.type === 'document_created'), false)
 
+    const bundles = PLANNING_DEFINITION.promptBundles!
+    assert.equal((started.context as { promptBundleVersion?: string }).promptBundleVersion, bundles.current)
+    const resumedRuntime = new PlanningStageRuntime({
+      projects,
+      workspace,
+      harnessFactory: () => { throw new Error('not used') },
+      definition: {
+        ...PLANNING_DEFINITION,
+        promptBundles: { current: '3.0.0', versions: {
+          ...bundles.versions,
+          '3.0.0': { ...bundles.versions[bundles.current]!, reviewer: () => { throw new Error('wrong bundle') } },
+        } },
+      },
+      runPrompt: async (role, prompt) => {
+        assert.equal(role, 'reviewer')
+        assert.equal(prompt, prompts[2])
+        return '{"decision":"approved","rating":100,"findings":[]}'
+      },
+    })
+    assert.equal((await resumedRuntime.decide(started.id, { refine: true })).status, 'awaiting_human')
     const decided = await runtime.decide(started.id, { decision: 'go', note: 'Approved by sponsor' })
     assert.equal(decided.status, 'completed')
     assert.equal(decided.documents.length, 1, 'the document is stored on completion')
@@ -290,7 +325,7 @@ async function runWithPrompt(options: { renderPdf?: typeof renderReportPdf } = {
       prompts.push({ role, prompt })
       if (role === 'analyzer') return '# Analysis\n\nFeasible.'
       if (role === 'author') return '# TELOS Feasibility Report\n\n## 10. Recommendation\n\nDecision: **Go**\n'
-      return '{"decision":"approved","findings":[]}'
+      return '{"decision":"approved","rating":100,"findings":[]}'
     },
     ...(options.renderPdf !== undefined ? { renderPdf: options.renderPdf } : {}),
   })

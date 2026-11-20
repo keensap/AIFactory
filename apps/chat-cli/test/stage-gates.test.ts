@@ -13,9 +13,10 @@ import { MemoryProjectStore } from './support/memory-project-store.ts'
 import { MemorySettingsStore } from './support/memory-settings-store.ts'
 
 const REVIEWS = {
-  approved: '{"decision":"approved","findings":[]}',
+  approved: '{"decision":"approved","rating":100,"findings":[]}',
   revise: (id: string) => JSON.stringify({
     decision: 'needs_revision',
+    rating: 50,
     findings: [{ id, severity: 'major', section: 'Economic', finding: 'Budget not evidenced', required_change: 'Add the budget' }],
   }),
 }

@@ -1,3 +1,4 @@
+import type { PreparedPrompt } from './processes/spec.ts'
 /**
  * What makes one SDLC stage different from another.
  *
@@ -46,12 +47,16 @@ export interface StagePrompts {
   ): string
 }
 
+export type PreparedStagePrompts = { [K in keyof StagePrompts]: (...args: Parameters<StagePrompts[K]>) => PreparedPrompt }
+
 export interface StageDefinition {
   /** The SDLC stage this definition drives. */
   stage: ProjectStage
   /** Processes the stage runs, in agent-assignment terms. */
   processes: readonly StageRoleName[]
   prompts: StagePrompts
+  structuredReviewVersions?: readonly string[]
+  promptBundles?: { current: string; versions: Readonly<Record<string, PreparedStagePrompts>> }
   /** Approved artifact kinds whose contents are snapshotted as evidence at run start. */
   baselineDocumentKinds?: readonly string[]
   artifact: StageArtifact

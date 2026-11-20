@@ -15,7 +15,7 @@ import { MemorySettingsStore } from './support/memory-settings-store.ts'
 const EXAMPLE: PlanningStageSettings = { maxReviewCycles: 5, minRating: 95, maxBlockers: 0, maxMajor: 1, gateReminderHours: 72 }
 
 const review = (rating: number, findings: Array<{ severity: string; id?: string }> = [], decision: 'approved' | 'needs_revision' = 'needs_revision') =>
-  JSON.stringify({ decision, rating, findings: findings.map((finding) => ({ ...finding, section: 'Economic', finding: 'x', required_change: 'y' })) })
+  JSON.stringify({ decision, rating, findings: findings.map((finding, i) => ({ id: `F-${i + 1}`, ...finding, section: 'Economic', finding: 'x', required_change: 'y' })) })
 
 function harness(reviews: string[], settings: PlanningStageSettings) {
   const root = mkdtempSync(join(tmpdir(), 'aifactory-accept-'))
@@ -190,4 +190,24 @@ test('the stored settings carry the criteria into the run context', async () => 
 test('parseStageReview exposes the rating', () => {
   assert.equal(parseStageReview(review(96)).rating, 96)
   assert.equal(parseStageReview('{"decision":"approved","findings":[]}').rating, null)
+})
+
+
+test('Planning repairs malformed review once without revising the draft', async () => {
+  await withHarness(['{"decision":"approved","rating":100}', review(100, [], 'approved')], EXAMPLE, async (h) => {
+    const run = await h.start()
+    const gated = await h.runtime.execute(run.id)
+    assert.equal(gated.pendingGate?.accepted, true)
+    assert.equal(gated.reviews.length, 1)
+    assert.deepEqual(h.counters(), { reviewers: 2, authors: 1 })
+  })
+})
+
+test('second malformed Planning review fails with a typed error', async () => {
+  await withHarness(['not JSON'], EXAMPLE, async (h) => {
+    const run = await h.start()
+    await assert.rejects(() => h.runtime.execute(run.id), { code: 'INVALID_REVIEW' })
+    assert.deepEqual(h.counters(), { reviewers: 2, authors: 1 })
+    assert.equal((await h.runtime.get(run.id)).pendingGate, null)
+  })
 })
