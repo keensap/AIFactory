@@ -15,6 +15,7 @@
     "check:observability": "node scripts/check-observability-imports.mjs",
     "check:observability:strict": "node scripts/check-observability-imports.mjs --strict",
     "check:models": "node scripts/check-model-imports.mjs",
+    "check:processes": "node scripts/check-processes.mjs",
     "smoke:requirements": "node scripts/smoke-requirements.mjs"
   },
   "dependencies": {
