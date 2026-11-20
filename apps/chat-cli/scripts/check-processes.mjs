@@ -9,11 +9,14 @@ const root = fileURLToPath(new URL('../src/', import.meta.url))
 export function checkProcesses(sourceRoot = root) {
   const issues = []
   const runtime = readFileSync(join(sourceRoot, 'stage-runtime.ts'), 'utf8')
-  for (const match of runtime.matchAll(/(?:from\s*|import\s*\(\s*)['"](\.\/processes\/[^'"]+)['"]/g)) {
+  for (const match of runtime.matchAll(/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?)['"](\.\/processes\/[^'"]+)['"]/g)) {
     if (/\/(?:adapters|runners)\//.test(match[1])) issues.push(`Runtime imports process adapter: ${match[1]}`)
   }
-  if (/STAGE_ROLE:|You are the (?:independent )?Planning & Feasibility/.test(runtime)) {
-    issues.push('Stage prompt prose belongs in process specs, not the runtime')
+  const stagePrompt = /STAGE_ROLE:|You are the (?:independent )?Planning & Feasibility|You are (?:gathering requirements|(?:writing|reviewing|revising) the requirements specification)/
+  for (const [file, source] of [['stage-runtime.ts', runtime], ...readdirSync(join(sourceRoot, 'stages'), { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.ts'))
+    .map(({ name }) => [`stages/${name}`, readFileSync(join(sourceRoot, 'stages', name), 'utf8')])]) {
+    if (stagePrompt.test(source)) issues.push(`${file}: Stage prompt prose belongs in process specs`)
   }
   for (const file of readdirSync(join(sourceRoot, 'processes/stages')).filter((name) => name.endsWith('.ts'))) {
     const source = readFileSync(join(sourceRoot, 'processes/stages', file), 'utf8')
