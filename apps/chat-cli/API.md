@@ -616,7 +616,7 @@ curl -X PUT /api/stages/planning/assignments/author \
 
 `400 INVALID_PROBE_MODE` for a mode that is neither `offline` nor `online`; `503 AGENT_PROBE_NOT_CONFIGURED` when the server has no probe.
 
-**In a run:** each role resolves its agent at start, materialises its skills as `SKILL.md` under `.aifactory/agents/<id>/skills/`, and launches with a patch carrying persona, tool allowlist and model. `role_start` events record `agent`, `agentId` and the effective `model`.
+**In a run:** new runs snapshot agent assignments at creation. Each role materialises the bound agent's skills as `SKILL.md` under `.aifactory/agents/<id>/skills/` and launches with a patch carrying persona, tool allowlist and model. `role_start` records `agent`, `agentId` and the effective primary `model`; fallback attempts are recorded separately. Legacy runs without bindings can resolve agents at role start.
 
 ### Stages
 
@@ -737,7 +737,22 @@ The catalogue is seeded in `stage_prerequisites` and can be edited without a dep
 
 Settings are **per stage and per project**, stored as JSONB because each stage needs different knobs. A stage without a runtime has no settings yet (its defaults are `{}` and updates return `501 STAGE_SETTINGS_NOT_IMPLEMENTED`) — but the storage, precedence and endpoints are already stage-generic.
 
-Resolution is **definition defaults ← Factory default ← project override**, and a run snapshots the resolved values at start, so changing them mid-run affects later runs only.
+Resolution is **definition defaults → Factory defaults → project override** (later wins). `processParams` is merged by nested key and also accepts a final per-run override in `POST /api/projects/:id/stages/:stage/runs`. A run snapshots the resolved parameters as `run.context.processParams` (omitted when empty), review-loop settings in its context constraints, and the selected prompt bundle in `run.context.promptBundleVersion`. Settings changes affect new runs only. Per-run overrides are for `processParams`, not the top-level review-loop settings.
+
+Both executable stages accept this optional object on their generic settings endpoints and when creating runs:
+
+```json
+{ "processParams": { "review": { "maxFindings": 8 }, "prompt": { "extraInstructions": "Check exception cases." } } }
+```
+
+| Key within `processParams` | Bounds and behavior |
+|---|---|
+| `review.maxFindings` | Integer 1–12. A larger review fails with `502 REVIEW_FINDING_LIMIT`; findings are not silently dropped. Requirements defaults to 12; Planning has no default cap. |
+| `revision.maxGrowthRatio` | Number 1–5. Requirements-only advisory threshold relative to the previous draft; defaults to 1.25. |
+| `context.analysisChars`, `context.baselineChars`, `context.attachmentChars` | Integers 0–200,000. Caps the corresponding section where the role spec exposes it, without increasing a stricter built-in cap. |
+| `prompt.extraInstructions` | String of at most 4,000 characters. Nonblank guidance is appended; it does not replace task, contract or output-format sections. |
+
+Invalid types, out-of-range values and unknown keys inside `processParams` return `400 INVALID_PROCESS_PARAMS`. An omitted nested key inherits; `{}` supplies no overrides. Use project settings `DELETE` to clear the project settings override.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -751,7 +766,7 @@ Resolution is **definition defaults ← Factory default ← project override**, 
 ```json
 { "stages": {
     "planning": { "maxReviewCycles": 3, "minRating": 0, "maxBlockers": 0, "maxMajor": 0 },
-    "requirements": {}, "design": {}, "architecture": {}, "development": {}, "testing": {}, "deployment": {}, "maintenance": {} } }
+    "requirements": { "maxReviewCycles": 3, "minRating": 0, "maxBlockers": 0, "maxMajor": 0 }, "design": {}, "architecture": {}, "development": {}, "testing": {}, "deployment": {}, "maintenance": {} } }
 ```
 
 ```json
@@ -761,7 +776,7 @@ Resolution is **definition defaults ← Factory default ← project override**, 
 
 `source` is `project` | `factory` | `defaults`.
 
-**Planning settings** (the only stage with a runtime so far):
+**Shared Planning and Requirements review-loop settings:**
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -769,6 +784,7 @@ Resolution is **definition defaults ← Factory default ← project override**, 
 | `minRating` | `0` | Minimum overall document rating (0–100) to stop revising early |
 | `maxBlockers` | `0` | Blockers tolerated before revising again |
 | `maxMajor` | `0` | Major findings tolerated before revising again |
+| `gateReminderHours` | `72` | Hours before an unanswered gate is reported stale (1–720) |
 
 **How the loop ends.** After each review the reviewer returns `rating` (0–100) and findings by severity. The run **stops revising immediately** — going straight to the final gate for human approval — when all of these hold:
 
@@ -776,7 +792,7 @@ Resolution is **definition defaults ← Factory default ← project override**, 
 blockers <= maxBlockers   AND   major <= maxMajor   AND   rating >= minRating
 ```
 
-Otherwise it automatically keeps revising until `maxReviewCycles` is spent, then it asks for approval anyway. A reviewer that returns no rating (older/simpler reviewer) falls back to its `decision`: `approved` plus the issue limits.
+Otherwise it automatically keeps revising until `maxReviewCycles` is spent, then it asks for approval anyway. On the legacy parsing path, a reviewer that returns no rating falls back to its `decision`: `approved` plus the issue limits. Planning bundle `2.0.0` requires a valid structured review and allows one repair attempt for an invalid reply.
 
 Severities count as: `blocker`/`critical`/`blocking` → blockers, `major` → major, everything else → minor.
 
@@ -863,7 +879,7 @@ How much review happens before a human is asked. Values resolve **project overri
 blockers <= maxBlockers   AND   major <= maxMajor   AND   rating >= minRating
 ```
 
-Otherwise it automatically keeps revising until the `maxReviewCycles` budget is spent, then it asks for approval anyway. A reviewer that returns no rating (older/simpler reviewer) falls back to its `decision`: `approved` plus the issue limits.
+Otherwise it automatically keeps revising until the `maxReviewCycles` budget is spent, then it asks for approval anyway. On the legacy parsing path, a reviewer that returns no rating falls back to its `decision`: `approved` plus the issue limits. Planning bundle `2.0.0` requires a valid structured review and allows one repair attempt for an invalid reply.
 
 Severities count as: `blocker`/`critical`/`blocking` → blockers, `major` → major, everything else → minor.
 
@@ -891,6 +907,7 @@ Event types:
 | Type | Meaning |
 |---|---|
 | `role_start` / `role_end` / `role_error` | Role lifecycle and duration |
+| `revision_report` | Requirements revision-plan dispositions and missing IDs, size advisory, and input/revised draft fingerprints |
 | `thinking` | Reasoning block, when the provider emits one |
 | `text` | Committed assistant text |
 | `tool_call` | Tool name and input/command |
@@ -901,6 +918,8 @@ Event types:
 | `document_created` | TELOS document path and id |
 | `human_decision` | Go / conditional-go / no-go |
 | `run_recovered` | A worker lease expired; run marked failed |
+
+`role_start.payload` contains `role`, `timeoutMs`, `promptSha256` (UTF-8 SHA-256), `promptChars` (UTF-16 length), and `model` (primary model attribution or `null`). When applicable it also contains `agent`, `agentId`, and `draft: { chars, sha256 }`. Prepared prompts add `spec`, `specVersion`, `sections: [{ id, originalChars, chars, truncated }]`, and a `truncated` array of section IDs. Legacy/string prompt paths lack those spec fields; the event never includes the full prompt.
 
 JSON:
 

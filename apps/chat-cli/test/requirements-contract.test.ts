@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { normalizeRevisionFindings } from '../src/processes/revision.ts'
 import {
   BUSINESS_RULE_FIELDS,
   BUSINESS_RULE_TYPES,
@@ -145,7 +146,7 @@ test('the reviewer and revision prompts carry the same contract', () => {
   const definition = stageDefinition('requirements')!
   const settings = { maxReviewCycles: 2, minRating: 0, maxBlockers: 0, maxMajor: 0, gateReminderHours: 72 }
   const reviewer = definition.prompts.reviewer(project, context, COMPLETE, settings)
-  const revision = definition.prompts.revision(project, context, 'analysis', COMPLETE, [{ severity: 'major', finding: 'x' }])
+  const revision = definition.prompts.revision(project, context, 'analysis', COMPLETE, normalizeRevisionFindings([{ severity: 'major', finding: 'x' }]))
   const rules = renderContractRules()
   for (const prompt of [reviewer, revision]) {
     for (const section of REQUIRED_SECTIONS) assert.ok(prompt.includes(section), `missing ${section}`)

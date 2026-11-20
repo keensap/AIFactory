@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { renderPrompt } from '../src/processes/render.ts'
+import { normalizeRevisionFindings } from '../src/processes/revision.ts'
 import type { Project } from '../src/projects.ts'
 import {
   buildAnalyzerPrompt,
@@ -77,7 +78,7 @@ const prompts: Array<[string, string, () => string, () => string]> = [
     () => adapterPrompts.reviewer(project, context, draft, settingsFromContext(context))],
   ['revision', '25bf7ea60c982a8f8d429c930b1e8b59643f6f5b5faa863f262f5262ac8d3c36',
     () => buildRevisionPrompt(project, context, analysis, draft, findings),
-    () => adapterPrompts.revision(project, context, analysis, draft, findings)],
+    () => adapterPrompts.revision(project, context, analysis, draft, normalizeRevisionFindings(findings))],
 ]
 for (const [role, expectedHash, runtimePrompt, adapterPrompt] of prompts) {
   for (const [entryPoint, buildPrompt] of [['runtime export', runtimePrompt], ['stage adapter', adapterPrompt]] as const) {

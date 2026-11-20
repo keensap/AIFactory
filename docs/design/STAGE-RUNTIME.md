@@ -6,6 +6,9 @@
 
 This document turns the current project/status implementation into a stage-oriented runtime. It records the design decisions, data model, API shape, agent orchestration and security boundaries before implementation. Diagrams are in [`diagrams/`](diagrams/).
 
+
+For the implemented Planning and Requirements roles, [Process Architecture](PROCESS-ARCHITECTURE.md) supersedes the earlier coordinator and preset proposals below. The shared stage engine owns leases, role execution, review loops and gates; stage definitions select versioned prompt bundles and stage-specific rules. New runs store `promptBundleVersion` and the effective `processParams` in the context packet alongside the review-loop settings snapshot. Process parameters merge by nested key (definition defaults, Factory settings, project overrides, then run override). These settings and prompt versions do not change when a run resumes; model and agent rebinding is a separate operation.
+
 ---
 
 ## 1. Summary
@@ -771,13 +774,15 @@ the model turn. The sink records the role and `agent_id` for every event.
 
 Role events include:
 
-- `role_start` payload `{ role, timeoutMs }`
+- `role_start` carries `role`, `timeoutMs`, `promptSha256` (SHA-256 over UTF-8 prompt bytes), `promptChars` (UTF-16 length), and `model` (effective primary model attribution, or `null` for the harness default). Agent-backed roles include `agent` and `agentId`; draft inputs include a `draft` fingerprint.
+- Prepared prompts also include `spec`, `specVersion`, `sections` (`id`, `originalChars`, `chars`, `truncated`), and `truncated` (the IDs of truncated sections). String prompt paths lack that spec metadata. The event does not include the prompt body.
 - `role_end` payload `{ role, durationMs, textLength, stderr? }`
 - `role_error` payload `{ role, durationMs, message }`
 
 Run-level events are written directly by the controller:
 
-- `review_decision` `{ decision, findings }`
+- `review_decision` (review decision, rating, counts and coverage where applicable)
+- `revision_report` (Requirements revision-plan validity, missing IDs and reported dispositions, advisory growth and draft fingerprints)
 - `document_created` `{ documentId, kind, storagePath }`
 - `human_decision` `{ decision, note }`
 
@@ -785,7 +790,7 @@ Run-level events are written directly by the controller:
 
 | Type | Source | Payload | UI treatment |
 |---|---|---|---|
-| `role_start` | controller | role, timeout | Timeline row |
+| `role_start` | controller | role, model and prompt audit metadata | Timeline row |
 | `session` | DSH | sessionId, cwd | Hidden by default |
 | `status` | DSH | phase, turn, step, usage | Compact step marker |
 | `thinking` | DSH | text | Collapsed reasoning block |

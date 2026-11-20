@@ -329,7 +329,7 @@ export interface GateOutcome {
   criteria: { minRating: number; maxBlockers: number; maxMajor: number } | null
 }
 
-/** Planning-stage review settings (project override or Factory default). */
+/** Stage review settings (project override or Factory default). */
 export interface PlanningStageSettings {
   maxReviewCycles: number
   /** Minimum overall rating (0–100) to stop revising early. */
@@ -337,6 +337,7 @@ export interface PlanningStageSettings {
   /** Blockers / major findings tolerated before the run keeps revising. */
   maxBlockers: number
   maxMajor: number
+  processParams?: { review?: { maxFindings?: number } }
 }
 
 export interface ResolvedStageSettings extends PlanningStageSettings {

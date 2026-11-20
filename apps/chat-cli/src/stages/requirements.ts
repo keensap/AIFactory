@@ -1,5 +1,5 @@
 import { DOCUMENT_KINDS } from '../stage-prerequisites.ts'
-import { requirementsPromptBundleV1 } from '../processes/stages/requirements.ts'
+import { requirementsPromptBundleV1, requirementsRevisionPlanRepair } from '../processes/stages/requirements.ts'
 import type { StageDefinition } from '../stage-definition.ts'
 
 export const REQUIREMENTS_DEFINITION: StageDefinition = {
@@ -12,6 +12,7 @@ export const REQUIREMENTS_DEFINITION: StageDefinition = {
     reviewer: (...args) => requirementsPromptBundleV1.reviewer(...args).text,
     revision: (...args) => requirementsPromptBundleV1.revision(...args).text,
   },
+  revisionPlanRepair: requirementsRevisionPlanRepair,
   promptBundles: { current: '1.0.0', versions: { '1.0.0': requirementsPromptBundleV1 } },
   artifact: {
     kind: DOCUMENT_KINDS.requirementsSpec,

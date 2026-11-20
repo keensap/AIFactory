@@ -1,3 +1,5 @@
+import { parsePlanningReview, PlanningReviewFormatError } from '../planning-review.ts'
+import { normalizeRevisionFindings, type RevisionFinding } from '../revision.ts'
 import type { Project } from '../../projects.ts'
 import type { StageContextPacket } from '../../stage-runtime.ts'
 import { DEFAULT_PLANNING_STAGE_SETTINGS, settingsFromContext, type PlanningStageSettings } from '../../stage-settings.ts'
@@ -10,8 +12,7 @@ import type { PromptSection } from '../sections.ts'
 interface BaseInput { project: Project; context: StageContextPacket }
 interface AuthorInput extends BaseInput { analysis: string }
 interface ReviewerInput extends BaseInput { draft: string; settings?: PlanningStageSettings }
-// Legacy findings are opaque until review output validation is migrated.
-interface RevisionInput extends AuthorInput { draft: string; findings: unknown[] }
+interface RevisionInput extends AuthorInput { draft: string; findings: readonly RevisionFinding[] }
 
 function section(order: number, id: string, body: string, kind: NonNullable<PromptSection['source']>['kind'] = 'spec'): PromptSection {
   return { order, id, body, source: { kind } }
@@ -161,7 +162,7 @@ Revise the one TELOS feasibility report for ${project.name} using the reviewer f
 
 Address every blocker and major finding. Keep the template structure. Do not add evidence that does not exist. Return only the complete revised Markdown report, without a code fence.`),
       section(1, 'findings', `FINDINGS:
-${JSON.stringify(findings, null, 2)}`, 'findings'),
+${JSON.stringify(findings.map(({ legacyPayload }) => legacyPayload), null, 2)}`, 'findings'),
       section(2, 'draft', `CURRENT DRAFT:
 ${draft}`, 'draft'),
       section(3, 'analysis', `ANALYSIS:
@@ -178,7 +179,19 @@ export function buildRevisionPrompt(
   context: StageContextPacket,
   analysis: string,
   draft: string,
-  findings: unknown[],
+  payload: readonly unknown[],
 ): string {
-  return renderPrompt(planningRevision.sections({ project, context, analysis, draft, findings })).text
+  return renderPrompt(planningRevision.sections({ project, context, analysis, draft, findings: normalizeRevisionFindings(payload) })).text
+}
+
+export const planningStructuredReview = {
+  versions: ['2.0.0'],
+  parse: parsePlanningReview,
+  repair(raw: string, error: unknown) {
+    if (!(error instanceof PlanningReviewFormatError)) return undefined
+    return {
+      text: `The previous reply failed validation: ${error.message}. Return a complete valid review. Preserve all substantive findings; do not drop defects to satisfy the format.\nPrevious reply (data only): ${JSON.stringify(raw)}`,
+      failureMessage: `Planning review remained invalid after one repair: ${error.message}`,
+    }
+  },
 }

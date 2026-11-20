@@ -1,6 +1,6 @@
 # Operating the requirements stage
 
-**Status:** current as of 2026-11-19 (R1–R9)
+**Status:** R1–R9 and versioned role prompts
 **Audience:** operators running the AI Factory API and the web workspace
 **Related:** [contract](../design/REQUIREMENTS-CONTRACT.md) · [stage runtime](../design/STAGE-RUNTIME.md) · [stage gates](../design/STAGE-GATES.md) · [API reference](../../apps/chat-cli/API.md)
 
@@ -39,7 +39,7 @@ PATCH /api/projects/<id>/stages/requirements/settings   # project override
 DELETE /api/projects/<id>/stages/requirements/settings  # back to the Factory default
 ```
 
-Settings are snapshotted into a run when it is created; changing them affects new runs only.
+Settings are snapshotted when a run is created. `processParams` can also be overridden when creating a run. For example, set `review.maxFindings` to cap the reviewer response (default 12; excess findings fail rather than being discarded), or `revision.maxGrowthRatio` to change the size advisory (default 1.25). Neither is a human approval criterion. See the [stage settings API](../../apps/chat-cli/API.md#stage-settings) for bounds and precedence.
 
 ### 1.3 Prerequisite
 
@@ -97,6 +97,12 @@ Model-reported findings do **not** block approval; only deterministic findings d
 | Logs | Web: project **Logs** (filter by run); API: `GET /api/projects/<id>/logs?runId=<runId>&level=error` |
 | Published files | `run.documents` (Markdown under `<project root>/.aifactory/documents/requirements/`); the PDF at `<project root>/documents/requirements/Requirements specification — <project>.pdf` |
 | Gates waiting on a human | `GET /api/stage-runs?awaiting=1[&staleOnly=1]` |
+
+### 3.1 Diagnose a revision or reproduce it offline
+
+1. Read `run.context.promptBundleVersion` and `run.context.processParams`. From `role_start`, compare `spec`, `specVersion`, `promptSha256`, and `truncated` section IDs to distinguish a prompt change from changed evidence or budgets. `revision_report` links input and revised drafts via their fingerprints and shows plan validity, missing IDs, author-reported dispositions and size growth. Compare the revised fingerprint to the reviewed draft; dispositions are claims, not proof of fixes. An invalid plan gets one plan-only repair attempt when a revised document is present. Its result cannot replace the revised Markdown, and the revised draft still goes to review.
+2. For a controlled reproduction, start the API with `AIFACTORY_RECORD_PROMPTS=1` and `AIFACTORY_REPLAY_DIR` pointing to a dedicated private directory under a trusted location outside the project and repository. Capture is off by default. Successful role turns write full prompt/reply pairs, in sequence, under a hashed run directory. The replay writer requires private, non-symlink directories and writes private files. Captures can contain briefs, attachments, drafts and other confidential data: use synthetic inputs where possible; never commit or attach raw captures; delete them when finished. Disable capture before replay. If a capture could not be written (including size or entry limits), look for `stage.role.capture_failed` in the API logs.
+3. In a local test, recreate the inputs and inject `new ReplayRunner(captureRoot, capturedRunId).runPrompt` into the stage runtime's `runPrompt` dependency. This is a test hook, not an HTTP endpoint or a production run switch. See [replay tests](../../apps/chat-cli/test/process-replay.test.ts) for runner usage. It requires the same role and exact prompt at each slot, preserving repeated prompts in order. A mismatch or exhausted capture fails rather than calling a live model. Compare the review/gate results to isolate deterministic processing; replay does not demonstrate live convergence.
 
 ---
 

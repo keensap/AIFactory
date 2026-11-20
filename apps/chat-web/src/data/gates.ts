@@ -170,7 +170,7 @@ export const DEFAULT_STAGE_SETTINGS: PlanningStageSettings = {
   maxMajor: 0,
 }
 
-export type SettingField = 'maxReviewCycles' | 'minRating' | 'maxBlockers' | 'maxMajor'
+export type SettingField = 'maxReviewCycles' | 'minRating' | 'maxBlockers' | 'maxMajor' | 'maxFindings'
 
 /** Inclusive limits, matching the API's validation. */
 export const SETTING_LIMITS: Record<SettingField, { min: number; max: number; label: string }> = {
@@ -178,6 +178,7 @@ export const SETTING_LIMITS: Record<SettingField, { min: number; max: number; la
   minRating: { min: 0, max: 100, label: 'Rating threshold' },
   maxBlockers: { min: 0, max: 20, label: 'Blockers allowed' },
   maxMajor: { min: 0, max: 50, label: 'Major issues allowed' },
+  maxFindings: { min: 1, max: 12, label: 'Maximum review findings' },
 }
 
 /** Whole number within the field's limits, else a message for the field. */
@@ -205,7 +206,11 @@ export function normalizeStageSettings(raw: unknown): ResolvedStageSettings {
     const { min, max } = SETTING_LIMITS[field]
     return value !== null && value >= min && value <= max ? value : fallback
   }
+  const params = record.processParams as { review?: { maxFindings?: unknown } } | null | undefined
+  const cap = int(params?.review?.maxFindings)
+  const { min, max } = SETTING_LIMITS.maxFindings
   return {
+    ...(cap !== null && cap >= min && cap <= max ? { processParams: { review: { maxFindings: cap } } } : {}),
     maxReviewCycles: pick('maxReviewCycles', DEFAULT_STAGE_SETTINGS.maxReviewCycles),
     minRating: pick('minRating', DEFAULT_STAGE_SETTINGS.minRating),
     maxBlockers: pick('maxBlockers', DEFAULT_STAGE_SETTINGS.maxBlockers),
@@ -219,4 +224,18 @@ export function sameSettings(a: PlanningStageSettings, b: PlanningStageSettings)
     && a.minRating === b.minRating
     && a.maxBlockers === b.maxBlockers
     && a.maxMajor === b.maxMajor
+    && a.processParams?.review?.maxFindings === b.processParams?.review?.maxFindings
+}
+
+/** PATCH only fields the user changed; in particular, never pin an inherited cap by accident. */
+export function reviewSettingsPatch(saved: PlanningStageSettings, draft: PlanningStageSettings): Partial<PlanningStageSettings> {
+  const patch: Partial<PlanningStageSettings> = {}
+  for (const field of ['maxReviewCycles', 'minRating', 'maxBlockers', 'maxMajor'] as const) {
+    if (draft[field] !== saved[field]) patch[field] = draft[field]
+  }
+  const cap = draft.processParams?.review?.maxFindings
+  if (cap !== undefined && cap !== saved.processParams?.review?.maxFindings) {
+    patch.processParams = { review: { maxFindings: cap } }
+  }
+  return patch
 }

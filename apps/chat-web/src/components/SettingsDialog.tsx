@@ -56,6 +56,7 @@ export function SettingsDialog({
   const [testState, setTestState] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle')
   const [testMessage, setTestMessage] = useState('')
   // Older APIs have no Factory stage defaults: drop the whole section.
+  const [reviewStage, setReviewStage] = useState<'planning' | 'requirements'>('planning')
   const [stageDefaultsHidden, setStageDefaultsHidden] = useState(false)
   const hideStageDefaults = useCallback(() => setStageDefaultsHidden(true), [])
 
@@ -220,9 +221,16 @@ export function SettingsDialog({
 
         {api !== undefined && projectsMode === 'api' && !stageDefaultsHidden && (
           <section className="settings-section">
-            <h3>Planning review defaults</h3>
+            <h3>Stage review defaults</h3>
             <p className="field-hint">Factory default for every project that has no override of its own.</p>
-            {open && <ReviewSettings api={api} scope={{ kind: 'factory' }} onHidden={hideStageDefaults} />}
+            <label>
+              Stage{' '}
+              <select className="text-input" value={reviewStage} onChange={(event) => setReviewStage(event.target.value === 'requirements' ? 'requirements' : 'planning')}>
+                <option value="planning">Planning</option>
+                <option value="requirements">Requirements</option>
+              </select>
+            </label>
+            {open && <ReviewSettings key={reviewStage} api={api} scope={{ kind: 'factory', stage: reviewStage }} onHidden={reviewStage === 'planning' ? hideStageDefaults : undefined} />}
           </section>
         )}
 

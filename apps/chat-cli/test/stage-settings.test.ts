@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { StageEngine } from '../src/stage-runtime.ts'
+import { fakeWorkspace } from './support/fake-stage-workspace.ts'
 import { DshHarness } from '../src/harness.ts'
 import { PostgresProjectStore } from '../src/projects.ts'
 import { createChatServer, serverPort } from '../src/server.ts'
@@ -17,12 +19,13 @@ const skip = url === undefined || url === '' ? 'AIFACTORY_TEST_DATABASE_URL is n
 async function setup() {
   const projectStore = new PostgresProjectStore(url!)
   await projectStore.migrate()
-  const service = new StageSettingsService(new PostgresStageSettingsStore(url!))
+  const store = new PostgresStageSettingsStore(url!)
+  const service = new StageSettingsService(store)
   await service.migrate()
   const root = mkdtempSync(join(tmpdir(), 'aifactory-stage-settings-'))
   const project = await projectStore.create({ name: `Settings ${Date.now()}`, rootPath: root, organization: null, ownerEmail: null, status: 'inactive' })
   return {
-    projectStore, service, project, root,
+    projectStore, service, store, project, root,
     cleanup: async () => {
       await service.close()
       await projectStore.close()
@@ -122,11 +125,13 @@ test('corrupt stored defaults fall back instead of breaking every run', { skip }
 
 // ---- HTTP surface ------------------------------------------------------
 
-async function withApi(run: (context: { base: string; projectId: string }) => Promise<void>): Promise<void> {
+async function withApi(run: (context: { base: string; projectId: string; store: PostgresStageSettingsStore }) => Promise<void>): Promise<void> {
   const t = await setup()
   const dataDir = mkdtempSync(join(tmpdir(), 'aifactory-settings-api-'))
   const projects = new (await import('../src/projects.ts')).ProjectService(t.projectStore, new SettingsService(new MemorySettingsStore()))
+  const stageRuntime = new StageEngine({ projects, workspace: fakeWorkspace(), harnessFactory: () => { throw new Error('not used') }, stageSettings: { planning: (id) => t.service.effective(id) }, runPrompt: async (role) => role === 'reviewer' ? JSON.stringify({ decision: 'approved', rating: 100, findings: Array.from({ length: 3 }, (_, i) => ({ id: `F-${i}`, severity: 'minor', section: 'Schedule', finding: 'Clarify wording', required_change: 'Clarify the wording' })) }) : '# TELOS' })
   const server = createChatServer({
+    stageRuntime,
     harnessFactory: () => new DshHarness({ command: process.execPath, commandArgs: ['-e', ''] }),
     store: new SessionStore({ dataDir }),
     version: 'test',
@@ -135,7 +140,7 @@ async function withApi(run: (context: { base: string; projectId: string }) => Pr
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
   try {
-    await run({ base: `http://127.0.0.1:${serverPort(server)}`, projectId: t.project.id })
+    await run({ base: `http://127.0.0.1:${serverPort(server)}`, projectId: t.project.id, store: t.store })
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
     rmSync(dataDir, { recursive: true, force: true })
@@ -212,5 +217,36 @@ test('per-stage Factory defaults are listed and edited one stage at a time', { s
 
     await fetch(`${base}/api/settings/stages/planning`, { method: 'PATCH', ...json({ minRating: 0 }) })
     await fetch(`${base}/api/settings/stage-defaults`, { method: 'PATCH', ...json({ minRating: 0, maxReviewCycles: 3 }) })
+  })
+})
+
+
+test('process parameter overrides merge by field and persist on HTTP-created runs', { skip }, async () => {
+  await withApi(async ({ base, projectId, store }) => {
+    const before = (await store.loadFactory()).planning ?? {}
+    const factory = `${base}/api/settings/stage-defaults`
+    const project = `${base}/api/projects/${projectId}/stages/planning`
+    const patch = (path: string, body: unknown) => fetch(path, { method: 'PATCH', ...json(body) })
+    try {
+      assert.equal((await patch(factory, { processParams: { review: { maxFindings: 8 }, context: { analysisChars: 500 } } })).status, 200)
+      assert.equal((await patch(`${project}/settings`, { processParams: { review: { maxFindings: 5 } } })).status, 200)
+      assert.equal((await patch(factory, { processParams: { context: { analysisChars: 700 } } })).status, 200)
+      const created = await fetch(`${project}/runs`, { method: 'POST', ...json({ processParams: { review: { maxFindings: 3 } } }) })
+      assert.equal(created.status, 201)
+      const { run } = await created.json() as { run: { id: string; context: { processParams: unknown } } }
+      assert.deepEqual(run.context.processParams, { review: { maxFindings: 3 }, context: { analysisChars: 700 } })
+      assert.equal((await patch(`${project}/settings`, { processParams: { review: { maxFindings: 2 } } })).status, 200)
+      const saved = await fetch(`${base}/api/stage-runs/${run.id}`)
+      assert.equal(saved.status, 200)
+      assert.deepEqual((await saved.json() as { run: typeof run }).run.context.processParams, run.context.processParams)
+      const executed = await fetch(`${base}/api/stage-runs/${run.id}/execute?wait=1`, { method: 'POST' })
+      assert.equal(executed.status, 200, 'the pinned cap of three survives a project change to two')
+      assert.equal((await executed.json() as { run: { status: string } }).run.status, 'awaiting_human')
+      const invalid = await fetch(`${project}/runs`, { method: 'POST', ...json({ processParams: { review: { maxFindings: 13 } } }) })
+      assert.equal(invalid.status, 400)
+      assert.equal((await invalid.json() as { error: { code: string } }).error.code, 'INVALID_PROCESS_PARAMS')
+    } finally {
+      await store.saveFactory('planning', before)
+    }
   })
 })

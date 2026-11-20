@@ -1,4 +1,4 @@
-import { revisionFeedback } from '../revision.ts'
+import type { RevisionFinding } from '../revision.ts'
 import { attachmentSection } from '../context.ts'
 import { preparePrompt, type PromptRoleSpec } from '../spec.ts'
 import type { PreparedStagePrompts } from '../../stage-definition.ts'
@@ -11,7 +11,7 @@ import type { PlanningStageSettings } from '../../stage-settings.ts'
 interface BaseInput { project: Project; context: StageContextPacket }
 interface AuthorInput extends BaseInput { analysis: string }
 interface ReviewerInput extends BaseInput { draft: string; settings: PlanningStageSettings; analysis: string | undefined }
-interface RevisionInput extends AuthorInput { draft: string; findings: unknown[] }
+interface RevisionInput extends AuthorInput { draft: string; findings: readonly RevisionFinding[] }
 
 /**
  * Every role answers in its reply. A live run showed an author writing the
@@ -166,16 +166,9 @@ export const requirementsRevision: PromptRoleSpec<RevisionInput> = {
   id: 'requirements/revision',
   version: '1.0.0',
   sections({ project, context, analysis, draft, findings }) {
-  const list = revisionFeedback(findings)
-    .map(({ id, finding }) => {
-      const record = finding !== null && typeof finding === 'object' ? finding as Record<string, unknown> : {}
-      const severity = String(record.severity ?? 'major')
-      const section = String(record.section ?? 'unspecified')
-      const problem = String(record.finding ?? record.message ?? JSON.stringify(finding))
-      const change = String(record.required_change ?? record.requiredChange ?? 'address it')
-      return `- ${id} [${severity}] ${section}: ${problem} → ${change}`
-    })
-    .join('\n')
+    const list = findings
+      .map(({ id, severity, section, problem, change }) => `- ${id} [${severity}] ${section}: ${problem} → ${change}`)
+      .join('\n')
 
   // The revision must reproduce the whole document, so it sees all of it, as the
   // reviewer does. Cutting the tail made the author drop the last sections.
@@ -213,4 +206,14 @@ export const requirementsPromptBundleV1: PreparedStagePrompts = {
   author: (project, context, analysis) => preparePrompt(requirementsAuthor, { project, context, analysis }, context.processParams),
   reviewer: (project, context, draft, settings, analysis) => preparePrompt(requirementsReviewer, { project, context, draft, settings, analysis }, context.processParams),
   revision: (project, context, analysis, draft, findings) => preparePrompt(requirementsRevision, { project, context, analysis, draft, findings }, context.processParams),
+}
+
+export function requirementsRevisionPlanRepair(previous: string, revised: string, findings: readonly RevisionFinding[]): string {
+  return [
+    'Return only a <revision-plan> JSON array </revision-plan>. Do not rewrite the document.',
+    'For every feedback ID, include id, status (addressed or unaddressed), and note. Compare the drafts; do not claim unverifiable fixes.',
+    `Feedback: ${JSON.stringify(findings.map(({ id, legacyPayload: finding }) => ({ id, finding })))}`,
+    `Previous draft:\n${previous}`,
+    `Revised draft:\n${revised}`,
+  ].join('\n\n')
 }

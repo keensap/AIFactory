@@ -1,3 +1,4 @@
+import type { RevisionFinding } from './processes/revision.ts'
 import type { PreparedPrompt } from './processes/spec.ts'
 /**
  * What makes one SDLC stage different from another.
@@ -43,7 +44,7 @@ export interface StagePrompts {
     context: StageContextPacket,
     analysis: string,
     draft: string,
-    findings: unknown[],
+    findings: readonly RevisionFinding[],
   ): string
 }
 
@@ -55,7 +56,12 @@ export interface StageDefinition {
   /** Processes the stage runs, in agent-assignment terms. */
   processes: readonly StageRoleName[]
   prompts: StagePrompts
-  structuredReviewVersions?: readonly string[]
+  structuredReview?: {
+    versions: readonly string[]
+    parse(raw: string): StageReviewResult
+    repair(raw: string, error: unknown): { text: string; failureMessage: string } | undefined
+  }
+  revisionPlanRepair?(previous: string, revised: string, findings: readonly RevisionFinding[]): string
   promptBundles?: { current: string; versions: Readonly<Record<string, PreparedStagePrompts>> }
   /** Approved artifact kinds whose contents are snapshotted as evidence at run start. */
   baselineDocumentKinds?: readonly string[]

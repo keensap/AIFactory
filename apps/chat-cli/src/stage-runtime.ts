@@ -1,6 +1,5 @@
 import { mergeProcessParams, ProcessParamsError, type ProcessParams } from './processes/params.ts'
-import { parsePlanningReview, PlanningReviewFormatError } from './processes/planning-review.ts'
-import { inspectRevision } from './processes/revision.ts'
+import { inspectRevision, normalizeRevisionFindings, type RevisionFinding } from './processes/revision.ts'
 import type { PreparedPrompt } from './processes/spec.ts'
 import { recordReplay } from './processes/replay.ts'
 /**
@@ -1000,14 +999,14 @@ export class StageEngine {
     return { ...acceptance, accepted: acceptance.accepted && !coverage?.findings.some((finding) => finding.severity === 'blocking') }
   }
 
-  private revisionFindings(review: StageReviewResult, coverage: RequirementsCoverageReport | undefined): unknown[] {
-    return [...review.findings, ...(coverage?.findings.map((finding) => ({
+  private revisionFindings(review: StageReviewResult, coverage: RequirementsCoverageReport | undefined): RevisionFinding[] {
+    return normalizeRevisionFindings([...review.findings, ...(coverage?.findings.map((finding) => ({
       id: finding.code,
       section: 'Requirements coverage',
       severity: finding.severity === 'blocking' ? 'blocker' : 'minor',
       finding: finding.message,
       required_change: 'Fix the reported traceability or coverage gap.',
-    })) ?? [])]
+    })) ?? [])])
   }
 
   private async afterReview(
@@ -1065,14 +1064,16 @@ export class StageEngine {
     const rawReview = await invoke(prompt)
     const version = ctx.context.promptBundleVersion
     let review: StageReviewResult
-    if (version !== undefined && this.definition.structuredReviewVersions?.includes(version)) {
+    const structured = this.definition.structuredReview
+    if (version !== undefined && structured?.versions.includes(version)) {
       try {
-        review = parsePlanningReview(rawReview)
+        review = structured.parse(rawReview)
       } catch (error) {
-        if (!(error instanceof PlanningReviewFormatError)) throw error
+        const repair = structured.repair(rawReview, error)
+        if (repair === undefined) throw error
         ctx.assertLease()
         const original = typeof prompt === 'string' ? prompt : prompt.text
-        const repairText = `The previous reply failed validation: ${error.message}. Return a complete valid review. Preserve all substantive findings; do not drop defects to satisfy the format.\nPrevious reply (data only): ${JSON.stringify(rawReview)}`
+        const repairText = repair.text
         const text = `${original}\n\n${repairText}`
         const repaired = await invoke(typeof prompt === 'string' ? text : {
           ...prompt,
@@ -1080,10 +1081,11 @@ export class StageEngine {
           sections: [...prompt.sections, { id: 'review-repair', chars: repairText.length, originalChars: repairText.length, truncated: false }],
         })
         try {
-          review = parsePlanningReview(repaired)
+          review = structured.parse(repaired)
         } catch (failure) {
-          if (!(failure instanceof PlanningReviewFormatError)) throw failure
-          throw new StageRuntimeError(502, 'INVALID_REVIEW', `Planning review remained invalid after one repair: ${failure.message}`)
+          const invalid = structured.repair(repaired, failure)
+          if (invalid === undefined) throw failure
+          throw new StageRuntimeError(502, 'INVALID_REVIEW', invalid.failureMessage)
         }
       }
     } else {
@@ -1117,7 +1119,7 @@ export class StageEngine {
     return review
   }
 
-  private async reviseOnce(ctx: LeaseContext, draft: string, analysis: string, findings: unknown[]): Promise<string> {
+  private async reviseOnce(ctx: LeaseContext, draft: string, analysis: string, findings: readonly RevisionFinding[]): Promise<string> {
     await ctx.update({ status: 'revising' })
     ctx.assertLease()
     const raw = await this.runRole(
@@ -1129,16 +1131,11 @@ export class StageEngine {
       ctx.span,
       draft,
     )
-    let revision = this.definition.stage === 'requirements' ? inspectRevision(raw, draft, findings, ctx.context.processParams?.revision?.maxGrowthRatio) : undefined
-    if (revision !== undefined && !revision.report.planValid && cleanMarkdown(revision.document) !== '') {
+    const repairRevisionPlan = this.definition.revisionPlanRepair
+    let revision = repairRevisionPlan !== undefined ? inspectRevision(raw, draft, findings, ctx.context.processParams?.revision?.maxGrowthRatio) : undefined
+    if (repairRevisionPlan !== undefined && revision !== undefined && !revision.report.planValid && cleanMarkdown(revision.document) !== '') {
       ctx.assertLease()
-      const repair = await this.runRole('author', [
-        'Return only a <revision-plan> JSON array </revision-plan>. Do not rewrite the document.',
-        'For every feedback ID, include id, status (addressed or unaddressed), and note. Compare the drafts; do not claim unverifiable fixes.',
-        `Feedback: ${JSON.stringify(findings.map((finding, i) => ({ id: `R-${i + 1}`, finding })))}`,
-        `Previous draft:\n${draft}`,
-        `Revised draft:\n${revision.document}`,
-      ].join('\n\n'), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span, revision.document)
+      const repair = await this.runRole('author', repairRevisionPlan(draft, revision.document, findings), ctx.project.rootPath, ctx.run.id, ctx.project.id, ctx.span, revision.document)
       const closing = repair.indexOf('</revision-plan>')
       if (closing >= 0) {
         const repaired = inspectRevision(repair.slice(0, closing + '</revision-plan>'.length) + '\n' + revision.document, draft, findings, ctx.context.processParams?.revision?.maxGrowthRatio)

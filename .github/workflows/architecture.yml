@@ -13,8 +13,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - run: |
+      - name: Check model and observability boundaries
+        run: |
           npm run check:models
           npm run check:observability
+      - name: Check process boundaries and guard regressions
+        run: |
           npm run check:processes
           node --test test/process-guard.test.ts

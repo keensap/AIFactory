@@ -1,5 +1,6 @@
+import { renderPrompt } from '../processes/render.ts'
 import { preparePrompt } from '../processes/spec.ts'
-import { planningAnalyzer, planningAuthor, planningReviewer, planningRevision } from '../processes/stages/planning.ts'
+import { planningAnalyzer, planningAuthor, planningReviewer, planningRevision, planningStructuredReview } from '../processes/stages/planning.ts'
 /**
  * The planning stage's definition: the TELOS feasibility report.
  *
@@ -11,7 +12,6 @@ import { TELOS_DOCUMENT_KIND } from '../telos.ts'
 import {
   buildAnalyzerPrompt,
   buildAuthorPrompt,
-  buildRevisionPrompt,
   buildReviewerPrompt,
 } from '../processes/stages/planning.ts'
 import type { StageDefinition } from '../stage-definition.ts'
@@ -31,9 +31,9 @@ export const PLANNING_DEFINITION: StageDefinition = {
     author: (project, context, analysis) => buildAuthorPrompt(project, context, analysis),
     reviewer: (project, context, draft, settings) => buildReviewerPrompt(project, context, draft, settings),
     revision: (project, context, analysis, draft, findings) =>
-      buildRevisionPrompt(project, context, analysis, draft, findings),
+      renderPrompt(planningRevision.sections({ project, context, analysis, draft, findings })).text,
   },
-  structuredReviewVersions: ['2.0.0'],
+  structuredReview: planningStructuredReview,
   promptBundles: { current: '2.0.0', versions: { '1.0.0': planningPrompts, '2.0.0': planningPrompts } },
   artifact: {
     kind: TELOS_DOCUMENT_KIND,

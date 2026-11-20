@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useId, useState, type ReactNode } from 'react'
 import { ApiError, errorMessage, isAbortError, type ChatApi } from '../../api/client.ts'
 import type { PlanningStageSettings, ResolvedStageSettings, StageKey } from '../../api/types.ts'
-import { SETTING_ERROR_FIELDS, SETTING_LIMITS, parseSettingField, sameSettings, type SettingField } from '../../data/gates.ts'
+import { SETTING_ERROR_FIELDS, SETTING_LIMITS, parseSettingField, reviewSettingsPatch, type SettingField } from '../../data/gates.ts'
 import { Skeleton } from './StageBits.tsx'
 
-export type ReviewSettingsScope = { kind: 'project'; projectId: string; stage?: StageKey } | { kind: 'factory' }
+export type ReviewSettingsScope = { kind: 'project'; projectId: string; stage?: StageKey } | { kind: 'factory'; stage?: StageKey }
 
 type Load =
   | { status: 'loading' }
@@ -18,13 +18,14 @@ type Load =
  */
 export function ReviewSettings({ api, scope, onHidden }: { api: ChatApi; scope: ReviewSettingsScope; onHidden?: () => void }) {
   const [load, setLoad] = useState<Load>({ status: 'loading' })
-  const [values, setValues] = useState<Record<SettingField, string>>({ maxReviewCycles: '4', minRating: '94', maxBlockers: '0', maxMajor: '0' })
+  const [values, setValues] = useState<Record<SettingField, string>>({ maxReviewCycles: '4', minRating: '94', maxBlockers: '0', maxMajor: '0', maxFindings: '' })
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<SettingField, string>>>({})
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [attempt, setAttempt] = useState(0)
   const baseId = useId()
-  const scopeKey = scope.kind === 'project' ? JSON.stringify([scope.projectId, scope.stage ?? 'planning']) : 'factory'
+  const stage = scope.stage ?? 'planning'
+  const scopeKey = scope.kind === 'project' ? JSON.stringify([scope.projectId, stage]) : stage
   const isProject = scope.kind === 'project'
 
   const adopt = useCallback((settings: ResolvedStageSettings): void => {
@@ -34,6 +35,7 @@ export function ReviewSettings({ api, scope, onHidden }: { api: ChatApi; scope: 
       minRating: String(settings.minRating),
       maxBlockers: String(settings.maxBlockers),
       maxMajor: String(settings.maxMajor),
+      maxFindings: String(settings.processParams?.review?.maxFindings ?? ''),
     })
     setFieldErrors({})
   }, [])
@@ -43,16 +45,16 @@ export function ReviewSettings({ api, scope, onHidden }: { api: ChatApi; scope: 
     setLoad({ status: 'loading' })
     setNotice(null)
     const request = scope.kind === 'project'
-      ? api.getProjectStageSettings(scope.projectId, scope.stage ?? 'planning', controller.signal)
-      : api.getStageDefaults(controller.signal)
+      ? api.getProjectStageSettings(scope.projectId, stage, controller.signal)
+      : api.getFactoryStageSettings(stage, controller.signal)
     request.then((settings) => {
       if (!controller.signal.aborted) adopt(settings)
     }).catch((error: unknown) => {
       if (controller.signal.aborted || isAbortError(error)) return
-      if (error instanceof ApiError && error.status === 501) setLoad({ status: 'hidden' })
+      if (error instanceof ApiError && error.status === 501 && (isProject || stage === 'planning')) setLoad({ status: 'hidden' })
       else if (error instanceof ApiError && (error.code === 'STAGE_SETTINGS_NOT_CONFIGURED' || error.status === 503)) {
         setLoad({ status: 'disabled', message: 'Stage settings need the database, which isn’t configured on this server.' })
-      } else if (error instanceof ApiError && error.status === 404 && !isProject) setLoad({ status: 'hidden' })
+      } else if (error instanceof ApiError && error.status === 404 && !isProject && stage === 'planning') setLoad({ status: 'hidden' })
       else setLoad({ status: 'error', message: errorMessage(error) })
     })
     return () => controller.abort()
@@ -74,10 +76,14 @@ export function ReviewSettings({ api, scope, onHidden }: { api: ChatApi; scope: 
   }
 
   const saved = load.settings
-  const FIELDS: SettingField[] = ['maxReviewCycles', 'minRating', 'maxBlockers', 'maxMajor']
-  const parsed = Object.fromEntries(FIELDS.map((field) => [field, parseSettingField(field, values[field])])) as Record<SettingField, ReturnType<typeof parseSettingField>>
-  const valid = FIELDS.every((field) => 'value' in parsed[field])
-  const num = (field: SettingField): number => {
+  const FIELDS = ['maxReviewCycles', 'minRating', 'maxBlockers', 'maxMajor'] as const
+  type GateField = typeof FIELDS[number]
+  const savedCap = saved.processParams?.review?.maxFindings
+  const cap = savedCap === undefined && values.maxFindings.trim() === ''
+    ? { value: undefined } : parseSettingField('maxFindings', values.maxFindings)
+  const parsed = Object.fromEntries(FIELDS.map((field) => [field, parseSettingField(field, values[field])])) as Record<GateField, ReturnType<typeof parseSettingField>>
+  const valid = FIELDS.every((field) => 'value' in parsed[field]) && 'value' in cap
+  const num = (field: GateField): number => {
     const result = parsed[field]
     return 'value' in result ? result.value : saved[field]
   }
@@ -86,8 +92,10 @@ export function ReviewSettings({ api, scope, onHidden }: { api: ChatApi; scope: 
     minRating: num('minRating'),
     maxBlockers: num('maxBlockers'),
     maxMajor: num('maxMajor'),
+    ...('value' in cap && cap.value !== undefined ? { processParams: { review: { maxFindings: cap.value } } } : {}),
   }
-  const dirty = !valid || !sameSettings(draft, saved)
+  const patch = reviewSettingsPatch(saved, draft)
+  const dirty = !valid || Object.keys(patch).length > 0
   const setValue = (field: SettingField, value: string): void => {
     setValues((current) => ({ ...current, [field]: value }))
     setFieldErrors((current) => ({ ...current, [field]: undefined }))
@@ -95,20 +103,23 @@ export function ReviewSettings({ api, scope, onHidden }: { api: ChatApi; scope: 
 
   const save = async (): Promise<void> => {
     if (!valid) {
-      setFieldErrors(Object.fromEntries(FIELDS.flatMap((field) => {
+      setFieldErrors({ ...Object.fromEntries(FIELDS.flatMap((field) => {
         const result = parsed[field]
         return 'error' in result ? [[field, result.error]] : []
-      })))
+      })), ...('error' in cap ? { maxFindings: cap.error } : {}) })
       return
     }
     setSaving(true)
     setFieldErrors({})
     setNotice(null)
     try {
-      adopt(scope.kind === 'project' ? await api.updateProjectStageSettings(scope.projectId, scope.stage ?? 'planning', draft) : await api.updateStageDefaults(draft))
+      adopt(scope.kind === 'project' ? await api.updateProjectStageSettings(scope.projectId, stage, patch) : await api.updateFactoryStageSettings(stage, patch))
       setNotice('Saved. Applies to new runs.')
     } catch (error) {
-      const field = error instanceof ApiError ? SETTING_ERROR_FIELDS[error.code] : undefined
+      const field = error instanceof ApiError
+        ? error.code === 'INVALID_PROCESS_PARAMS' && error.message.startsWith('params.review.maxFindings:')
+          ? 'maxFindings' : SETTING_ERROR_FIELDS[error.code]
+        : undefined
       if (field !== undefined && error instanceof ApiError) setFieldErrors({ [field]: error.message })
       else if (error instanceof ApiError && error.code === 'INVALID_GATE_SETTING') setNotice(`Couldn’t save: ${error.message}`)
       else setNotice(`Couldn’t save: ${errorMessage(error)}`)
@@ -122,7 +133,7 @@ export function ReviewSettings({ api, scope, onHidden }: { api: ChatApi; scope: 
     setSaving(true)
     setNotice(null)
     try {
-      adopt(await api.resetProjectStageSettings(scope.projectId, scope.stage ?? 'planning'))
+      adopt(await api.resetProjectStageSettings(scope.projectId, stage))
       setNotice('Back to the Factory default. Applies to new runs.')
     } catch (error) {
       setNotice(`Couldn’t reset: ${errorMessage(error)}`)
@@ -145,6 +156,7 @@ export function ReviewSettings({ api, scope, onHidden }: { api: ChatApi; scope: 
             inputMode="numeric"
             min={min}
             max={max}
+            placeholder={key === 'maxFindings' && savedCap === undefined ? (stage === 'requirements' ? '12' : 'No cap') : undefined}
             value={values[key]}
             disabled={saving || disabled}
             aria-invalid={error !== undefined || undefined}
@@ -176,6 +188,11 @@ export function ReviewSettings({ api, scope, onHidden }: { api: ChatApi; scope: 
           {`Revision stops and you are asked for approval as soon as either happens: a review shows ≤ ${num('maxBlockers')} blocker${num('maxBlockers') === 1 ? '' : 's'}, ≤ ${num('maxMajor')} major issue${num('maxMajor') === 1 ? '' : 's'} and a rating of ${num('minRating')} or more, or ${num('maxReviewCycles')} iteration${num('maxReviewCycles') === 1 ? '' : 's'} have run.`}
         </p>
       </fieldset>
+
+      <div className="review-settings-grid">
+        {field('maxFindings', 'Maximum review findings', false, '1–12')}
+      </div>
+      <p className="field-hint">A review that exceeds this cap fails; findings aren’t discarded. {savedCap === undefined && (stage === 'requirements' ? 'The built-in cap is 12.' : 'Planning has no built-in cap.')}</p>
 
       <div className="review-settings-foot">
         <span className="chip review-source" data-source={isProject ? (saved.source ?? 'factory') : 'factory'}>

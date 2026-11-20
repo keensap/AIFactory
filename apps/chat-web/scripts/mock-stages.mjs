@@ -89,7 +89,9 @@ class StageError extends Error {
 
 /** projectId → { stages, checklist, documents, contents } */
 const workspaces = new Map()
-let factoryDefaults = { maxReviewCycles: 4, minRating: 94, maxBlockers: 0, maxMajor: 0 }
+const builtInDefaults = { maxReviewCycles: 4, minRating: 94, maxBlockers: 0, maxMajor: 0 }
+const factorySettings = new Map()
+const factoryFor = (stage) => factorySettings.get(stage) ?? builtInDefaults
 const projectSettings = new Map()
 /** runId → run (with reviews) */
 const runs = new Map()
@@ -531,8 +533,8 @@ Decision: approved
   return document
 }
 
-function validateSettings(body) {
-  const current = { ...factoryDefaults }
+function validateSettings(body, previous) {
+  const current = { ...previous }
   if (body?.gateAfterEachReview !== undefined) {
     if (typeof body.gateAfterEachReview !== 'boolean') throw new StageError(400, 'INVALID_GATE_SETTING', 'gateAfterEachReview must be a boolean')
     current.gateAfterEachReview = body.gateAfterEachReview
@@ -548,14 +550,26 @@ function validateSettings(body) {
     if (!Number.isInteger(body[key]) || body[key] < 0 || body[key] > max) throw new StageError(400, code, `${key} must be an integer from 0 to ${max}`)
     current[key] = body[key]
   }
+  if (body?.processParams?.review?.maxFindings !== undefined) {
+    const cap = body.processParams.review.maxFindings
+    if (!Number.isInteger(cap) || cap < 1 || cap > 12) {
+      throw new StageError(400, 'INVALID_PROCESS_PARAMS', 'params.review.maxFindings: expected an integer from 1 to 12')
+    }
+    current.processParams = { review: { maxFindings: cap } }
+  }
   return current
+}
+
+function effectiveSettings(projectId, stage) {
+  const own = projectSettings.get(`${projectId}:${stage}`)
+  const settings = { ...factoryFor(stage), ...own }
+  return { ...settings, source: own === undefined ? 'factory' : 'project' }
 }
 
 /** Pin the settings a run starts with; later changes never affect it. */
 function resolveSettings(projectId, stage, brief = '') {
-  const own = projectSettings.get(`${projectId}:${stage}`)
-  const base = own ?? factoryDefaults
-  return { gateAfterEachReview: brief.includes('GATE') ? true : base.gateAfterEachReview, maxReviewCycles: base.maxReviewCycles, minRating: base.minRating, maxBlockers: base.maxBlockers, maxMajor: base.maxMajor, source: own === undefined ? 'factory' : 'project' }
+  const base = effectiveSettings(projectId, stage)
+  return { ...base, gateAfterEachReview: brief.includes('GATE') ? true : base.gateAfterEachReview }
 }
 
 function reviewOutcome(run) {
@@ -1071,16 +1085,13 @@ export async function handleStageRoutes(request, response, url, projects, { send
       return true
     }
 
-    if (url.pathname === '/api/settings/stage-defaults') {
-      if (request.method === 'GET') {
-        sendJson(response, 200, { stageDefaults: factoryDefaults })
-        return true
-      }
-      if (request.method === 'PATCH') {
-        factoryDefaults = validateSettings(await readJson(request))
-        sendJson(response, 200, { stageDefaults: factoryDefaults })
-        return true
-      }
+    const legacyDefaults = url.pathname === '/api/settings/stage-defaults'
+    const factoryStage = legacyDefaults ? 'planning' : url.pathname.match(/^\/api\/settings\/stages\/(planning|requirements)$/)?.[1]
+    if (factoryStage !== undefined && ['GET', 'PATCH'].includes(request.method)) {
+      if (request.method === 'PATCH') factorySettings.set(factoryStage, validateSettings(await readJson(request), factoryFor(factoryStage)))
+      const settings = factoryFor(factoryStage)
+      sendJson(response, 200, legacyDefaults ? { stageDefaults: settings } : { stage: factoryStage, settings })
+      return true
     }
 
     if (request.method === 'GET' && url.pathname === '/api/sdlc/stages') {
@@ -1245,13 +1256,13 @@ export async function handleStageRoutes(request, response, url, projects, { send
       projectOf(projectId)
       if (!Object.hasOwn(RUNTIMES, segments[4])) throw new StageError(501, 'STAGE_SETTINGS_NOT_IMPLEMENTED', 'stage settings are not implemented')
       const settingsKey = `${projectId}:${segments[4]}`
-      const resolved = () => ({ ...(projectSettings.get(settingsKey) ?? factoryDefaults), source: projectSettings.has(settingsKey) ? 'project' : 'factory' })
+      const resolved = () => effectiveSettings(projectId, segments[4])
       if (request.method === 'GET') {
         sendJson(response, 200, { settings: resolved() })
         return true
       }
       if (request.method === 'PATCH') {
-        projectSettings.set(settingsKey, validateSettings(await readJson(request)))
+        projectSettings.set(settingsKey, validateSettings(await readJson(request), projectSettings.get(settingsKey)))
         sendJson(response, 200, { settings: resolved() })
         return true
       }

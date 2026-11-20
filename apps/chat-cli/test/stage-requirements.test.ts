@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { normalizeRevisionFindings } from '../src/processes/revision.ts'
 import { ProjectService } from '../src/projects.ts'
 import { SettingsService } from '../src/settings.ts'
 import { StageEngine, type StageRole } from '../src/stage-runtime.ts'
@@ -457,7 +458,7 @@ test('the revision prompt puts the findings first and forbids scope growth', () 
   const context = { input: 'brief', priorStages: [], documents: [], attachments: [], baselineEvidence: [] } as unknown as RevisionArgs[1]
   const project = { name: 'Shop' } as RevisionArgs[0]
   const findings = [{ id: 'F-001', severity: 'major', section: '3. Functional requirements', finding: 'FR-001 is ambiguous', required_change: 'name the customer' }]
-  const prompt = definition.prompts.revision(project, context, 'analysis', COVERED_REQUIREMENTS, findings)
+  const prompt = definition.prompts.revision(project, context, 'analysis', COVERED_REQUIREMENTS, normalizeRevisionFindings(findings))
 
   const findingsAt = prompt.indexOf('## Reviewer findings to fix')
   const documentAt = prompt.indexOf('## Current document')

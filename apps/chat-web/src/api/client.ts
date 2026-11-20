@@ -360,9 +360,21 @@ export class ChatApi {
     return { ...normalizeStageSettings(body.stageDefaults), source: null }
   }
 
-  async updateStageDefaults(settings: PlanningStageSettings, signal?: AbortSignal): Promise<ResolvedStageSettings> {
+  async updateStageDefaults(settings: Partial<PlanningStageSettings>, signal?: AbortSignal): Promise<ResolvedStageSettings> {
     const body = await this.request<{ stageDefaults?: unknown }>('/api/settings/stage-defaults', json('PATCH', settings, signal))
     return { ...normalizeStageSettings(body.stageDefaults), source: null }
+  }
+
+  async getFactoryStageSettings(stage: StageKey, signal?: AbortSignal): Promise<ResolvedStageSettings> {
+    if (stage === 'planning') return this.getStageDefaults(signal)
+    const body = await this.request<{ settings?: unknown }>(`/api/settings/stages/${stage}`, { method: 'GET', signal })
+    return { ...normalizeStageSettings(body.settings), source: null }
+  }
+
+  async updateFactoryStageSettings(stage: StageKey, settings: Partial<PlanningStageSettings>, signal?: AbortSignal): Promise<ResolvedStageSettings> {
+    if (stage === 'planning') return this.updateStageDefaults(settings, signal)
+    const body = await this.request<{ settings?: unknown }>(`/api/settings/stages/${stage}`, json('PATCH', settings, signal))
+    return { ...normalizeStageSettings(body.settings), source: null }
   }
 
   async getProjectStageSettings(projectId: string, stage: StageKey, signal?: AbortSignal): Promise<ResolvedStageSettings> {
@@ -370,7 +382,7 @@ export class ChatApi {
     return normalizeProjectStageSettings(body)
   }
 
-  async updateProjectStageSettings(projectId: string, stage: StageKey, settings: PlanningStageSettings, signal?: AbortSignal): Promise<ResolvedStageSettings> {
+  async updateProjectStageSettings(projectId: string, stage: StageKey, settings: Partial<PlanningStageSettings>, signal?: AbortSignal): Promise<ResolvedStageSettings> {
     const body = await this.request<{ settings?: unknown; source?: unknown }>(`/api/projects/${encodeURIComponent(projectId)}/stages/${stage}/settings`, json('PATCH', settings, signal))
     return normalizeProjectStageSettings(body)
   }

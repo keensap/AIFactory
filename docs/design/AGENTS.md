@@ -1,13 +1,14 @@
 # Named Agents
 
-**Status:** implemented 2026-11-17  
-**Scope:** definitions, assignments and composition for the planning stage's three processes
+**Status:** implemented, including the [architecture remediation](ARCHITECTURE-REMEDIATION.md)
+
+**Scope:** definitions, assignments and composition for the Planning and Requirements processes
 
 ---
 
 ## 1. What an agent is
 
-A named agent is a **composition**: a persona, a tool allowlist, skills and a model. It is assigned to a **stage process** — `planning` runs `analyzer`, `author` and `reviewer`.
+A named agent is a **composition**: a persona, a tool allowlist, skills and a model. It is assigned to a **stage process** — Planning and Requirements both run `analyzer`, `author` and `reviewer`. Revision uses the author.
 
 An agent may choose a **model**, never a **provider**:
 
@@ -17,9 +18,9 @@ global target: provider + model    ← the only place a provider is chosen
        └─ agent: model only        ← must live on the Factory provider
 ```
 
-One provider means one credential stays in force. The harness patch declares the agent's model on the Factory's own route, so no second provider can be reached.
+The primary attempt declares the agent's model on the Factory provider's route, using that provider's credential. A configured Factory fallback can still use its own provider and model.
 
-> **Correction (2026-11-17 review).** An earlier version said "one breaker and one fallback path" also stay in force. Stage runs have **neither**: the breaker and fallback chain exist only for direct model calls ([AR-03](ARCHITECTURE-REMEDIATION.md#ar-03)).
+The agent cannot choose a separate provider or fallback chain. The run's bound model route supplies both the primary and fallback candidates, and each attempt uses the provider breaker. See [AR-03](ARCHITECTURE-REMEDIATION.md#ar-03).
 
 ## 2. Why not harness presets
 
@@ -34,12 +35,12 @@ Presets bind from the session **header**, which `dsh --profile headless` never s
 |---|---|---|
 | Persona / rules | `system-prompt.personaPrefix` | marker appeared in the captured system prompt |
 | Model | `agent-default-model` + the model on the Factory route | request used `author-model` vs `reviewer-model` on one provider |
-| Tools | `{ id: tool-…, disabled: true }` for every tool not allowed | `bash` and `web` disappeared from the tool list — but see the defect below |
+| Tools | `{ id: tool-…, disabled: true }` for every tool not allowed | `bash` and `web` disappeared from the tool list |
 | Skills | `skill-filesystem.customSkillDirs` with `includeDefaultRoots: false` | a `SKILL.md` bundle was discovered |
 
 So the patch **is** the per-agent composition, and no preset is involved.
 
-> **Known defect — the allowlist fails open.** "Every tool not allowed" means every row in a hardcoded list of 15. The headless profile has 19 `tool-*` rows, so `tool-subagent-fork` (a model-facing tool) stays enabled for an agent restricted to `["tool-fs"]`, and any tool a harness upgrade adds is granted silently ([AR-05](ARCHITECTURE-REMEDIATION.md#ar-05)). Separately, an allowlist that omits `tool-skill` makes the agent's skills unreachable without any error ([AR-10](ARCHITECTURE-REMEDIATION.md#ar-10)).
+Restricted agents fail closed if the harness profile contains an unclassified tool row (`AGENT_TOOLSET_UNVERIFIED`). An agent with skills and a nonempty allowlist must include `tool-skill` (`AGENT_SKILLS_NEED_SKILL_TOOL`).
 
 ## 3. Data
 
@@ -56,30 +57,27 @@ agent_definitions (
 )
 
 agent_assignments (
-  scope_key TEXT,                        -- 'factory' or a project id (no NULL key semantics)
+  project_id UUID REFERENCES projects ON DELETE CASCADE, -- NULL for Factory default
   stage TEXT, process TEXT,
-  agent_id UUID REFERENCES agent_definitions ON DELETE CASCADE,
-  PRIMARY KEY (scope_key, stage, process)
+  agent_id UUID REFERENCES agent_definitions ON DELETE CASCADE
 )
 ```
 
-`scope_key` avoids `NULL`-in-primary-key problems and keeps the factory default and project overrides in one table. Deleting an agent removes its assignments.
+Partial unique indexes enforce one Factory assignment per stage/process and one per project/stage/process. Deleting an agent or project removes its assignments.
 
 ## 4. Resolution
 
 For a stage process, the **project override** wins over the **Factory default**; with neither, the process runs with no agent (today's behaviour). A disabled agent is skipped rather than failing the run.
 
-A run snapshots nothing about agents: each role resolves its agent when it starts, and `role_start` records `agent`, `agentId` and the effective `model`.
+New runs snapshot the model target and selected agents at creation, including unassigned roles. Editing assignments or agent definitions does not change a bound run. An administrator can explicitly adopt current model and agent settings with `POST /api/stage-runs/:runId/rebind`. Legacy runs without bindings may resolve agents at role start.
 
-> **Known defects:**
-> - **Usage is mis-attributed.** `role_start` names the agent's model, but every usage event of that role is stamped with the Factory model, price and context window, so cost and context figures are wrong whenever an agent overrides the model ([AR-02](ARCHITECTURE-REMEDIATION.md#ar-02)).
-> - **Agents can change inside a run.** Because each role resolves its agent when it starts, changing an assignment while a run is paused changes the agent for that run's later revisions ([AR-06](ARCHITECTURE-REMEDIATION.md#ar-06)).
+`role_start` records the effective primary model and, when assigned, `agent` and `agentId`. Usage is attributed to the model that actually ran, including fallback attempts. Prompt bundles and process parameters are independent of named agents: agent patches provide persona, model, tools and skills; stage role specs provide the task and contract. `role_start` may also carry prompt/spec audit metadata; see [Stage Runtime](STAGE-RUNTIME.md).
 
 ## 5. Composition at run time
 
 For each role the runtime:
 
-1. resolves the agent (if any) for `planning/<role>`;
+1. uses the bound agent (if any) for the stage and role;
 2. materialises skills as `<project>/.aifactory/agents/<agentId>/skills/<skill>/SKILL.md`;
 3. writes a patch with persona, `skill-filesystem` roots, disabled tools and the agent's model;
 4. launches the role with `pin.harness(cwd, timeout, agentPatch)` — the agent patch is applied **after** the model patch, so its model wins;
@@ -105,20 +103,13 @@ Assignments carry `source`: `project`, `factory` or `none`.
 
 ## 7. Testing a composition
 
-`POST /api/agents/:id/test` runs the real materialiser and starts a harness with the agent patch and a one-word prompt. It separates two questions that are easy to conflate:
-
-- **Was the composition accepted?** (`configAccepted`) — a bad plugin row or patch shape is meant to fail here. **Known defect:** it is decided by matching words such as `model` and `provider` in the error message, which most configuration errors contain, so broken compositions are often reported as accepted. The structural offline probe replaces it ([AR-08](ARCHITECTURE-REMEDIATION.md#ar-08)).
-- **Did the model answer?** (`model`) — needs credentials, so a `MODEL_CALL_FAILED` or `MODEL_NOT_CONFIGURED` is reported without failing the first answer.
-
-A config-file validation is not enough: `dsh --dump-config` does not activate plugins, and the prototype showed a preset with a nonexistent child passing it. Only a boot proves the composition loads.
+`POST /api/agents/:id/test` defaults to an offline structural probe. It boots the harness with a local stand-in endpoint, checks that a request reached it, and verifies the configured persona, model, tools and skills where applicable. `?mode=online` uses the real target and reports boot/config acceptance separately from model success. A config dump alone does not verify plugin activation.
 
 ## 8. Limits worth knowing
 
-- Only `planning` declares processes; other stages return `400 NO_PROCESSES`.
-- Editing an agent affects the **next role that starts**, including later roles of a run already in flight. It does not affect a role already running. Fixing agents per run is planned ([AR-06](ARCHITECTURE-REMEDIATION.md#ar-06)).
-- Assignments are not removed when their project is deleted ([AR-09](ARCHITECTURE-REMEDIATION.md#ar-09)).
-- Skills are files on disk by design (the harness discovers them); the database holds the definition and the run materialises it.
-- The persona is process-wide inside the harness, which is correct for one-role-per-process. Running several roles in one process would break that assumption — do not "optimise" the runner without revisiting it.
+- Planning and Requirements declare role processes; stages without processes return `400 NO_PROCESSES`.
+- Skills are stored in the definition and materialised as files for harness discovery.
+- Persona is process-wide inside the harness. Running several roles in one process would break that assumption.
 
 ## 9. Tests
 
